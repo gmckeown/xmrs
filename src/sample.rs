@@ -5,7 +5,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 /// How to play sample
-#[derive(Default, Serialize, Deserialize, Copy, Clone, IntoPrimitive, TryFromPrimitive, Debug)]
+#[derive(Default, Serialize, Deserialize, Copy, Clone, IntoPrimitive, TryFromPrimitive, Debug, PartialEq)]
 #[repr(u8)]
 pub enum LoopType {
     #[default]
@@ -153,13 +153,12 @@ impl Sample {
     /// Returns the real position in the sample
     /// The calling function must save the real position at each step to avoid problems at the end of the sustain
     pub fn meta_seek(&self, pos: usize, sustain: bool) -> usize {
-        if sustain && self.sustain_loop_length != 0 {
+        if sustain && self.sustain_loop_flag != LoopType::No {
             self.calculate_loop(pos, self.sustain_loop_start as usize, self.sustain_loop_length as usize, self.sustain_loop_flag)
         } else {
             self.calculate_loop(pos, self.loop_start as usize, self.loop_length as usize, self.loop_flag)
         }
     }
-
 
     /// return sample size (8 or 16 bits)
     pub fn bits(&self) -> u8 {
