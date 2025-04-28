@@ -151,7 +151,7 @@ impl Sample {
     }
 
     /// Returns the real position in the sample
-    /// The calling function must save the real position at each step to avoid problems at the end of the sustain
+    /// The calling function must save the real position at sustain end to avoid problems
     pub fn meta_seek(&self, pos: usize, sustain: bool) -> usize {
         if sustain && self.sustain_loop_flag != LoopType::No {
             self.calculate_loop(pos, self.sustain_loop_start as usize, self.sustain_loop_length as usize, self.sustain_loop_flag)

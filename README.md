@@ -24,6 +24,8 @@ Test with `cargo run --no-default-features --features=demo --example xmrs -- --h
 
 micromath is used by default in no_std. If you prefer libm, use `cargo build --no-default-features --features=libm --release`.
 
+if you want to use import, add `--features=import`.
+
 ## About std
 
 if you want to use std feature use `cargo build --no-default-features --features=std --release`

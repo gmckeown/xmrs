@@ -43,9 +43,7 @@ So the last call to the pattern will be the winner.
 use alloc::vec;
 use alloc::vec::Vec;
 
-#[cfg(feature = "import_it")]
 use crate::import::it::it_effect::ItEffect;
-#[cfg(feature = "import_xm")]
 use crate::import::xm::mod_xm_effect::ModXmEffect;
 
 use super::patternslot::PatternSlot;
@@ -613,16 +611,13 @@ impl ImportMemory {
         let mut source: Vec<Vec<Vec<TrackImportUnit>>> = patterns
             .iter()
             .map(|pattern: &Vec<Vec<PatternSlot>>| match mem {
-                #[cfg(any(feature = "import_amiga", feature = "import_xm"))]
                 MemoryType::Mod | MemoryType::Xm => {
                     ModXmEffect::mod_xm_unpack_pattern(freq_type, &pattern)
                 }
-                #[cfg(feature = "import_s3m")]
                 MemoryType::S3m => {
                     // TODO: rewrite `s3m_effect.rs` to gain overall consistency in the code
                     ModXmEffect::mod_xm_unpack_pattern(freq_type, &pattern)
                 }
-                #[cfg(feature = "import_it")]
                 MemoryType::It => ItEffect::it_unpack_pattern(freq_type, &pattern),
                 // _ => todo!(),
             })

@@ -1,6 +1,5 @@
 /.vscode
 /target
-/Cargo.lock
 /*.mod
 /*.s3m
 /*.sid
