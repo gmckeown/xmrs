@@ -22,4 +22,5 @@ pub mod it;
 pub mod s3m;
 
 /// Load historical SID files
+#[cfg(feature = "import_sid")]
 pub mod sid;

@@ -34,7 +34,7 @@ micromath = ["dep:micromath"]
 # import features
 
 import = []
-import_sid = []
+import_sid = ["import"]
 
 # xorshift rng features (rand32 is always enabled)
 

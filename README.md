@@ -14,7 +14,7 @@ Suppported files:
 
 To edit data, use `Module` struct.
 
-You can serialize `Module` using serde (see `std` feature).
+You can serialize `Module` using serde or bincode2 (see `std` feature).
 
 ## How to load historical tracker files
 
@@ -22,11 +22,14 @@ Test with `cargo run --no-default-features --features=demo --example xmrs -- --h
 
 ## About no_std
 
-micromath is used by default in no_std. If you prefer libm, use `cargo build --no-default-features --features=libm --release`.
+[micromath](https://crates.io/crates/micromath) is used by default in [no_std](https://docs.rust-embedded.org/book/intro/no-std.html). If you prefer [libm](https://crates.io/crates/libm), use `cargo build --no-default-features --features=libm --release`.
 
-if you want to use import, add `--features=import`.
+If you want to use import, add `--features=import`.
+
+If you want to optimize for memory or space in the embedded context, don't use the import feature, but prefer to prepare a serialized version with [bincode2](https://crates.io/crates/bincode2) and possibly [flate2-rs](https://crates.io/crates/flate2).
 
 ## About std
 
-if you want to use std feature use `cargo build --no-default-features --features=std --release`
+If you want to use [std](https://doc.rust-lang.org/std/) feature use `cargo build --no-default-features --features=std --release`
 
+If you'd like to post-process in another language (but why use another language when you're lucky enough to have [rust]()!?) don't forget that, after loading, you can serialize in [json](https://crates.io/crates/serde_json) with [serde](https://crates.io/crates/serde).
