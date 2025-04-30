@@ -176,6 +176,7 @@ impl InstrHelper {
 
         let mut instr = InstrDefault::default();
         instr.volume_envelope = volume_envelope;
+        instr.sample_for_pitch = [Some(0); 120];
         //FIXME: instr.volume_fadeout = 1.0;
 
         //FIXME: instr.sample = ...;

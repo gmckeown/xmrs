@@ -562,6 +562,7 @@ impl S3mModule {
                     // Create InstrDefault
                     let mut instr_def = InstrDefault::default();
                     instr_def.sample.push(Some(sample));
+                    instr_def.sample_for_pitch = [Some(0); 120];
 
                     // Create Instrument
                     let mut instr = Instrument::default();
