@@ -26,7 +26,7 @@ Test with `cargo run --no-default-features --features=demo --example xmrs -- --h
 
 If you want to use import, add `--features=import`.
 
-If you want to optimize for memory or space in the embedded context, don't use the import feature, but prefer to prepare a serialized version with [bincode2](https://crates.io/crates/bincode2) and possibly [flate2-rs](https://crates.io/crates/flate2).
+If you want to optimize for memory or space in the embedded context, don't use the import feature, but prefer to prepare a serialized version with [bincode](https://crates.io/crates/bincode) with `alloc` feature and possibly [flate2-rs](https://crates.io/crates/flate2).
 
 ## About std
 
