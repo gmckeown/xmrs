@@ -90,14 +90,14 @@ const ARRAY_SIZE: usize = 25;
 /// For compatibility between formats and to compensate for special case difficulties with memory management, a best effort analysis is performed during import to associate the exact value with each effect.
 // Horrible hack to store values...use from left to right. First usable type wins.
 pub struct ImportMemory {
-    global: [(f32, f32, usize, usize); 64], // s3m way
+    global: [(f32, f32, usize, usize); ARRAY_SIZE], // s3m way: shared across all channels
     channel: [[(f32, f32, usize, usize); ARRAY_SIZE]; 64], // mod, xm, it way
 }
 
 impl Default for ImportMemory {
     fn default() -> Self {
         Self {
-            global: [(0.0, 0.0, 0, 0); 64],
+            global: [(0.0, 0.0, 0, 0); ARRAY_SIZE],
             channel: [[(0.0, 0.0, 0, 0); ARRAY_SIZE]; 64],
         }
     }
@@ -127,15 +127,15 @@ impl ImportMemory {
                         }
                         MemoryType::S3m => {
                             if *a == 0 {
-                                *a = self.global[index].2
+                                *a = self.global[ARPEGGIO].2
                             } else {
-                                self.global[index].2 = *a;
+                                self.global[ARPEGGIO].2 = *a;
                             }
                             // second arg
                             if *b == 0 {
-                                *b = self.global[index].3
+                                *b = self.global[ARPEGGIO].3
                             } else {
-                                self.global[index].3 = *b;
+                                self.global[ARPEGGIO].3 = *b;
                             }
                         }
                     }
@@ -191,9 +191,9 @@ impl ImportMemory {
                         }
                         MemoryType::S3m => {
                             if *a == 0.0 {
-                                *a = self.global[index].0
+                                *a = self.global[PORTAMENTO_UP].0
                             } else {
-                                self.global[index].0 = *a;
+                                self.global[PORTAMENTO_UP].0 = *a;
                             }
                         }
                     }
@@ -213,9 +213,9 @@ impl ImportMemory {
                         }
                         MemoryType::S3m => {
                             if *a == 0.0 {
-                                *a = self.global[index].0
+                                *a = self.global[PORTAMENTO_DOWN].0
                             } else {
-                                self.global[index].0 = *a;
+                                self.global[PORTAMENTO_DOWN].0 = *a;
                             }
                         }
                     }
@@ -235,9 +235,9 @@ impl ImportMemory {
                         }
                         MemoryType::S3m => {
                             if *a == 0.0 {
-                                *a = self.global[index].0
+                                *a = self.global[PORTAMENTO_FINE_UP].0
                             } else {
-                                self.global[index].0 = *a;
+                                self.global[PORTAMENTO_FINE_UP].0 = *a;
                             }
                         }
                     }
@@ -257,9 +257,9 @@ impl ImportMemory {
                         }
                         MemoryType::S3m => {
                             if *a == 0.0 {
-                                *a = self.global[index].0
+                                *a = self.global[PORTAMENTO_FINE_DOWN].0
                             } else {
-                                self.global[index].0 = *a;
+                                self.global[PORTAMENTO_FINE_DOWN].0 = *a;
                             }
                         }
                     }
@@ -279,9 +279,9 @@ impl ImportMemory {
                         }
                         MemoryType::S3m => {
                             if *a == 0.0 {
-                                *a = self.global[index].0
+                                *a = self.global[PORTAMENTO_FINE_EXTRA_UP].0
                             } else {
-                                self.global[index].0 = *a;
+                                self.global[PORTAMENTO_FINE_EXTRA_UP].0 = *a;
                             }
                         }
                     }
@@ -301,9 +301,9 @@ impl ImportMemory {
                         }
                         MemoryType::S3m => {
                             if *a == 0.0 {
-                                *a = self.global[index].0
+                                *a = self.global[PORTAMENTO_FINE_EXTRA_DOWN].0
                             } else {
-                                self.global[index].0 = *a;
+                                self.global[PORTAMENTO_FINE_EXTRA_DOWN].0 = *a;
                             }
                         }
                     }
@@ -328,9 +328,9 @@ impl ImportMemory {
                         }
                         MemoryType::S3m => {
                             if *speed == 0 {
-                                *speed = self.global[index].2
+                                *speed = self.global[NOTE_RETRIG].2
                             } else {
-                                self.global[index].2 = *speed;
+                                self.global[NOTE_RETRIG].2 = *speed;
                             }
                             if *vol == 0 {
                                 *vol = self.channel[index][NOTE_RETRIG].3
@@ -366,14 +366,14 @@ impl ImportMemory {
                     }
                     MemoryType::S3m => {
                         if *a == 0.0 {
-                            *a = self.global[index].0
+                            *a = self.global[TREMOLO].0
                         } else {
-                            self.global[index].0 = *a;
+                            self.global[TREMOLO].0 = *a;
                         }
                         if *b == 0.0 {
-                            *b = self.global[index].1
+                            *b = self.global[TREMOLO].1
                         } else {
-                            self.global[index].1 = *b;
+                            self.global[TREMOLO].1 = *b;
                         }
                     }
                 },
@@ -397,14 +397,14 @@ impl ImportMemory {
                         }
                         MemoryType::S3m => {
                             if *a == 0 {
-                                *a = self.global[index].2
+                                *a = self.global[TREMOR].2
                             } else {
-                                self.global[index].2 = *a;
+                                self.global[TREMOR].2 = *a;
                             }
                             if *b == 0 {
-                                *b = self.global[index].3
+                                *b = self.global[TREMOR].3
                             } else {
-                                self.global[index].3 = *b;
+                                self.global[TREMOR].3 = *b;
                             }
                         }
                     }
@@ -479,9 +479,9 @@ impl ImportMemory {
                         }
                         MemoryType::S3m => {
                             if *a == 0.0 {
-                                *a = self.global[index].0
+                                *a = self.global[PITCH_VOLUME_SLIDE_0].0
                             } else {
-                                self.global[index].0 = *a;
+                                self.global[PITCH_VOLUME_SLIDE_0].0 = *a;
                             }
                         }
                     }
@@ -501,9 +501,9 @@ impl ImportMemory {
                         }
                         MemoryType::S3m => {
                             if *a == 0.0 {
-                                *a = self.global[index].0
+                                *a = self.global[PITCH_VOLUME_SLIDE_N].0
                             } else {
-                                self.global[index].0 = *a;
+                                self.global[PITCH_VOLUME_SLIDE_N].0 = *a;
                             }
                         }
                     }
@@ -627,11 +627,10 @@ impl ImportMemory {
         // to have different pre-memory configurations.
         // We "play" the music in order and it will remain a best effort.
         order.iter().flat_map(|inner| inner.iter()).for_each(|o| {
-            let pattern = if *o < source.len() {
-                &mut source[*o]
-            } else {
-                &mut vec![]
-            };
+            if *o >= source.len() {
+                return;
+            }
+            let pattern = &mut source[*o];
             pattern.iter_mut().for_each(|row| {
                 row.iter_mut()
                     .enumerate()
@@ -665,17 +664,12 @@ impl ImportMemory {
 
         /* third step: add effects */
         for ol in order.iter().flat_map(|inner| inner.iter()) {
-            let pattern_s = if *ol < source.len() {
-                &source[*ol]
-            } else {
-                &mut vec![]
-            };
+            if *ol >= source.len() || *ol >= dest.len() {
+                continue;
+            }
 
-            let pattern_d = if *ol < dest.len() {
-                &mut dest[*ol]
-            } else {
-                &mut vec![]
-            };
+            let pattern_s = &source[*ol];
+            let pattern_d = &mut dest[*ol];
 
             for (index_row, row_s) in pattern_s.iter().enumerate() {
                 let row_d = &mut pattern_d[index_row];
