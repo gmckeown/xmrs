@@ -184,6 +184,7 @@ impl S3mEffect {
             10 => n.effect_type = 0x00, // J
             12 => n.effect_type = 0x05, // L
             15 => n.effect_type = 0x09, // O
+            16 => n.effect_type = 0x19, // P - Panning slide (same format as XM Pxy)
             17 => n.effect_type = 0x1B, // Q
             18 => n.effect_type = 0x07, // R
             19 => {
@@ -257,6 +258,10 @@ impl S3mEffect {
             21 => {
                 // U - Fine vibrato (same as H but 4x finer depth)
                 n.effect_type = 0x04;
+            }
+            23 => {
+                // W - Global volume slide (same format as XM Hxy / 0x11)
+                n.effect_type = 0x11;
             }
             24 => {
                 // X - Set panning (0x00=left, 0x80=center, 0xFF=right in S3M 3.20+)
