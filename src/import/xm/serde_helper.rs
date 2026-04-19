@@ -45,11 +45,6 @@ macro_rules! make_serialize_string_fn {
                 count += width;
                 i += width;
             }
-            if i < bytes.len() && utf8_char_width(bytes[i]) > 1 {
-                while i > 0 && utf8_char_width(bytes[i - 1]) > 1 {
-                    i -= 1;
-                }
-            }
             let mut array = [0u8; $limit];
             array[..i].copy_from_slice(&bytes[..i]);
             array.serialize(serializer)

@@ -341,12 +341,17 @@ impl ItModule {
 
         if self.header.is_instruments_used() {
             // Prepare Instrument then add samples
-            for (index, i) in self.instruments.iter().enumerate() {
+            for (_index, i) in self.instruments.iter().enumerate() {
                 let mut instrument = i.prepare_instrument();
                 if let InstrumentType::Default(instrdef) = &mut instrument.instr_type {
-                    if vibratos.len() > index {
-                        instrdef.vibrato = vibratos[index];
+                    // Find first referenced sample and use its vibrato
+                    let first_sample_idx = instrdef.sample_for_pitch.iter().find_map(|s| *s);
+                    if let Some(si) = first_sample_idx {
+                        if si < vibratos.len() {
+                            instrdef.vibrato = vibratos[si];
+                        }
                     }
+
                     for i2 in instrdef.sample_for_pitch {
                         if let Some(i3) = i2 {
                             // I must add i3 sample to instrdef

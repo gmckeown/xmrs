@@ -102,7 +102,7 @@ impl PatternSlot {
     */
     pub fn deserialize(input: u32) -> Self {
         let period = ((input >> 16) & 0x0FFF) as u16;
-        let instrument_high = ((input >> 32 - 4) & 0x000F) as u8;
+        let instrument_high = ((input >> (32 - 4)) & 0x000F) as u8;
         let instrument_low = ((input >> 12) & 0x000F) as u8;
         let instrument = (instrument_high << 4) | instrument_low;
         let effect = ((input >> 8) & 0x000F) as u8;

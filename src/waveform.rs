@@ -35,16 +35,16 @@ impl Waveform {
             }
             Waveform::TranslatedRampUp => {
                 if step < 0.5 {
-                    0.5 * step
+                    0.5 + step
                 } else {
-                    0.5 * step + 0.5
+                    step - 0.5
                 }
             }
             Waveform::TranslatedRampDown => {
                 if step < 0.5 {
-                    1.0 - 0.5 * step
+                    0.5 - step
                 } else {
-                    -0.5 * step + 0.5
+                    1.5 - step
                 }
             }
             Waveform::Sine => -(core::f32::consts::TAU * step).sin(),
