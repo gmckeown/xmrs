@@ -219,3 +219,40 @@ impl Iterator for XorShift64 {
         Some(self.state)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn xorshift32_default_is_not_zero() {
+        let rng = XorShift32::default();
+        assert_ne!(rng.get_seed(), 0, "Default seed must not be zero");
+    }
+
+    #[test]
+    fn xorshift32_default_produces_varied_output() {
+        let mut rng = XorShift32::default();
+        let a = rng.next().unwrap();
+        let b = rng.next().unwrap();
+        let c = rng.next().unwrap();
+        assert_ne!(a, b);
+        assert_ne!(b, c);
+        assert_ne!(a, 0);
+    }
+
+    #[test]
+    fn xorshift32_next_f32_in_range() {
+        let mut rng = XorShift32::default();
+        for _ in 0..100 {
+            let v = rng.next_f32();
+            assert!(v >= 0.0 && v <= 1.0, "next_f32() = {} out of range", v);
+        }
+    }
+
+    #[test]
+    #[should_panic]
+    fn xorshift32_zero_seed_panics() {
+        XorShift32::new(Some(0));
+    }
+}

@@ -76,3 +76,68 @@ pub fn sample16_to_delta(sample: &[i16]) -> Vec<u16> {
     }
     delta
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn delta8_roundtrip() {
+        let original: Vec<i8> = vec![0, 10, 20, -5, -128, 127, 0];
+        let delta = sample8_to_delta(&original);
+        let recovered = delta8_to_sample(delta);
+        assert_eq!(original, recovered);
+    }
+
+    #[test]
+    fn delta16_roundtrip() {
+        let original: Vec<i16> = vec![0, 1000, -1000, 32767, -32768, 0];
+        let delta = sample16_to_delta(&original);
+        let recovered = delta16_to_sample(delta);
+        assert_eq!(original, recovered);
+    }
+
+    #[test]
+    fn delta8_empty() {
+        assert!(delta8_to_sample(vec![]).is_empty());
+        assert!(sample8_to_delta(&[]).is_empty());
+    }
+
+    #[test]
+    fn delta16_empty() {
+        assert!(delta16_to_sample(vec![]).is_empty());
+        assert!(sample16_to_delta(&[]).is_empty());
+    }
+
+    #[test]
+    fn delta8_single_element() {
+        let original: Vec<i8> = vec![42];
+        let delta = sample8_to_delta(&original);
+        let recovered = delta8_to_sample(delta);
+        assert_eq!(original, recovered);
+    }
+
+    #[test]
+    fn delta16_single_element() {
+        let original: Vec<i16> = vec![-12345];
+        let delta = sample16_to_delta(&original);
+        let recovered = delta16_to_sample(delta);
+        assert_eq!(original, recovered);
+    }
+
+    #[test]
+    fn u8_u16_roundtrip() {
+        let original: Vec<u16> = vec![0x0102, 0xFFFE, 0x0000, 0x8000];
+        let bytes = vec_u16_to_u8_slice(original.clone());
+        let recovered = u8_slice_to_vec_u16(&bytes);
+        assert_eq!(original, recovered);
+    }
+
+    #[test]
+    fn u8_u16_odd_length() {
+        // Odd-length slice should drop the last byte
+        let bytes = vec![1, 2, 3];
+        let result = u8_slice_to_vec_u16(&bytes);
+        assert_eq!(result.len(), 1);
+    }
+}

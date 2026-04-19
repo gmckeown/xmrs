@@ -192,3 +192,77 @@ impl Sample {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_sample(len: usize, loop_flag: LoopType, loop_start: u32, loop_length: u32) -> Sample {
+        Sample {
+            name: alloc::string::String::new(),
+            relative_pitch: 0,
+            finetune: 0.0,
+            volume: 1.0,
+            panning: 0.5,
+            loop_flag,
+            loop_start,
+            loop_length,
+            sustain_loop_flag: LoopType::No,
+            sustain_loop_start: 0,
+            sustain_loop_length: 0,
+            data: Some(SampleDataType::Mono8(alloc::vec![0i8; len])),
+        }
+    }
+
+    #[test]
+    fn empty_sample_no_panic() {
+        let s = make_sample(0, LoopType::No, 0, 0);
+        assert_eq!(s.meta_seek(0, false), 0);
+        assert_eq!(s.meta_seek(100, false), 0);
+    }
+
+    #[test]
+    fn empty_sample_forward_loop_no_panic() {
+        let s = make_sample(0, LoopType::Forward, 0, 0);
+        assert_eq!(s.meta_seek(0, false), 0);
+    }
+
+    #[test]
+    fn empty_sample_pingpong_no_panic() {
+        let s = make_sample(0, LoopType::PingPong, 0, 0);
+        assert_eq!(s.meta_seek(0, false), 0);
+    }
+
+    #[test]
+    fn no_loop_clamps_to_end() {
+        let s = make_sample(10, LoopType::No, 0, 0);
+        assert_eq!(s.meta_seek(5, false), 5);
+        assert_eq!(s.meta_seek(9, false), 9);
+        assert_eq!(s.meta_seek(10, false), 9);
+        assert_eq!(s.meta_seek(100, false), 9);
+    }
+
+    #[test]
+    fn forward_loop() {
+        let s = make_sample(10, LoopType::Forward, 4, 4);
+        assert_eq!(s.meta_seek(3, false), 3);
+        assert_eq!(s.meta_seek(7, false), 7);
+        assert_eq!(s.meta_seek(8, false), 4);
+        assert_eq!(s.meta_seek(9, false), 5);
+    }
+
+    #[test]
+    fn pingpong_loop() {
+        let s = make_sample(10, LoopType::PingPong, 4, 4);
+        assert_eq!(s.meta_seek(3, false), 3);
+        assert_eq!(s.meta_seek(7, false), 7);
+        assert_eq!(s.meta_seek(8, false), 7);
+        assert_eq!(s.meta_seek(9, false), 6);
+    }
+
+    #[test]
+    fn zero_loop_length_no_panic() {
+        let s = make_sample(10, LoopType::Forward, 4, 0);
+        let _ = s.meta_seek(5, false);
+    }
+}

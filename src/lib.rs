@@ -4,7 +4,7 @@
 //!
 //! XMrs is a Safe SoundTracker Library
 //!
-//! ```
+//! ```text
 //! Module+--->Instrument+--->InstrDefault+--->Sample (Loop, Sustain Loop)
 //!       |              |                +--->Envelope (Pitch, Volume, Panning)
 //!       |              |                +--->Vibrato
@@ -76,5 +76,45 @@ mod tests {
     #[test]
     fn it_works() {
         assert_eq!(42, 42);
+    }
+
+    #[cfg(feature = "import")]
+    #[test]
+    fn load_empty_xm() {
+        let data = include_bytes!("../examples/empty.xm");
+        let module = crate::module::Module::load_xm(data);
+        assert!(
+            module.is_ok(),
+            "Failed to load empty.xm: {:?}",
+            module.err()
+        );
+    }
+
+    #[cfg(feature = "import")]
+    #[test]
+    fn load_note_xm() {
+        let data = include_bytes!("../examples/note.xm");
+        let module = crate::module::Module::load_xm(data).expect("Failed to load note.xm");
+        assert!(!module.pattern.is_empty(), "Module should have patterns");
+        assert!(
+            !module.instrument.is_empty(),
+            "Module should have instruments"
+        );
+    }
+
+    #[cfg(feature = "import")]
+    #[test]
+    fn load_xi_instrument() {
+        let data = include_bytes!("../examples/instr.xi");
+        let xmi = crate::import::xm::xi_instrument::XiInstrument::load(data);
+        assert!(xmi.is_ok(), "Failed to load instr.xi: {:?}", xmi.err());
+    }
+
+    #[cfg(feature = "import")]
+    #[test]
+    fn autodetect_xm() {
+        let data = include_bytes!("../examples/note.xm");
+        let module = crate::module::Module::load(data);
+        assert!(module.is_ok(), "Autodetect should find XM format");
     }
 }

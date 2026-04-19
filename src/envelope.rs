@@ -71,3 +71,89 @@ impl Envelope {
         frame
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::vec;
+
+    #[test]
+    fn lerp_at_boundaries() {
+        let a = EnvelopePoint {
+            frame: 0,
+            value: 0.0,
+        };
+        let b = EnvelopePoint {
+            frame: 10,
+            value: 1.0,
+        };
+        assert_eq!(EnvelopePoint::lerp(&a, &b, 0), 0.0);
+        assert_eq!(EnvelopePoint::lerp(&a, &b, 10), 1.0);
+        assert!((EnvelopePoint::lerp(&a, &b, 5) - 0.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn lerp_before_and_after() {
+        let a = EnvelopePoint {
+            frame: 5,
+            value: 0.0,
+        };
+        let b = EnvelopePoint {
+            frame: 15,
+            value: 1.0,
+        };
+        assert_eq!(EnvelopePoint::lerp(&a, &b, 0), 0.0); // before a
+        assert_eq!(EnvelopePoint::lerp(&a, &b, 20), 1.0); // after b
+    }
+
+    #[test]
+    fn loop_in_sustain_empty_points_no_panic() {
+        let e = Envelope {
+            sustain_enabled: true,
+            sustain_start_point: 5,
+            sustain_end_point: 10,
+            point: vec![], // empty — out of bounds
+            ..Default::default()
+        };
+        // Should not panic, just return frame
+        assert_eq!(e.loop_in_sustain(100), 100);
+    }
+
+    #[test]
+    fn loop_in_loop_empty_points_no_panic() {
+        let e = Envelope {
+            loop_enabled: true,
+            loop_start_point: 0,
+            loop_end_point: 5,
+            point: vec![], // empty — out of bounds
+            ..Default::default()
+        };
+        assert_eq!(e.loop_in_loop(100), 100);
+    }
+
+    #[test]
+    fn loop_in_sustain_wraps() {
+        let e = Envelope {
+            sustain_enabled: true,
+            sustain_start_point: 1,
+            sustain_end_point: 2,
+            point: vec![
+                EnvelopePoint {
+                    frame: 0,
+                    value: 0.0,
+                },
+                EnvelopePoint {
+                    frame: 10,
+                    value: 0.5,
+                },
+                EnvelopePoint {
+                    frame: 20,
+                    value: 1.0,
+                },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(e.loop_in_sustain(15), 15); // before sustain_end
+        assert_eq!(e.loop_in_sustain(25), 10); // past sustain_end → sustain_start
+    }
+}
