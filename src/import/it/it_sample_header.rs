@@ -524,6 +524,9 @@ impl ItSampleHeader {
     }
 
     fn c5_speed_to_finetune(&self) -> (i8, f32) {
+        if self.c5_speed == 0 {
+            return (0, 0.0);
+        }
         let ratio = self.c5_speed as f32 / 16726.0;
         let semitones = 12.0 * ratio.log2();
         let relative_pitch = semitones.round() as i8;

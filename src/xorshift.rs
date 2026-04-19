@@ -6,10 +6,17 @@ use serde::{Deserialize, Serialize};
 // === rand8 ================================================================
 
 /// A randomized 8-bit value generator using the xorshift algorithm
-#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, Eq, Hash, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, Hash, PartialEq)]
 #[cfg(any(feature = "rand8"))]
 pub struct XorShift8 {
     state: u8,
+}
+
+#[cfg(any(feature = "rand8"))]
+impl Default for XorShift8 {
+    fn default() -> Self {
+        Self { state: 251 }
+    }
 }
 
 #[cfg(any(feature = "rand8"))]
@@ -54,10 +61,17 @@ impl Iterator for XorShift8 {
 // === rand16 ===============================================================
 
 /// A randomized 16-bit value generator using the xorshift algorithm
-#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, Eq, Hash, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, Hash, PartialEq)]
 #[cfg(any(feature = "rand16"))]
 pub struct XorShift16 {
     state: u16,
+}
+
+#[cfg(any(feature = "rand16"))]
+impl Default for XorShift16 {
+    fn default() -> Self {
+        Self { state: 65521 }
+    }
 }
 
 #[cfg(any(feature = "rand16"))]
@@ -102,9 +116,15 @@ impl Iterator for XorShift16 {
 // === rand32 ===============================================================
 
 /// A randomized 32-bit value generator using the xorshift algorithm
-#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, Eq, Hash, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, Hash, PartialEq)]
 pub struct XorShift32 {
     state: u32,
+}
+
+impl Default for XorShift32 {
+    fn default() -> Self {
+        Self { state: 4294967291 }
+    }
 }
 
 impl XorShift32 {
@@ -147,10 +167,19 @@ impl Iterator for XorShift32 {
 // === rand64 ===============================================================
 
 /// A randomized 64-bit value generator using the xorshift algorithm
-#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, Eq, Hash, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, Hash, PartialEq)]
 #[cfg(any(feature = "rand64"))]
 pub struct XorShift64 {
     state: u64,
+}
+
+#[cfg(any(feature = "rand64"))]
+impl Default for XorShift64 {
+    fn default() -> Self {
+        Self {
+            state: 9223372036854775783,
+        }
+    }
 }
 
 #[cfg(any(feature = "rand64"))]
