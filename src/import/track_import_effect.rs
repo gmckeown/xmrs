@@ -419,7 +419,7 @@ impl TrackImportEffect {
         unique_effects
     }
 
-    pub fn to_track_effects(effects: &Vec<TrackImportEffect>) -> Vec<TrackEffect> {
+    pub fn to_track_effects(effects: &[TrackImportEffect]) -> Vec<TrackEffect> {
         let mut vte: Vec<TrackEffect> = vec![];
 
         // This part is used to aggregate sub-effects which are subject

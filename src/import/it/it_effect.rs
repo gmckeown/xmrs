@@ -692,7 +692,7 @@ impl ItEffect {
 
     pub fn it_unpack_pattern(
         freq_type: FrequencyType,
-        pattern: &Vec<Vec<PatternSlot>>,
+        pattern: &[Vec<PatternSlot>],
     ) -> Vec<Vec<TrackImportUnit>> {
         pattern
             .iter()

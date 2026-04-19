@@ -25,7 +25,7 @@ impl PatternHelper {
         }
     }
 
-    fn get_track(&self, _track_index: usize, source: &Vec<u8>) -> Vec<PatternSlot> {
+    fn get_track(&self, _track_index: usize, source: &[u8]) -> Vec<PatternSlot> {
         let mut track: Vec<PatternSlot> = vec![];
         let mut index: usize = 0;
         let mut last_instr: Option<usize> = None;
@@ -247,7 +247,7 @@ impl PatternHelper {
     }
 
     pub fn cleanup_patterns(
-        source: &Vec<Vec<Vec<PatternSlot>>>,
+        source: &[Vec<Vec<PatternSlot>>],
     ) -> (Vec<Vec<Vec<PatternSlot>>>, Vec<usize>) {
         let mut dest: Vec<Vec<Vec<PatternSlot>>> = Vec::new();
         let mut order: Vec<usize> = Vec::new();

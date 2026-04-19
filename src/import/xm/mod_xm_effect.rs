@@ -425,7 +425,7 @@ impl ModXmEffect {
 
     pub fn mod_xm_unpack_row(
         freq_type: FrequencyType,
-        row: &Vec<PatternSlot>,
+        row: &[PatternSlot],
     ) -> Vec<TrackImportUnit> {
         row.iter()
             .map(|pattern_slot| ModXmEffect::mod_xm_unpack(freq_type, &pattern_slot))
@@ -434,7 +434,7 @@ impl ModXmEffect {
 
     pub fn mod_xm_unpack_pattern(
         freq_type: FrequencyType,
-        pattern: &Vec<Vec<PatternSlot>>,
+        pattern: &[Vec<PatternSlot>],
     ) -> Vec<Vec<TrackImportUnit>> {
         pattern
             .iter()

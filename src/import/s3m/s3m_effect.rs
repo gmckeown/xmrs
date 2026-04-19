@@ -27,7 +27,7 @@ impl S3mEffect {
         }
     }
 
-    pub fn update_pattern(pattern: &mut Vec<Vec<PatternSlot>>) {
+    pub fn update_pattern(pattern: &mut [Vec<PatternSlot>]) {
         let mut ufx = Self::new();
         for line in pattern {
             for (ii, n) in line.iter_mut().enumerate() {

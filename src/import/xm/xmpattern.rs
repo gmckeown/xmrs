@@ -78,12 +78,7 @@ impl XmPattern {
     }
 
     fn get_empty_line(number_of_channels: usize) -> Vec<PatternSlot> {
-        let mut row: Vec<PatternSlot> = vec![];
-        let xmps = PatternSlot::default();
-        for _ in 0..number_of_channels {
-            row.push(xmps.clone());
-        }
-        row
+        vec![PatternSlot::default(); number_of_channels]
     }
 
     fn get_slots(

@@ -605,20 +605,20 @@ impl ImportMemory {
         &mut self,
         freq_type: FrequencyType,
         mem: MemoryType,
-        order: &Vec<Vec<usize>>,
-        patterns: &Vec<Vec<Vec<PatternSlot>>>,
+        order: &[Vec<usize>],
+        patterns: &[Vec<Vec<PatternSlot>>],
     ) -> Vec<Vec<Vec<TrackImportUnit>>> {
         let mut source: Vec<Vec<Vec<TrackImportUnit>>> = patterns
             .iter()
-            .map(|pattern: &Vec<Vec<PatternSlot>>| match mem {
+            .map(|pattern| match mem {
                 MemoryType::Mod | MemoryType::Xm => {
-                    ModXmEffect::mod_xm_unpack_pattern(freq_type, &pattern)
+                    ModXmEffect::mod_xm_unpack_pattern(freq_type, pattern)
                 }
                 MemoryType::S3m => {
                     // TODO: rewrite `s3m_effect.rs` to gain overall consistency in the code
-                    ModXmEffect::mod_xm_unpack_pattern(freq_type, &pattern)
+                    ModXmEffect::mod_xm_unpack_pattern(freq_type, pattern)
                 }
-                MemoryType::It => ItEffect::it_unpack_pattern(freq_type, &pattern),
+                MemoryType::It => ItEffect::it_unpack_pattern(freq_type, pattern),
                 // _ => todo!(),
             })
             .collect();
@@ -645,8 +645,8 @@ impl ImportMemory {
         &mut self,
         freq_type: FrequencyType,
         mem: MemoryType,
-        order: &Vec<Vec<usize>>,
-        patterns: &Vec<Vec<Vec<PatternSlot>>>,
+        order: &[Vec<usize>],
+        patterns: &[Vec<Vec<PatternSlot>>],
     ) -> Vec<Vec<Vec<TrackUnit>>> {
         /* first step: get the same patterns but using TrackImportUnit */
         let source = self.apply_memory(freq_type, mem, order, patterns);

@@ -223,7 +223,7 @@ impl InstrHelper {
         idst
     }
 
-    pub fn irss_to_instruments(irss: &Vec<InstrRobSid>, original: bool) -> Vec<Instrument> {
+    pub fn irss_to_instruments(irss: &[InstrRobSid], original: bool) -> Vec<Instrument> {
         let mut idst: Vec<Instrument> = vec![];
         for isrc in irss {
             idst.push(Self::irs_to_instrument(isrc, original));

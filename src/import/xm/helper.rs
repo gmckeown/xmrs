@@ -55,7 +55,7 @@ pub fn delta16_to_sample(delta: Vec<u16>) -> Vec<i16> {
     sample
 }
 
-pub fn sample8_to_delta(sample: &Vec<i8>) -> Vec<u8> {
+pub fn sample8_to_delta(sample: &[i8]) -> Vec<u8> {
     let mut delta: Vec<u8> = vec![];
     let mut new: i8 = 0;
     for item in sample {
@@ -66,7 +66,7 @@ pub fn sample8_to_delta(sample: &Vec<i8>) -> Vec<u8> {
     delta
 }
 
-pub fn sample16_to_delta(sample: &Vec<i16>) -> Vec<u16> {
+pub fn sample16_to_delta(sample: &[i16]) -> Vec<u16> {
     let mut delta: Vec<u16> = vec![];
     let mut new: i16 = 0;
     for item in sample {

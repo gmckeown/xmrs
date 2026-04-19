@@ -5,7 +5,7 @@ pub struct XtTrack;
 
 impl XtTrack {
     /// Here we use `Vec<PatternSlot>` like a track _not_ like a Pattern row!
-    pub fn save(track: &Vec<PatternSlot>) -> Vec<u8> {
+    pub fn save(track: &[PatternSlot]) -> Vec<u8> {
         let mut data: Vec<u8> = vec![];
         let version: u16 = 1;
         let nrow: u16 = track.len() as u16;

@@ -154,18 +154,6 @@ impl AmigaModule {
         return instr;
     }
 
-    fn amiga_to_module_pattern(p: &Vec<Vec<PatternSlot>>) -> Vec<Vec<PatternSlot>> {
-        let mut dp: Vec<Vec<PatternSlot>> = vec![];
-        for row in p {
-            let mut new_row: Vec<PatternSlot> = vec![];
-            for e in row {
-                new_row.push(e.clone());
-            }
-            dp.push(new_row);
-        }
-        dp
-    }
-
     pub fn to_module(&self) -> Module {
         let mut module = Module::default();
 
