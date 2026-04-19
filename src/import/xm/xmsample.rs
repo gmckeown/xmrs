@@ -63,6 +63,9 @@ impl XmSample {
 
     pub fn add_sample<'a>(&mut self, data: &'a [u8]) -> Result<&'a [u8], DecodeError> {
         let data_len: usize = self.header.length as usize;
+        if data.len() < data_len {
+            return Err(DecodeError::Other("Sample data too short"));
+        }
         let slice = &data[..data_len];
 
         let d3 = if self.header.flags & 0b0001_0000 != 0 {
@@ -183,6 +186,9 @@ impl XmSample {
                     xms.header.volume = (s.volume * 64.0) as u8;
                     xms.header.finetune = (s.finetune * 127.0) as i8;
                     xms.header.flags = s.loop_flag.into();
+                    if let Some(SampleDataType::Mono16(_)) = &s.data {
+                        xms.header.flags |= 0b0001_0000;
+                    }
                     xms.header.panning = (s.panning * 255.0) as u8;
                     xms.header.relative_pitch = s.relative_pitch;
                     xms.header.name = s.name.clone();

@@ -68,8 +68,8 @@ impl Module {
 
     /// get number of channels
     pub fn get_num_channels(&self) -> usize {
-        if self.pattern.len() != 0 {
-            self.pattern[0][0].len()
+        if let Some(first_row) = self.pattern.first().and_then(|p| p.first()) {
+            first_row.len()
         } else {
             0
         }
@@ -77,7 +77,7 @@ impl Module {
 
     /// get number of rows
     pub fn get_num_rows(&self, pat_idx: usize) -> usize {
-        if self.pattern.len() != 0 {
+        if pat_idx < self.pattern.len() {
             self.pattern[pat_idx].len()
         } else {
             0

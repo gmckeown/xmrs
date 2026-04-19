@@ -46,7 +46,10 @@ pub struct Envelope {
 
 impl Envelope {
     pub fn loop_in_sustain(&self, frame: usize) -> usize {
-        if self.sustain_enabled {
+        if self.sustain_enabled
+            && self.sustain_end_point < self.point.len()
+            && self.sustain_start_point < self.point.len()
+        {
             let sustain_end = self.point[self.sustain_end_point].frame;
             if frame > sustain_end {
                 return self.point[self.sustain_start_point].frame;
@@ -56,7 +59,10 @@ impl Envelope {
     }
 
     pub fn loop_in_loop(&self, frame: usize) -> usize {
-        if self.loop_enabled {
+        if self.loop_enabled
+            && self.loop_end_point < self.point.len()
+            && self.loop_start_point < self.point.len()
+        {
             let loop_end = self.point[self.loop_end_point].frame;
             if frame > loop_end {
                 return self.point[self.loop_start_point].frame;

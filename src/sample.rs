@@ -125,6 +125,9 @@ impl Sample {
         length: usize,
         loop_type: LoopType,
     ) -> usize {
+        if self.len() == 0 {
+            return 0;
+        }
         let end = start + length;
         match loop_type {
             LoopType::No => {
@@ -135,15 +138,15 @@ impl Sample {
                 }
             }
             LoopType::Forward => {
-                if pos < end {
-                    pos
+                if length == 0 || pos < end {
+                    pos.min(self.len() - 1)
                 } else {
                     start + (pos - start) % length
                 }
             }
             LoopType::PingPong => {
-                if pos < end {
-                    pos
+                if length == 0 || pos < end {
+                    pos.min(self.len() - 1)
                 } else {
                     let total_length = 2 * length;
                     let mod_pos = (pos - start) % total_length;

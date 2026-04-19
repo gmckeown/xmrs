@@ -169,7 +169,7 @@ impl XmInstrDefault {
                 xmid.vibrato_depth = (id.vibrato.depth * 15.0 * 2.0) as u8;
                 xmid.vibrato_rate = (id.vibrato.speed * 63.0 * 4.0) as u8;
 
-                xmid.volume_fadeout = (id.volume_fadeout * 4095.0 * 4.0 * 2.0) as u16;
+                xmid.volume_fadeout = (id.volume_fadeout * 4095.0 * 4.0 * 2.0 + 0.5) as u16;
 
                 xmid.midi_on = if id.midi.muted { 0 } else { 1 };
                 xmid.midi_channel = id.midi.channel;
