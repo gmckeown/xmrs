@@ -207,7 +207,6 @@ struct S3mOplInstr {
 }
 
 impl S3mOplInstr {
-    // TODO: check why self.mod0#tremolo and self.mod0#sustain not used.
     pub fn to_instr_opl(&self) -> InstrOpl {
         let ph = PeriodHelper::new(FrequencyType::LinearFrequencies, false);
         let mut i_opl = InstrOpl::default();
@@ -217,11 +216,11 @@ impl S3mOplInstr {
             feedback: self.mod10 >> 1,
             attack: self.mod4 >> 4,
             sustain: self.mod6 >> 4,
-            eg: (self.mod0 & 0b0010_0000) != 0, // FIXME: Sustain?
+            eg: (self.mod0 & 0b0010_0000) != 0, // OPL reg 0x20 bit 5: EG type (sustain)
             decay: self.mod4 & 0b0000_1111,
             release: self.mod6 & 0b0000_1111,
             total_level: self.mod2 & 0b0011_1111,
-            am: (self.mod0 & 0b1000_0000) != 0, // FIXME: Tremolo?
+            am: (self.mod0 & 0b1000_0000) != 0, // OPL reg 0x20 bit 7: AM (tremolo)
             vib: (self.mod0 & 0b0100_0000) != 0,
             ksr: (self.mod0 & 0b0001_0000) != 0,
             con: (self.mod10 & 0b0000_0001) != 0,
@@ -232,11 +231,11 @@ impl S3mOplInstr {
             feedback: self.mod10 >> 1, // no way for carrier
             attack: self.car5 >> 4,
             sustain: self.car7 >> 4,
-            eg: (self.car1 & 0b0010_0000) != 0, // FIXME: Sustain?
+            eg: (self.car1 & 0b0010_0000) != 0, // OPL reg 0x20 bit 5: EG type (sustain)
             decay: self.car5 & 0b0000_1111,
             release: self.car7 & 0b0000_1111,
             total_level: self.car3 & 0b0011_1111,
-            am: (self.car1 & 0b1000_0000) != 0, // FIXME: Tremolo?
+            am: (self.car1 & 0b1000_0000) != 0, // OPL reg 0x20 bit 7: AM (tremolo)
             vib: (self.car1 & 0b0100_0000) != 0,
             ksr: (self.car1 & 0b0001_0000) != 0,
             con: (self.mod10 & 0b0000_0001) != 0, // no way for carrier

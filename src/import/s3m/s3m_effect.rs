@@ -197,7 +197,11 @@ impl S3mEffect {
                     0x2 => n.effect_parameter |= 0x50,
                     0x3 => n.effect_parameter |= 0x40,
                     0x4 => n.effect_parameter |= 0x70,
-                    // ignore S8x becuase it's not compatible with FT2 panning
+                    0x8 => {
+                        // S8x - Set panning (0-F → convert to XM effect 8)
+                        n.effect_type = 0x08;
+                        n.effect_parameter = n.effect_parameter * 0x11;
+                    }
                     0xB => n.effect_parameter |= 0x60,
                     0xC => {
                         // Note Cut
@@ -249,6 +253,14 @@ impl S3mEffect {
                     n.effect_type = 0;
                     n.effect_parameter = 0;
                 }
+            }
+            21 => {
+                // U - Fine vibrato (same as H but 4x finer depth)
+                n.effect_type = 0x04;
+            }
+            24 => {
+                // X - Set panning (0x00=left, 0x80=center, 0xFF=right in S3M 3.20+)
+                n.effect_type = 0x08;
             }
             _ => {
                 n.effect_type = 0;

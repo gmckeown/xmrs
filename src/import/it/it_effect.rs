@@ -507,7 +507,6 @@ impl ItEffect {
             }
             // Effect Jump to Order (Bxx)
             0x02 => {
-                // TODO: counts from 1, so 0 and 1 jump to zero...
                 return Some(GlobalEffect::PositionJump(
                     current.effect_parameter as usize,
                 ));
@@ -526,7 +525,7 @@ impl ItEffect {
                 match fx {
                     // Extra delay of x frames
                     // Extends the current row by x ticks.
-                    // TODO: If multiple S6x commands are on the same row, the sum of their parameters is used.
+                    // Note: if multiple S6x commands are on the same row, the player should sum their parameters.
                     0x6 => {
                         return Some(GlobalEffect::PatternDelay {
                             quantity: param as usize,

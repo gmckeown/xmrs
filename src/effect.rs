@@ -365,11 +365,14 @@ impl TrackEffect {
                 },
                 TrackEffect::NoteRetrig {
                     speed: o1,
-                    volume_modifier: _o2,
+                    volume_modifier: o2,
                 },
             ) => Some(TrackEffect::NoteRetrig {
                 speed: h1 + o1,
-                volume_modifier: h2.clone(), //FIXME: What about Add and Mul NoteRetrigOperator at the same time?
+                volume_modifier: match o2 {
+                    NoteRetrigOperator::None => h2.clone(),
+                    _ => o2.clone(),
+                },
             }),
             (
                 TrackEffect::Panbrello {

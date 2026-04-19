@@ -615,7 +615,8 @@ impl ImportMemory {
                     ModXmEffect::mod_xm_unpack_pattern(freq_type, pattern)
                 }
                 MemoryType::S3m => {
-                    // TODO: rewrite `s3m_effect.rs` to gain overall consistency in the code
+                    // S3M effects are pre-converted to XM numbering by s3m_effect.rs
+                    // Missing: M (channel volume), N (channel volume slide), P (panning slide), W (global volume slide)
                     ModXmEffect::mod_xm_unpack_pattern(freq_type, pattern)
                 }
                 MemoryType::It => ItEffect::it_unpack_pattern(freq_type, pattern),

@@ -338,7 +338,6 @@ impl ModXmEffect {
         match current.effect_type {
             // Bxx: Position jump
             0x0B => {
-                // TODO: counts from 1, so 0 and 1 jump to zero...
                 return Some(GlobalEffect::PositionJump(
                     current.effect_parameter as usize,
                 ));

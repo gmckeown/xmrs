@@ -94,11 +94,10 @@ impl ItPattern {
 
                 if mask_variable & 0x01 != 0 {
                     let mut n = *data_iter.next().ok_or(DecodeError::LimitExceeded)?;
-                    if n > 120 && n != 254 && n != 255 {
-                        // FIXME: Sometime n==240 et n==246, i don't know why?
-                        if n == 240 || n == 246 {
-                            n = 253; // None
-                        }
+                    // Valid note values: 0-119 (C-0 to B-9), 253 (None), 254 (Cut), 255 (Off)
+                    // Values 120-252 are out of range (possibly OpenMPT extensions or corrupted data)
+                    if n > 119 && n < 253 {
+                        n = 253; // None
                     }
                     slot.note = n.try_into().map_err(|_| {
                         DecodeError::OtherString("Failed to convert note".to_string())
