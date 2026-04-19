@@ -77,9 +77,7 @@ impl ItModule {
         let instrument_offsets: Vec<u32> = instrument_offsets_u8
             .chunks_exact(4)
             .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap()))
-            .collect::<Vec<u32>>()
-            .try_into()
-            .unwrap();
+            .collect();
         let data = &data[4 * header.0.instrument_number as usize..];
 
         // === Samples Header Offsets =======================================
@@ -95,9 +93,7 @@ impl ItModule {
         let sample_header_offsets: Vec<u32> = sample_header_offsets_u8
             .chunks_exact(4)
             .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap()))
-            .collect::<Vec<u32>>()
-            .try_into()
-            .unwrap();
+            .collect();
         let data = &data[4 * header.0.sample_number as usize..];
 
         // === Patterns Offsets ==========================================
@@ -113,9 +109,7 @@ impl ItModule {
         let pattern_offsets: Vec<u32> = pattern_offsets_u8
             .chunks_exact(4)
             .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap()))
-            .collect::<Vec<u32>>()
-            .try_into()
-            .unwrap();
+            .collect();
         let mut data = &data[4 * header.0.pattern_number as usize..];
 
         // === Edit History =================================================

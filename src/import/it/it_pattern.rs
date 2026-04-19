@@ -66,6 +66,9 @@ impl ItPattern {
     }
 
     pub fn unpack(&self) -> Result<Vec<Vec<PatternSlot>>, DecodeError> {
+        if self.row_count <= 0 {
+            return Ok(vec![]);
+        }
         let mut result = vec![vec![PatternSlot::default(); 64]; self.row_count as usize];
         let mut last_mask_vars = vec![0u8; 64];
         let mut data_iter = self.packed_data.iter();

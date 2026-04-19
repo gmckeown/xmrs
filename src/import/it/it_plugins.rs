@@ -92,8 +92,7 @@ impl Plugins {
                     bincode::serde::decode_from_slice::<SndMixPluginInfo, _>(
                         data,
                         bincode::config::legacy(),
-                    )
-                    .unwrap();
+                    )?;
                 plugins.mix[plugin_index].info = info.0;
                 data = &data[info.1..];
 

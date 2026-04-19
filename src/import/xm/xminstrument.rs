@@ -406,11 +406,11 @@ impl XmInstrument {
                     sample_for_pitch[i] = Some(val as usize);
                 }
                 let mut id = InstrDefault::default();
-                id.volume_envelope =
-                    Self::envelope_from_slice(&xmi.volume_envelope[0..num_vol_pt]).unwrap();
+                id.volume_envelope = Self::envelope_from_slice(&xmi.volume_envelope[0..num_vol_pt])
+                    .unwrap_or_default();
                 id.sample_for_pitch = sample_for_pitch;
-                id.pan_envelope =
-                    Self::envelope_from_slice(&xmi.panning_envelope[0..num_pan_pt]).unwrap();
+                id.pan_envelope = Self::envelope_from_slice(&xmi.panning_envelope[0..num_pan_pt])
+                    .unwrap_or_default();
                 id.volume_fadeout = xmi.volume_fadeout as f32 / 4095.0 / 4.0 / 2.0;
                 id.sample = sample;
 

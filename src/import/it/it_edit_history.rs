@@ -102,8 +102,10 @@ impl ItEditHistory {
             let end = start + struct_size;
             let src = &data[start..end];
             let edit_history_entry: (ItEditHistoryEntry, usize) =
-                bincode::decode_from_slice::<ItEditHistoryEntry, _>(src, bincode::config::legacy())
-                    .unwrap();
+                bincode::decode_from_slice::<ItEditHistoryEntry, _>(
+                    src,
+                    bincode::config::legacy(),
+                )?;
             edit_histories.push(edit_history_entry.0);
         }
 

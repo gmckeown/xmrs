@@ -470,7 +470,7 @@ impl S3mModule {
                         if tmp_pitch > 96 {
                             Pitch::None
                         } else {
-                            Pitch::try_from(tmp_pitch).unwrap()
+                            Pitch::try_from(tmp_pitch).unwrap_or(Pitch::None)
                         }
                     }
                 };
@@ -490,11 +490,14 @@ impl S3mModule {
         // Volume?
         if what & 0x40 != 0 {
             if k < packed_data.len() {
-                slot.volume = packed_data[k];
-                // FIXME: we ignore 255 as default instrument volume
-                if slot.volume > 64 {
-                    slot.volume = 64;
-                }
+                let raw_volume = packed_data[k];
+                // Convert S3M raw volume (0-64) to XM volume column encoding (0x10-0x50)
+                // 255 = default instrument volume, ignore
+                slot.volume = if raw_volume <= 64 {
+                    raw_volume + 0x10
+                } else {
+                    0
+                };
                 k += 1;
             }
         }
