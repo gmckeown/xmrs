@@ -47,9 +47,20 @@ rand64 = []
 name = "xmrs"
 path = "src/lib.rs"
 
+[[example]]
+name = "xmrs"
+required-features = ["demo"]
+
+[[example]]
+name = "xmi"
+required-features = ["import"]
+
+[[example]]
+name = "sid"
+required-features = ["import_sid", "std"]
+
 [profile.release]
 strip = true
 lto = true
 codegen-units = 1
 panic = "abort"
-
