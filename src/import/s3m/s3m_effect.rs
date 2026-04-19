@@ -146,11 +146,7 @@ impl S3mEffect {
                 if let Some(instr) = n.instrument {
                     if let Some(last_instr_g) = self.s3m_last_g_instrument[ii] {
                         if instr != last_instr_g {
-                            n.instrument = if instr != 0 {
-                                Some(instr as usize - 1)
-                            } else {
-                                None
-                            };
+                            n.instrument = Some(instr);
                         }
                     }
                 }

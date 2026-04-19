@@ -202,9 +202,9 @@ impl ItModule {
 
             let data = &ser_it_module[i_seek..];
             if !header.0.is_post20() {
-                instruments.push(ItInstrument::load_post2(data)?);
-            } else {
                 instruments.push(ItInstrument::load_pre2(data)?);
+            } else {
+                instruments.push(ItInstrument::load_post2(data)?);
             }
         }
 

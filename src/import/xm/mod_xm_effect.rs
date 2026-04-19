@@ -302,17 +302,21 @@ impl ModXmEffect {
                 }
             }
             // P - Set panning
-            0xC => return Some(TrackImportEffect::Panning(((current.volume & 0x0F)as f32) / 16.0)),
+            0xC => {
+                return Some(TrackImportEffect::Panning(
+                    ((current.volume & 0x0F) as f32) / 16.0,
+                ))
+            }
             // L - Panning slide left
             0xD => {
                 return Some(TrackImportEffect::PanningSlideN(
-                    -(current.volume as f32) / 16.0,
+                    -((current.volume & 0x0F) as f32) / 16.0,
                 ))
             }
             // R - Panning slide right
             0xE => {
                 return Some(TrackImportEffect::PanningSlideN(
-                    (current.volume as f32) / 16.0,
+                    ((current.volume & 0x0F) as f32) / 16.0,
                 ))
             }
             // M - Tone portamento (0..15)

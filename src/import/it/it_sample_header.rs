@@ -557,7 +557,7 @@ impl ItSampleHeader {
         let (relative_pitch, finetune) = self.c5_speed_to_finetune();
 
         let panning = if self.default_pan & 0x80 != 0 {
-            self.default_pan as f32 / 64.0
+            (self.default_pan & 0x7F) as f32 / 64.0
         } else {
             0.5
         };

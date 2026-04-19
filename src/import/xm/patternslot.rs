@@ -106,7 +106,7 @@ impl PatternSlot {
         };
         bytes[1] = {
             if let Some(instr) = self.instrument {
-                instr as u8 - 1
+                (instr + 1) as u8
             } else {
                 0
             }
@@ -128,7 +128,7 @@ impl PatternSlot {
         };
         bytes[1] = {
             if let Some(instr) = self.instrument {
-                instr as u8 - 1
+                (instr + 1) as u8
             } else {
                 0
             }

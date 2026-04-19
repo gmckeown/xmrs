@@ -5,7 +5,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 /// How to play sample
-#[derive(Default, Serialize, Deserialize, Copy, Clone, IntoPrimitive, TryFromPrimitive, Debug, PartialEq)]
+#[derive(
+    Default, Serialize, Deserialize, Copy, Clone, IntoPrimitive, TryFromPrimitive, Debug, PartialEq,
+)]
 #[repr(u8)]
 pub enum LoopType {
     #[default]
@@ -116,8 +118,13 @@ impl Sample {
         }
     }
 
-
-    fn calculate_loop(&self, pos: usize, start: usize, length: usize, loop_type: LoopType) -> usize {
+    fn calculate_loop(
+        &self,
+        pos: usize,
+        start: usize,
+        length: usize,
+        loop_type: LoopType,
+    ) -> usize {
         let end = start + length;
         match loop_type {
             LoopType::No => {
@@ -154,9 +161,19 @@ impl Sample {
     /// The calling function must save the real position at sustain end to avoid problems
     pub fn meta_seek(&self, pos: usize, sustain: bool) -> usize {
         if sustain && self.sustain_loop_flag != LoopType::No {
-            self.calculate_loop(pos, self.sustain_loop_start as usize, self.sustain_loop_length as usize, self.sustain_loop_flag)
+            self.calculate_loop(
+                pos,
+                self.sustain_loop_start as usize,
+                self.sustain_loop_length as usize,
+                self.sustain_loop_flag,
+            )
         } else {
-            self.calculate_loop(pos, self.loop_start as usize, self.loop_length as usize, self.loop_flag)
+            self.calculate_loop(
+                pos,
+                self.loop_start as usize,
+                self.loop_length as usize,
+                self.loop_flag,
+            )
         }
     }
 

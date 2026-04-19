@@ -528,7 +528,7 @@ impl S3mModule {
 
         let mut im = ImportMemory::default();
         module.pattern = im.unpack_patterns(
-            FrequencyType::AmigaFrequencies,
+            module.frequency_type,
             MemoryType::S3m,
             &module.pattern_order,
             &self.patterns,

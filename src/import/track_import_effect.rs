@@ -199,7 +199,7 @@ impl TrackImportEffect {
             })
             .fold((0.0, 0.0), |acc, (a, b)| (acc.0 + a, acc.1 + b));
 
-        if s.0 == 0.0 || s.1 == 0.0 {
+        if s.0 == 0.0 && s.1 == 0.0 {
             return None;
         } else {
             return Some(TrackEffect::Vibrato {

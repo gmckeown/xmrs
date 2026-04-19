@@ -30,7 +30,7 @@ pub fn vec_u16_to_u8_slice(u16_vec: Vec<u16>) -> Vec<u8> {
 
 pub fn delta8_to_sample(delta: Vec<u8>) -> Vec<i8> {
     let mut sample: Vec<i8> = vec![];
-    if delta.len() > 2 {
+    if !delta.is_empty() {
         let mut old = 0;
         for item in &delta {
             let new = item.overflowing_add(old).0;
@@ -42,7 +42,7 @@ pub fn delta8_to_sample(delta: Vec<u8>) -> Vec<i8> {
 }
 
 pub fn delta16_to_sample(delta: Vec<u16>) -> Vec<i16> {
-    if delta.len() < 2 {
+    if delta.is_empty() {
         return vec![];
     }
     let mut sample: Vec<i16> = vec![];

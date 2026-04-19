@@ -119,7 +119,7 @@ impl ItEffect {
     // DFx Fine volume slide down
     // DxF Fine volume slide up
     fn it_volume_slide(fx: u8) -> Option<TrackImportEffect> {
-        let nibble_high = fx & 0xF0 >> 4;
+        let nibble_high = (fx & 0xF0) >> 4;
         let nibble_low = fx & 0x0F;
 
         match (nibble_high, nibble_low) {
@@ -259,7 +259,7 @@ impl ItEffect {
 
             // Set Channel Volume (Mxx)
             0x0D => {
-                let volume = current.effect_parameter.max(64) as f32 / 64.0;
+                let volume = current.effect_parameter.min(64) as f32 / 64.0;
                 return Some(vec![TrackImportEffect::ChannelVolume(volume)]);
             }
 
@@ -512,13 +512,11 @@ impl ItEffect {
                     current.effect_parameter as usize,
                 ));
             }
-            // Effect Break to Row (Cxx) -> Pas d'Effect direct à lier ici, ajouter un commentaire si nécessaire.
+            // Effect Break to Row (Cxx)
             0x03 => {
-                let param = current.effect_parameter;
-                let ten = (param >> 4) as usize * 10;
-                let unit = (param & 0x0F) as usize;
-                let total = ten + unit;
-                return Some(GlobalEffect::PatternBreak(total));
+                return Some(GlobalEffect::PatternBreak(
+                    current.effect_parameter as usize,
+                ));
             }
 
             // Effect Special Commands (Sxx)
@@ -575,7 +573,7 @@ impl ItEffect {
             // Effect Set Global Volume (Vxx)
             0x16 => {
                 return Some(GlobalEffect::Volume(
-                    (current.effect_parameter.max(64) as f32) / 64.0,
+                    (current.effect_parameter.min(64) as f32) / 64.0,
                 ))
             }
 

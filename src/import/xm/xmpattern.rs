@@ -66,8 +66,7 @@ impl XmPattern {
             &data[0..xmph.pattern_data_size as usize],
             number_of_channels as usize,
             xmph.num_rows as usize,
-        )
-        .unwrap();
+        )?;
         let seek = xmph.pattern_data_size as usize;
 
         let xmp = Self {

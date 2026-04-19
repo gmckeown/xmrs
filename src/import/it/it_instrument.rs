@@ -108,6 +108,9 @@ impl ItEnvelopePre2 {
         let mut points = Vec::new();
 
         for (tick, magnitude) in self.node_points.iter() {
+            if *tick == 0 && *magnitude == 0 && !points.is_empty() {
+                break;
+            }
             points.push(EnvelopePoint {
                 frame: *tick as usize,
                 value: (*magnitude as f32) / 64.0,
@@ -255,11 +258,12 @@ pub struct ItEnvelopePost2 {
 impl ItEnvelopePost2 {
     pub fn to_envelope(&self) -> Vec<EnvelopePoint> {
         let mut points = Vec::new();
+        let count = (self.node_count as usize).min(25);
 
-        for (tick, magnitude) in self.node_points.iter() {
+        for (value, tick) in self.node_points[..count].iter() {
             points.push(EnvelopePoint {
                 frame: *tick as usize,
-                value: (*magnitude as f32) / 64.0,
+                value: (*value as f32) / 64.0,
             });
         }
         points.sort_by(|a, b| a.frame.cmp(&b.frame));
@@ -322,7 +326,7 @@ impl ItInstrument {
         }
     }
 
-    pub fn load_post2(source: &[u8]) -> Result<Self, DecodeError> {
+    pub fn load_pre2(source: &[u8]) -> Result<Self, DecodeError> {
         let mut data = source;
 
         let instr_h = bincode::serde::decode_from_slice::<ItInstrumentHeaderPre2, _>(
@@ -348,7 +352,7 @@ impl ItInstrument {
         return Ok(ItInstrument::Pre2(instr));
     }
 
-    pub fn load_pre2(source: &[u8]) -> Result<Self, DecodeError> {
+    pub fn load_post2(source: &[u8]) -> Result<Self, DecodeError> {
         let mut data = source;
 
         let instr_h = bincode::serde::decode_from_slice::<ItInstrumentHeaderPost2, _>(
