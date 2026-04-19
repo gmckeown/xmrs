@@ -416,7 +416,7 @@ impl S3mModule {
                 pattern.push(pss);
                 d2 = next;
             }
-            S3mEffect::update_pattern(&mut pattern);
+            S3mEffect::resolve_pattern_memory(&mut pattern);
             s3m.patterns.push(pattern);
         }
 
@@ -489,14 +489,10 @@ impl S3mModule {
         // Volume?
         if what & 0x40 != 0 {
             if k < packed_data.len() {
-                let raw_volume = packed_data[k];
-                // Convert S3M raw volume (0-64) to XM volume column encoding (0x10-0x50)
-                // 255 = default instrument volume, ignore
-                slot.volume = if raw_volume <= 64 {
-                    raw_volume + 0x10
-                } else {
-                    0
-                };
+                slot.volume = packed_data[k];
+                if slot.volume > 64 {
+                    slot.volume = 255; // invalid / default instrument volume
+                }
                 k += 1;
             }
         }

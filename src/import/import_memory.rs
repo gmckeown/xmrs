@@ -44,6 +44,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::import::it::it_effect::ItEffect;
+use crate::import::s3m::s3m_effect::S3mEffect;
 use crate::import::xm::mod_xm_effect::ModXmEffect;
 
 use super::patternslot::PatternSlot;
@@ -614,11 +615,7 @@ impl ImportMemory {
                 MemoryType::Mod | MemoryType::Xm => {
                     ModXmEffect::mod_xm_unpack_pattern(freq_type, pattern)
                 }
-                MemoryType::S3m => {
-                    // S3M effects are pre-converted to XM numbering by s3m_effect.rs
-                    // Missing: M (channel volume), N (channel volume slide) — no XM equivalent
-                    ModXmEffect::mod_xm_unpack_pattern(freq_type, pattern)
-                }
+                MemoryType::S3m => S3mEffect::s3m_unpack_pattern(freq_type, pattern),
                 MemoryType::It => ItEffect::it_unpack_pattern(freq_type, pattern),
                 // _ => todo!(),
             })

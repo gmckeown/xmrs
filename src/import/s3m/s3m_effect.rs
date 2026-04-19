@@ -1,19 +1,23 @@
+/// S3M Effect Parser
+///
+/// Converts S3M effects directly to TrackImportEffect/GlobalEffect,
+/// without going through XM effect numbering.
+use alloc::vec;
 use alloc::vec::Vec;
 
-/*
- *   Code stolen from `ft2_load_s3m.c` and converted to rust using an LLM with a small modification
- *   AI GENERATED
- *   BSD-3-Clause license
- *
- */
 use crate::import::patternslot::PatternSlot;
+use crate::import::track_import_effect::TrackImportEffect;
+use crate::import::track_import_unit::TrackImportUnit;
 use crate::prelude::*;
 
+/// S3M shared effect memory and direct effect parser
 #[derive(Debug)]
 pub struct S3mEffect {
+    /// Last non-zero parameter for effects D/E/F/I/J/K/L/Q/R/S (shared memory per channel)
     alastnfo: [u8; 32],
-    alastefx: [u8; 32],
+    /// Last non-zero parameter for vibrato effects H/U (separate memory per channel)
     alastvibnfo: [u8; 32],
+    /// Last instrument used with tone portamento (G)
     s3m_last_g_instrument: [Option<usize>; 32],
 }
 
@@ -21,262 +25,382 @@ impl S3mEffect {
     fn new() -> Self {
         Self {
             alastnfo: [0; 32],
-            alastefx: [0; 32],
             alastvibnfo: [0; 32],
             s3m_last_g_instrument: [None; 32],
         }
     }
 
-    pub fn update_pattern(pattern: &mut [Vec<PatternSlot>]) {
-        let mut ufx = Self::new();
+    /// Resolve S3M shared effect memory for a pattern.
+    /// In S3M, effects D/E/F/I/J/K/L/Q/R/S share a single "last info" memory per channel.
+    /// H/U (vibrato) have their own shared memory.
+    /// G (tone portamento) does NOT share memory with others.
+    pub fn resolve_pattern_memory(pattern: &mut [Vec<PatternSlot>]) {
+        let mut sfx = Self::new();
+        sfx.resolve_memory(pattern);
+    }
+
+    fn resolve_memory(&mut self, pattern: &mut [Vec<PatternSlot>]) {
         for line in pattern {
-            for (ii, n) in line.iter_mut().enumerate() {
-                ufx.efx_correction(ii, n);
+            for (ch, slot) in line.iter_mut().enumerate() {
+                let efx = slot.effect_type;
+                let param = slot.effect_parameter;
+
+                // Store non-zero parameters
+                if param > 0 {
+                    if efx == 8 || efx == 21 {
+                        self.alastvibnfo[ch] = param;
+                    }
+                    if (4..=12).contains(&efx) || (17..=19).contains(&efx) {
+                        self.alastnfo[ch] = param;
+                    }
+                }
+
+                // Recall from memory when parameter is zero
+                if param == 0 && efx != 7 {
+                    if efx == 8 || efx == 21 {
+                        slot.effect_parameter = self.alastvibnfo[ch];
+                    } else if (4..=12).contains(&efx) || (17..=19).contains(&efx) {
+                        slot.effect_parameter = self.alastnfo[ch];
+                    }
+                }
+
+                // Track last instrument for G effect
+                if slot.instrument.is_some() && efx != 7 {
+                    self.s3m_last_g_instrument[ch] = slot.instrument;
+                }
             }
         }
     }
 
-    /* ii is the channel index
-     */
-    fn efx_correction(&mut self, ii: usize, n: &mut PatternSlot) {
-        if n.effect_parameter > 0 {
-            self.alastnfo[ii] = n.effect_parameter;
-            if n.effect_type == 8 || n.effect_type == 21 {
-                self.alastvibnfo[ii] = n.effect_parameter; // H/U
-            }
+    // --- Volume slide helpers ---
+
+    fn s3m_volume_slide(param: u8) -> Option<TrackImportEffect> {
+        let high = (param & 0xF0) >> 4;
+        let low = param & 0x0F;
+
+        match (high, low) {
+            (0xF, f) => Some(TrackImportEffect::VolumeSlide0(-(f as f32) / 64.0)),
+            (f, 0xF) => Some(TrackImportEffect::VolumeSlide0(f as f32 / 64.0)),
+            (0, f) => Some(TrackImportEffect::VolumeSlideN(-(f as f32) / 64.0)),
+            (f, 0) => Some(TrackImportEffect::VolumeSlideN(f as f32 / 64.0)),
+            // ST3: when both nibbles non-zero, last nibble has priority (slide down)
+            (_, f) => Some(TrackImportEffect::VolumeSlideN(-(f as f32) / 64.0)),
         }
+    }
 
-        // in ST3, a lot of effects directly share the same memory!
-        if n.effect_parameter == 0 && n.effect_type != 7 {
-            // G
-            let efx = n.effect_type;
-            if efx == 8 || efx == 21 {
-                // H/U
-                n.effect_parameter = self.alastvibnfo[ii];
-            } else if (4..=12).contains(&efx) || (17..=19).contains(&efx) {
-                // D/E/F/I/J/K/L/Q/R/S
-                n.effect_parameter = self.alastnfo[ii];
-            }
+    fn s3m_channel_volume_slide(param: u8) -> Option<TrackImportEffect> {
+        let high = (param & 0xF0) >> 4;
+        let low = param & 0x0F;
 
-            /* If effect data is zero and effect type was the same as last one, clear out
-            	** data if it's not J or S (those have no memory in the equivalent XM effects).
-            	** Also goes for extra fine pitch slides and fine volume slides,
-             ** since they get converted to other effects.
-             */
-            if efx == self.alastefx[ii] && efx != 10 && efx != 19 {
-                // J/S
-                let nfo = n.effect_parameter;
-                let extra_fine_pitch_slides = (efx == 5 || efx == 6) && ((nfo & 0xF0) == 0xE0);
-                let fine_vol_slides = (efx == 4 || efx == 11)
-                    && ((nfo > 0xF0) || (((nfo & 0xF) == 0xF) && ((nfo & 0xF0) > 0)));
-
-                if !extra_fine_pitch_slides && !fine_vol_slides {
-                    n.effect_parameter = 0;
-                }
-            }
+        match (high, low) {
+            (0xF, f) => Some(TrackImportEffect::ChannelVolumeSlide0(-(f as f32) / 64.0)),
+            (f, 0xF) => Some(TrackImportEffect::ChannelVolumeSlide0(f as f32 / 64.0)),
+            (0, f) => Some(TrackImportEffect::ChannelVolumeSlideN(-(f as f32) / 64.0)),
+            (f, 0) => Some(TrackImportEffect::ChannelVolumeSlideN(f as f32 / 64.0)),
+            (_, f) => Some(TrackImportEffect::ChannelVolumeSlideN(-(f as f32) / 64.0)),
         }
+    }
 
-        if n.effect_type > 0 {
-            self.alastefx[ii] = n.effect_type;
+    fn s3m_panning_slide(param: u8) -> Option<TrackImportEffect> {
+        let high = (param & 0xF0) >> 4;
+        let low = param & 0x0F;
+
+        match (high, low) {
+            (0xF, f) => Some(TrackImportEffect::PanningSlide0(-(f as f32) / 16.0)),
+            (f, 0xF) => Some(TrackImportEffect::PanningSlide0(f as f32 / 16.0)),
+            (0, f) => Some(TrackImportEffect::PanningSlideN(-(f as f32) / 16.0)),
+            (f, 0) => Some(TrackImportEffect::PanningSlideN(f as f32 / 16.0)),
+            _ => None,
         }
+    }
 
-        match n.effect_type {
-            1 => {
-                // A
-                n.effect_type = 0xF;
-                if n.effect_parameter == 0 {
-                    n.effect_type = 0;
-                    n.effect_parameter = 0;
-                } else if n.effect_parameter > 0x1F {
-                    n.effect_parameter = 0x1F;
+    // --- Effect parser (S3M numbering -> TrackImportEffect) ---
+
+    fn s3m_walk_effect(
+        freq_type: FrequencyType,
+        current: &PatternSlot,
+    ) -> Option<Vec<TrackImportEffect>> {
+        let param = current.effect_parameter;
+        match current.effect_type {
+            // D - Volume slide
+            4 => Self::s3m_volume_slide(param).map(|e| vec![e]),
+
+            // E - Portamento down
+            5 => {
+                let high = (param & 0xF0) >> 4;
+                let low = param & 0x0F;
+                match (high, low) {
+                    (0xE, f) => Some(vec![TrackImportEffect::PortamentoExtraFineDown(f as f32)]),
+                    (0xF, f) => Some(vec![TrackImportEffect::PortamentoFineDown(4.0 * f as f32)]),
+                    _ => Some(vec![TrackImportEffect::PortamentoDown(4.0 * param as f32)]),
                 }
             }
-            2 => n.effect_type = 0xB, // B
-            3 => n.effect_type = 0xD, // C
-            4 => {
-                // D
-                if n.effect_parameter > 0xF0 {
-                    // fine slide up
-                    n.effect_type = 0xE;
-                    n.effect_parameter = 0xB0 | (n.effect_parameter & 0xF);
-                } else if (n.effect_parameter & 0x0F) == 0x0F && (n.effect_parameter & 0xF0) > 0 {
-                    // fine slide down
-                    n.effect_type = 0xE;
-                    n.effect_parameter = 0xA0 | (n.effect_parameter >> 4);
-                } else {
-                    n.effect_type = 0xA;
-                    if n.effect_parameter & 0x0F != 0 {
-                        // on D/K, last nybble has first priority in ST3
-                        n.effect_parameter &= 0x0F;
-                    }
+
+            // F - Portamento up
+            6 => {
+                let high = (param & 0xF0) >> 4;
+                let low = param & 0x0F;
+                match (high, low) {
+                    (0xE, f) => Some(vec![TrackImportEffect::PortamentoExtraFineUp(-(f as f32))]),
+                    (0xF, f) => Some(vec![TrackImportEffect::PortamentoFineUp(-4.0 * f as f32)]),
+                    _ => Some(vec![TrackImportEffect::PortamentoUp(-4.0 * param as f32)]),
                 }
             }
-            5 | 6 => {
-                // E, F
-                if (n.effect_parameter & 0xF0) >= 0xE0 {
-                    // convert to fine slide
-                    let tmp = if (n.effect_parameter & 0xF0) == 0xE0 {
-                        0x21
-                    } else {
-                        0x0E
-                    };
 
-                    n.effect_parameter &= 0x0F;
-
-                    if n.effect_type == 5 {
-                        n.effect_parameter |= 0x20;
-                    } else {
-                        n.effect_parameter |= 0x10;
-                    }
-
-                    n.effect_type = tmp;
-
-                    if n.effect_type == 0x21 && n.effect_parameter == 0 {
-                        n.effect_type = 0;
-                    }
-                } else {
-                    n.effect_type = 7 - n.effect_type; // convert to normal 1xx/2xx slide
-                }
-            }
+            // G - Tone portamento
             7 => {
-                // G
-                n.effect_type = 0x03;
-
-                // fix illegal slides (to new instruments)
-                if let Some(instr) = n.instrument {
-                    if let Some(last_instr_g) = self.s3m_last_g_instrument[ii] {
-                        if instr != last_instr_g {
-                            n.instrument = Some(instr);
-                        }
-                    }
-                }
+                let speed = match freq_type {
+                    FrequencyType::LinearFrequencies => 4.0 * param as f32,
+                    FrequencyType::AmigaFrequencies => param as f32,
+                };
+                Some(vec![TrackImportEffect::TonePortamento(speed)])
             }
-            11 => {
-                // K
-                if n.effect_parameter > 0xF0 {
-                    // fine slide up
-                    n.effect_type = 0xE;
-                    n.effect_parameter = 0xB0 | (n.effect_parameter & 0xF);
 
-                    // if volume column is unoccupied, set to vibrato
-                    if n.volume == 0 {
-                        n.volume = 0xB0;
-                    }
-                } else if (n.effect_parameter & 0x0F) == 0x0F && (n.effect_parameter & 0xF0) > 0 {
-                    // fine slide down
-                    n.effect_type = 0xE;
-                    n.effect_parameter = 0xA0 | (n.effect_parameter >> 4);
+            // H - Vibrato
+            8 => {
+                let speed = ((param & 0xF0) >> 4) as f32 / 64.0;
+                let depth = (param & 0x0F) as f32 / 16.0;
+                Some(vec![TrackImportEffect::Vibrato(speed, depth)])
+            }
 
-                    // if volume column is unoccupied, set to vibrato
-                    if n.volume == 0 {
-                        n.volume = 0xB0;
-                    }
+            // I - Tremor
+            9 => {
+                let on = (param >> 4) as usize;
+                let off = (param & 0x0F) as usize;
+                Some(vec![TrackImportEffect::Tremor(on, off)])
+            }
+
+            // J - Arpeggio
+            10 => {
+                if param > 0 {
+                    let v1 = (param >> 4) as usize;
+                    let v2 = (param & 0x0F) as usize;
+                    Some(vec![TrackImportEffect::Arpeggio(v1, v2)])
                 } else {
-                    n.effect_type = 0x6;
-                    if n.effect_parameter & 0x0F != 0 {
-                        // on D/K, last nybble has first priority in ST3
-                        n.effect_parameter &= 0x0F;
-                    }
+                    None
                 }
             }
-            8 => n.effect_type = 0x04,  // H
-            9 => n.effect_type = 0x1D,  // I
-            10 => n.effect_type = 0x00, // J
-            12 => n.effect_type = 0x05, // L
-            15 => n.effect_type = 0x09, // O
-            16 => n.effect_type = 0x19, // P - Panning slide (same format as XM Pxy)
-            17 => n.effect_type = 0x1B, // Q
-            18 => n.effect_type = 0x07, // R
-            19 => {
-                // S
-                n.effect_type = 0xE;
-                let tmp = n.effect_parameter >> 4;
-                n.effect_parameter &= 0x0F;
 
-                match tmp {
-                    0x1 => n.effect_parameter |= 0x30,
-                    0x2 => n.effect_parameter |= 0x50,
-                    0x3 => n.effect_parameter |= 0x40,
-                    0x4 => n.effect_parameter |= 0x70,
-                    0x8 => {
-                        // S8x - Set panning (0-F → convert to XM effect 8)
-                        n.effect_type = 0x08;
-                        n.effect_parameter = n.effect_parameter * 0x11;
+            // K - Vibrato + Volume slide
+            11 => {
+                let vs =
+                    Self::s3m_volume_slide(param).unwrap_or(TrackImportEffect::VolumeSlideN(0.0));
+                Some(vec![TrackImportEffect::Vibrato(0.0, 0.0), vs])
+            }
+
+            // L - Tone portamento + Volume slide
+            12 => {
+                let vs =
+                    Self::s3m_volume_slide(param).unwrap_or(TrackImportEffect::VolumeSlideN(0.0));
+                Some(vec![TrackImportEffect::TonePortamento(0.0), vs])
+            }
+
+            // M - Set channel volume
+            13 => Some(vec![TrackImportEffect::ChannelVolume(
+                param.min(64) as f32 / 64.0,
+            )]),
+
+            // N - Channel volume slide
+            14 => Self::s3m_channel_volume_slide(param).map(|e| vec![e]),
+
+            // O - Sample offset
+            15 => Some(vec![TrackImportEffect::InstrumentSampleOffset(
+                param as usize * 256,
+            )]),
+
+            // P - Panning slide
+            16 => Self::s3m_panning_slide(param).map(|e| vec![e]),
+
+            // Q - Retrigger
+            17 => {
+                let vol = (param >> 4) as usize;
+                let speed = (param & 0x0F) as usize;
+                Some(vec![TrackImportEffect::NoteRetrigExtended(speed, vol)])
+            }
+
+            // R - Tremolo
+            18 => {
+                let speed = ((param & 0xF0) >> 4) as f32 / 64.0;
+                let depth = (param & 0x0F) as f32 / 16.0;
+                Some(vec![TrackImportEffect::Tremolo(speed, depth)])
+            }
+
+            // S - Special sub-commands
+            19 => {
+                let sub = param >> 4;
+                let val = param & 0x0F;
+                match sub {
+                    0x1 => Some(vec![TrackImportEffect::Glissando(val != 0)]),
+                    0x2 => Some(vec![TrackImportEffect::InstrumentFineTune(
+                        val as f32 / 8.0 - 1.0,
+                    )]),
+                    0x3 => {
+                        let wf = match val & 3 {
+                            1 => Waveform::RampDown,
+                            2 => Waveform::Square,
+                            _ => Waveform::Sine,
+                        };
+                        Some(vec![TrackImportEffect::VibratoWaveform(wf, (val & 4) == 0)])
                     }
-                    0xB => n.effect_parameter |= 0x60,
+                    0x4 => {
+                        let wf = match val & 3 {
+                            1 => Waveform::RampDown,
+                            2 => Waveform::Square,
+                            _ => Waveform::Sine,
+                        };
+                        Some(vec![TrackImportEffect::TremoloWaveform(wf, (val & 4) == 0)])
+                    }
+                    0x8 => Some(vec![TrackImportEffect::Panning(val as f32 / 15.0)]),
+                    0x9 => Some(vec![TrackImportEffect::NoteRetrig(val as usize)]),
                     0xC => {
-                        // Note Cut
-                        n.effect_parameter |= 0xC0;
-                        if n.effect_parameter == 0xC0 {
-                            // EC0 does nothing in ST3 but cuts voice in FT2, remove effect
-                            n.effect_type = 0;
-                            n.effect_parameter = 0;
+                        if val > 0 {
+                            Some(vec![TrackImportEffect::NoteCut(val as usize, false)])
+                        } else {
+                            None
                         }
                     }
                     0xD => {
-                        // Note Delay
-                        n.effect_parameter |= 0xD0;
-                        if let Pitch::None = n.note {
-                            // EDx without a note does nothing in ST3 but retrigs in FT2, remove effect
-                            n.effect_type = 0;
-                            n.effect_parameter = 0;
-                        } else if n.effect_parameter == 0xD0 {
-                            // ED0 prevents note/smp/vol from updating in ST3, remove everything
-                            n.note = Pitch::None;
-                            n.instrument = None;
-                            n.volume = 0;
-                            n.effect_type = 0;
-                            n.effect_parameter = 0;
+                        if val > 0 {
+                            Some(vec![TrackImportEffect::NoteDelay(val as usize)])
+                        } else {
+                            None
                         }
                     }
-                    0xE => n.effect_parameter |= 0xE0,
-                    0xF => n.effect_parameter |= 0xF0,
-                    _ => {
-                        n.effect_type = 0;
-                        n.effect_parameter = 0;
-                    }
+                    _ => None,
                 }
             }
-            20 => {
-                // T
-                n.effect_type = 0x0F;
-                if n.effect_parameter < 0x21 {
-                    // Txx with a value lower than 33 (0x21) does nothing in ST3, remove effect
-                    n.effect_type = 0;
-                    n.effect_parameter = 0;
-                }
-            }
-            22 => {
-                // V
-                n.effect_type = 0x10;
-                if n.effect_parameter > 0x40 {
-                    // Vxx > 0x40 does nothing in ST3
-                    n.effect_type = 0;
-                    n.effect_parameter = 0;
-                }
-            }
-            21 => {
-                // U - Fine vibrato (same as H but 4x finer depth)
-                n.effect_type = 0x04;
-            }
-            23 => {
-                // W - Global volume slide (same format as XM Hxy / 0x11)
-                n.effect_type = 0x11;
-            }
-            24 => {
-                // X - Set panning (0x00=left, 0x80=center, 0xFF=right in S3M 3.20+)
-                n.effect_type = 0x08;
-            }
-            _ => {
-                n.effect_type = 0;
-                n.effect_parameter = 0;
-            }
-        }
 
-        if let Some(_instr) = n.instrument {
-            if n.effect_type != 0x3 {
-                self.s3m_last_g_instrument[ii] = n.instrument;
+            // U - Fine vibrato (4x finer depth than H)
+            21 => {
+                let speed = ((param & 0xF0) >> 4) as f32 / 64.0;
+                let depth = (param & 0x0F) as f32 / 64.0;
+                Some(vec![TrackImportEffect::VibratoFine(speed, depth)])
             }
+
+            // X - Set panning
+            24 => Some(vec![TrackImportEffect::Panning(param as f32 / 255.0)]),
+
+            _ => None,
         }
+    }
+
+    // --- Volume column (raw S3M: 0-64 or absent) ---
+
+    fn s3m_walk_volume(current: &PatternSlot) -> Option<TrackImportEffect> {
+        if current.volume <= 64 {
+            Some(TrackImportEffect::Volume(current.volume as f32 / 64.0, 0))
+        } else {
+            None
+        }
+    }
+
+    // --- Global effects ---
+
+    fn s3m_walk_global_effect(current: &PatternSlot) -> Option<GlobalEffect> {
+        let param = current.effect_parameter;
+        match current.effect_type {
+            // A - Set speed
+            1 => {
+                if param > 0 && param <= 0x1F {
+                    Some(GlobalEffect::Speed(param as usize))
+                } else {
+                    None
+                }
+            }
+            // B - Jump to order
+            2 => Some(GlobalEffect::PositionJump(param as usize)),
+            // C - Break to row
+            3 => Some(GlobalEffect::PatternBreak(param as usize)),
+            // S - Special sub-commands (global)
+            19 => {
+                let sub = param >> 4;
+                let val = param & 0x0F;
+                match sub {
+                    0xB => Some(GlobalEffect::PatternLoop(val as usize)),
+                    0xE => Some(GlobalEffect::PatternDelay {
+                        quantity: val as usize,
+                        tempo: true,
+                    }),
+                    _ => None,
+                }
+            }
+            // T - Set tempo
+            20 => {
+                if param >= 0x20 {
+                    Some(GlobalEffect::Bpm(param as usize))
+                } else {
+                    None
+                }
+            }
+            // V - Set global volume
+            22 => {
+                if param <= 0x40 {
+                    Some(GlobalEffect::Volume(param as f32 / 64.0))
+                } else {
+                    None
+                }
+            }
+            // W - Global volume slide
+            23 => {
+                let high = (param & 0xF0) >> 4;
+                let low = param & 0x0F;
+                match (high, low) {
+                    (0xF, f) => Some(GlobalEffect::VolumeSlide {
+                        speed: -(f as f32) / 64.0,
+                        fine: true,
+                    }),
+                    (f, 0xF) => Some(GlobalEffect::VolumeSlide {
+                        speed: f as f32 / 64.0,
+                        fine: true,
+                    }),
+                    (0, f) => Some(GlobalEffect::VolumeSlide {
+                        speed: -(f as f32) / 64.0,
+                        fine: false,
+                    }),
+                    (f, 0) => Some(GlobalEffect::VolumeSlide {
+                        speed: f as f32 / 64.0,
+                        fine: false,
+                    }),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    // --- Public API ---
+
+    pub fn s3m_unpack(freq_type: FrequencyType, current: &PatternSlot) -> TrackImportUnit {
+        let te = Self::s3m_walk_effect(freq_type, current);
+        let ve = Self::s3m_walk_volume(current);
+        let ge = Self::s3m_walk_global_effect(current);
+
+        let mut tiu = TrackImportUnit::default();
+        tiu.note = current.note;
+        tiu.instrument = current.instrument;
+        if let Some(e) = ve {
+            tiu.effects.push(e);
+        }
+        if let Some(e) = te {
+            tiu.effects.extend(e);
+        }
+        if let Some(g) = ge {
+            tiu.global_effects.push(g);
+        }
+        tiu
+    }
+
+    pub fn s3m_unpack_pattern(
+        freq_type: FrequencyType,
+        pattern: &[Vec<PatternSlot>],
+    ) -> Vec<Vec<TrackImportUnit>> {
+        pattern
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|slot| Self::s3m_unpack(freq_type, slot))
+                    .collect()
+            })
+            .collect()
     }
 }
