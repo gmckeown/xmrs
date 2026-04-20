@@ -186,7 +186,7 @@ impl XmInstrDefault {
 
 pub const XMINSTRUMENT_HEADER_SIZE: usize = 25;
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Default)]
 pub struct XmInstrumentHeader {
     #[serde(
         deserialize_with = "deserialize_string_22",
@@ -197,19 +197,9 @@ pub struct XmInstrumentHeader {
     pub num_samples: u16,
 }
 
-impl Default for XmInstrumentHeader {
-    fn default() -> Self {
-        Self {
-            name: String::new(),
-            instr_type: 0,
-            num_samples: 0,
-        }
-    }
-}
-
 impl XmInstrumentHeader {
     pub fn save(&self) -> Result<Vec<u8>, EncodeError> {
-        bincode::serde::encode_to_vec(&self, bincode::config::legacy())
+        bincode::serde::encode_to_vec(self, bincode::config::legacy())
     }
 
     pub fn from_instr(i: &Instrument) -> Self {
@@ -255,7 +245,7 @@ impl XmInstrument {
         {
             len.0 as usize
         } else {
-            return Ok((&data, XmInstrument::default()));
+            return Ok((data, XmInstrument::default()));
         };
 
         if xmih_len == 4 {

@@ -24,7 +24,7 @@ pub enum Waveform {
 impl Waveform {
     fn value(&self, step: f32) -> f32 {
         let step = step % 1.0;
-        return match self {
+        match self {
             Waveform::TranslatedSine => 0.5 + 0.5 * (core::f32::consts::TAU * (step + 0.25)).sin(),
             Waveform::TranslatedSquare => {
                 if step < 0.5 {
@@ -57,7 +57,7 @@ impl Waveform {
                 }
             }
             Waveform::Random => 0.0,
-        };
+        }
     }
 }
 

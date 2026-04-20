@@ -57,12 +57,12 @@ impl ItPattern {
             });
         }
 
-        return Ok(Self {
+        Ok(Self {
             pattern_length,
             row_count,
             reserved,
             packed_data: data[..pattern_length as usize].to_vec(),
-        });
+        })
     }
 
     pub fn unpack(&self) -> Result<Vec<Vec<PatternSlot>>, DecodeError> {
@@ -70,7 +70,7 @@ impl ItPattern {
             return Ok(vec![]);
         }
         let mut result = vec![vec![PatternSlot::default(); 64]; self.row_count as usize];
-        let mut last_mask_vars = vec![0u8; 64];
+        let mut last_mask_vars = [0u8; 64];
         let mut data_iter = self.packed_data.iter();
 
         for row in 0..self.row_count as usize {

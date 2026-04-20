@@ -14,12 +14,12 @@ impl EnvelopePoint {
     /// Linear interpolation between two envelope points
     pub fn lerp(a: &EnvelopePoint, b: &EnvelopePoint, pos: usize) -> f32 {
         if pos <= a.frame {
-            return a.value;
+            a.value
         } else if pos >= b.frame {
-            return b.value;
+            b.value
         } else {
             let p: f32 = (pos - a.frame) as f32 / (b.frame - a.frame) as f32;
-            return a.value * (1.0 - p) + b.value * p;
+            a.value * (1.0 - p) + b.value * p
         }
     }
 }

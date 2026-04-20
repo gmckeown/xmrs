@@ -114,7 +114,7 @@ impl PatternSlot {
         bytes[2] = self.volume;
         bytes[3] = self.effect_type;
         bytes[4] = self.effect_parameter;
-        return bytes.to_vec();
+        bytes.to_vec()
     }
 
     pub fn save_xm(&self) -> Vec<u8> {

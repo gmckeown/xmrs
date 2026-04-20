@@ -39,18 +39,13 @@ use alloc::{vec, vec::Vec};
 */
 
 /// Determines what happens when a new note is played on a channel that is already occupied by another note
-#[derive(Clone, Copy, Serialize, Deserialize, Debug, PartialEq)]
+#[derive(Default, Clone, Copy, Serialize, Deserialize, Debug, PartialEq)]
 pub enum NewNoteAction {
+    #[default]
     NoteCut,
     Continue,
     NoteOff,
     NoteFadeOut,
-}
-
-impl Default for NewNoteAction {
-    fn default() -> Self {
-        Self::NoteCut
-    }
 }
 
 /// Action to take when a new note is played

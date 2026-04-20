@@ -53,7 +53,7 @@ impl InstrHelper {
         let mut noise_data: Vec<i8> = vec![0; 128];
 
         for i in 0..128 {
-            let new_bit = (lfsr >> 0) ^ (lfsr >> 1) & 1;
+            let new_bit = lfsr ^ (lfsr >> 1) & 1;
             lfsr = (lfsr >> 1) | (new_bit << 15);
             let value_u8 = (lfsr & 0xFF) as u8;
             noise_data[i] = value_u8.wrapping_sub(128) as i8;
@@ -178,7 +178,7 @@ impl InstrHelper {
         instr.volume_envelope = volume_envelope;
         instr.sample_for_pitch = [Some(0); 120];
 
-        let mut s: Sample = Self::sid_to_sample(&sid);
+        let mut s: Sample = Self::sid_to_sample(sid);
         s.relative_pitch = 24;
         instr.sample = vec![Some(s)];
 

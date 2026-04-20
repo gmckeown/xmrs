@@ -110,12 +110,12 @@ impl ItHeader {
         match header_de {
             Ok(header_de_ok) => {
                 if header_de_ok.0.is_it_header() {
-                    return Ok(header_de_ok);
+                    Ok(header_de_ok)
                 } else {
-                    return Err(DecodeError::OtherString("Not an IT Module?".to_string()));
+                    Err(DecodeError::OtherString("Not an IT Module?".to_string()))
                 }
             }
-            Err(e) => return Err(e),
+            Err(e) => Err(e),
         }
     }
 

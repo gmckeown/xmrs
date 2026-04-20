@@ -23,7 +23,7 @@ impl PatternSlot {
         let mut best = 0;
         let mut best_diff = u16::MAX;
         for (i, &p) in Self::AMIGA_PERIODS.iter().enumerate() {
-            let diff = if period > p { period - p } else { p - period };
+            let diff = period.abs_diff(p);
             if diff < best_diff {
                 best_diff = diff;
                 best = i as u8 + 1;

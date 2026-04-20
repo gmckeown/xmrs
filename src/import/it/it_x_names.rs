@@ -32,7 +32,7 @@ impl ItXNames {
         let dest: Vec<String> = data
             .chunks(chunk_size)
             .map(|chunk| {
-                String::from_utf8_lossy(&chunk)
+                String::from_utf8_lossy(chunk)
                     .trim_matches(char::from(0))
                     .trim()
                     .to_string()

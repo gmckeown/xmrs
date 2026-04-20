@@ -150,7 +150,7 @@ impl PatternHelper {
                 }
             }
         }
-        return track;
+        track
     }
 
     fn get_tracks(&self) -> Vec<Vec<PatternSlot>> {
@@ -158,7 +158,7 @@ impl PatternHelper {
         for (i, t) in self.tracks.iter().enumerate() {
             tracks.push(self.get_track(i, t));
         }
-        return tracks;
+        tracks
     }
 
     fn get_pattern_order(&self, song_number: usize) -> Vec<&Vec<u8>> {
@@ -279,7 +279,7 @@ impl PatternHelper {
             let current_pattern = &patterns[i];
 
             if current_pattern.len() > max_size {
-                let num_splits = (current_pattern.len() + max_size - 1) / max_size;
+                let num_splits = current_pattern.len().div_ceil(max_size);
                 let mut new_patterns = Vec::new();
 
                 for j in 0..num_splits {

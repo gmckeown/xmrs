@@ -118,7 +118,7 @@ impl S3mPcmInstr {
     }
 
     fn convert_u8_to_u16_vec(input: &[u8]) -> Result<Vec<u16>, DecodeError> {
-        if input.len() % 2 != 0 {
+        if !input.len().is_multiple_of(2) {
             return Err(DecodeError::Other("input is odd!"));
         }
 
@@ -247,7 +247,7 @@ impl S3mOplInstr {
         i_opl.finetune = rn.1;
         i_opl.relative_pitch = rn.0;
 
-        return i_opl;
+        i_opl
     }
 }
 
@@ -296,7 +296,7 @@ impl S3mMetaInstrument {
                 sample = Some(i.get_sample_data(data)?);
                 S3mInstrument::PcmInstrument(i)
             }
-            2 | 3 | 4 | 5 | 6 | 7 => {
+            2..=7 => {
                 let i = bincode::serde::decode_from_slice::<S3mOplInstr, _>(
                     &data[offset + 13..],
                     bincode::config::legacy(),
@@ -372,7 +372,7 @@ impl S3mModule {
         if data.len() < s {
             return Result::Err(DecodeError::Other("Not an S3M module?"));
         }
-        let sample_offsets: Vec<u32> = (&data[0..s])
+        let sample_offsets: Vec<u32> = data[0..s]
             .chunks(2)
             .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], 0, 0]) << 4)
             .collect();
@@ -384,7 +384,7 @@ impl S3mModule {
         if data.len() < s {
             return Result::Err(DecodeError::Other("Not an S3M module?"));
         }
-        let pattern_offsets: Vec<u32> = (&data[0..s])
+        let pattern_offsets: Vec<u32> = data[0..s]
             .chunks(2)
             .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], 0, 0]) << 4)
             .collect();
@@ -411,7 +411,7 @@ impl S3mModule {
             let data = &data[2..len as usize];
             let mut d2 = data;
             let mut pattern: Vec<Vec<PatternSlot>> = vec![];
-            while d2.len() != 0 {
+            while !d2.is_empty() {
                 let (pss, next) = Self::process_pattern_row(d2)?;
                 pattern.push(pss);
                 d2 = next;
@@ -427,7 +427,7 @@ impl S3mModule {
     fn process_pattern_row(data: &[u8]) -> Result<(Vec<PatternSlot>, &[u8]), DecodeError> {
         let mut d2 = data;
         let mut pss: Vec<PatternSlot> = vec![PatternSlot::default(); 32];
-        while d2.len() != 0 {
+        while !d2.is_empty() {
             match Self::decode_pattern_slot(d2) {
                 Some((channel, ps, next)) => {
                     pss[channel] = ps;
@@ -439,7 +439,7 @@ impl S3mModule {
                 }
             }
         }
-        return Ok((pss, d2));
+        Ok((pss, d2))
     }
 
     // return channel, PatternSlot, next data
@@ -487,14 +487,12 @@ impl S3mModule {
         }
 
         // Volume?
-        if what & 0x40 != 0 {
-            if k < packed_data.len() {
-                slot.volume = packed_data[k];
-                if slot.volume > 64 {
-                    slot.volume = 255; // invalid / default instrument volume
-                }
-                k += 1;
+        if what & 0x40 != 0 && k < packed_data.len() {
+            slot.volume = packed_data[k];
+            if slot.volume > 64 {
+                slot.volume = 255; // invalid / default instrument volume
             }
+            k += 1;
         }
 
         // effect and data?
@@ -554,7 +552,7 @@ impl S3mModule {
                         sustain_loop_flag: LoopType::No,
                         sustain_loop_start: 0,
                         sustain_loop_length: 0,
-                        data: data,
+                        data,
                     };
 
                     // Create InstrDefault

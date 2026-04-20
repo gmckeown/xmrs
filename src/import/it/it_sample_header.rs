@@ -247,14 +247,14 @@ impl ItSampleHeader {
 
     pub fn get_sample_data(&self, data: &[u8]) -> Result<SampleDataType, DecodeError> {
         if self.is_compressed() {
-            return self.get_sample_data_from_compressed_values(data);
+            self.get_sample_data_from_compressed_values(data)
         } else {
-            return self.get_sample_data_from_values(data);
+            self.get_sample_data_from_values(data)
         }
     }
 
     fn convert_u8_to_i16_vec(&self, input: &[u8]) -> Result<Vec<i16>, DecodeError> {
-        if input.len() % 2 != 0 {
+        if !input.len().is_multiple_of(2) {
             return Err(DecodeError::Other("input is odd!"));
         }
 
@@ -369,7 +369,7 @@ impl ItSampleHeader {
 
                 if left < 7 {
                     // Type A
-                    if (1 as u16) << (left - 1) == bits {
+                    if 1_u16 << (left - 1) == bits {
                         bits = bit_reader.read_bits(3).ok_or(DecodeError::LimitExceeded)? as u16;
                         left = if bits as u8 + 1 < left {
                             bits as u8 + 1
@@ -468,7 +468,7 @@ impl ItSampleHeader {
 
                 if left < 7 {
                     // Type A
-                    if (1 as u32) << (left - 1) == bits {
+                    if 1_u32 << (left - 1) == bits {
                         bits = bit_reader.read_bits(4).ok_or(DecodeError::LimitExceeded)?;
                         left = if bits as u8 + 1 < left {
                             bits as u8 + 1
@@ -535,7 +535,7 @@ impl ItSampleHeader {
     }
 
     pub fn to_sample(&self, data: &Option<SampleDataType>) -> Sample {
-        let name = if self.sample_name.len() != 0 {
+        let name = if !self.sample_name.is_empty() {
             self.sample_name.clone()
         } else {
             self.dos_filename.clone()
@@ -565,17 +565,11 @@ impl ItSampleHeader {
             0.5
         };
 
-        let llength = if self.loop_end < self.loop_beginning {
-            0
-        } else {
-            self.loop_end - self.loop_beginning
-        };
+        let llength = self.loop_end.saturating_sub(self.loop_beginning);
 
-        let sllength = if self.sustain_loop_end < self.sustain_loop_beginning {
-            0
-        } else {
-            self.sustain_loop_end - self.sustain_loop_beginning
-        };
+        let sllength = self
+            .sustain_loop_end
+            .saturating_sub(self.sustain_loop_beginning);
 
         Sample {
             name,

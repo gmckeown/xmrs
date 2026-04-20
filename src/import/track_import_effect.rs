@@ -183,9 +183,9 @@ impl TrackImportEffect {
             .sum();
 
         if s == 0.0 {
-            return None;
+            None
         } else {
-            return Some(TrackEffect::VibratoDepth(s));
+            Some(TrackEffect::VibratoDepth(s))
         }
     }
 
@@ -200,12 +200,12 @@ impl TrackImportEffect {
             .fold((0.0, 0.0), |acc, (a, b)| (acc.0 + a, acc.1 + b));
 
         if s.0 == 0.0 && s.1 == 0.0 {
-            return None;
+            None
         } else {
-            return Some(TrackEffect::Vibrato {
+            Some(TrackEffect::Vibrato {
                 speed: s.0,
                 depth: s.1,
-            });
+            })
         }
     }
 
@@ -220,9 +220,9 @@ impl TrackImportEffect {
             .sum();
 
         if s == 0.0 {
-            return None;
+            None
         } else {
-            return Some(TrackEffect::TonePortamento(s));
+            Some(TrackEffect::TonePortamento(s))
         }
     }
 
@@ -241,9 +241,9 @@ impl TrackImportEffect {
             .sum();
 
         if s == 0.0 {
-            return None;
+            None
         } else {
-            return Some(TrackEffect::Portamento(s));
+            Some(TrackEffect::Portamento(s))
         }
     }
 
@@ -330,19 +330,24 @@ impl TrackImportEffect {
                 volume_modifier: NoteRetrigOperator::None,
             }),
             TrackImportEffect::NoteRetrigExtended(interval, vol) => {
+                // FT2 Rxy volume-modifier table works on a 0..64 volume scale
+                // (see ft2_replayer.c::doMultiNoteRetrig). xmrs uses 0..1, so
+                // each additive delta is divided by 64. Multiplicative ratios
+                // are scale-independent.
+                const S: f32 = 1.0 / 64.0;
                 let volume = match *vol {
-                    1 => NoteRetrigOperator::Sum(-1.0),
-                    2 => NoteRetrigOperator::Sum(-2.0),
-                    3 => NoteRetrigOperator::Sum(-4.0),
-                    4 => NoteRetrigOperator::Sum(-8.0),
-                    5 => NoteRetrigOperator::Sum(-16.0),
+                    1 => NoteRetrigOperator::Sum(-S),
+                    2 => NoteRetrigOperator::Sum(-2.0 * S),
+                    3 => NoteRetrigOperator::Sum(-4.0 * S),
+                    4 => NoteRetrigOperator::Sum(-8.0 * S),
+                    5 => NoteRetrigOperator::Sum(-16.0 * S),
                     6 => NoteRetrigOperator::Mul(2.0 / 3.0),
                     7 => NoteRetrigOperator::Mul(1.0 / 2.0),
-                    9 => NoteRetrigOperator::Sum(1.0),
-                    0xA => NoteRetrigOperator::Sum(2.0),
-                    0xB => NoteRetrigOperator::Sum(4.0),
-                    0xC => NoteRetrigOperator::Sum(8.0),
-                    0xD => NoteRetrigOperator::Sum(16.0),
+                    9 => NoteRetrigOperator::Sum(1.0 * S),
+                    0xA => NoteRetrigOperator::Sum(2.0 * S),
+                    0xB => NoteRetrigOperator::Sum(4.0 * S),
+                    0xC => NoteRetrigOperator::Sum(8.0 * S),
+                    0xD => NoteRetrigOperator::Sum(16.0 * S),
                     0xE => NoteRetrigOperator::Mul(3.0 / 2.0),
                     0xF => NoteRetrigOperator::Mul(2.0),
                     _ => NoteRetrigOperator::None,
@@ -453,8 +458,7 @@ impl TrackImportEffect {
         }
 
         // Remove duplicates
-        let vte = Self::remove_duplicates_and_merge(vte);
 
-        return vte;
+        Self::remove_duplicates_and_merge(vte)
     }
 }

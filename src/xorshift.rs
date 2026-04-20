@@ -7,19 +7,19 @@ use serde::{Deserialize, Serialize};
 
 /// A randomized 8-bit value generator using the xorshift algorithm
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, Hash, PartialEq)]
-#[cfg(any(feature = "rand8"))]
+#[cfg(feature = "rand8")]
 pub struct XorShift8 {
     state: u8,
 }
 
-#[cfg(any(feature = "rand8"))]
+#[cfg(feature = "rand8")]
 impl Default for XorShift8 {
     fn default() -> Self {
         Self { state: 251 }
     }
 }
 
-#[cfg(any(feature = "rand8"))]
+#[cfg(feature = "rand8")]
 impl XorShift8 {
     pub fn new(seed: Option<u8>) -> Self {
         let s = if let Some(v) = seed {
@@ -46,7 +46,7 @@ impl XorShift8 {
 }
 
 /// Next rand8 number using an Iterator
-#[cfg(any(feature = "rand8"))]
+#[cfg(feature = "rand8")]
 impl Iterator for XorShift8 {
     type Item = u8;
 
@@ -62,19 +62,19 @@ impl Iterator for XorShift8 {
 
 /// A randomized 16-bit value generator using the xorshift algorithm
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, Hash, PartialEq)]
-#[cfg(any(feature = "rand16"))]
+#[cfg(feature = "rand16")]
 pub struct XorShift16 {
     state: u16,
 }
 
-#[cfg(any(feature = "rand16"))]
+#[cfg(feature = "rand16")]
 impl Default for XorShift16 {
     fn default() -> Self {
         Self { state: 65521 }
     }
 }
 
-#[cfg(any(feature = "rand16"))]
+#[cfg(feature = "rand16")]
 impl XorShift16 {
     pub fn new(seed: Option<u16>) -> Self {
         let s = if let Some(v) = seed {
@@ -101,7 +101,7 @@ impl XorShift16 {
 }
 
 /// Next rand16 number using an Iterator
-#[cfg(any(feature = "rand16"))]
+#[cfg(feature = "rand16")]
 impl Iterator for XorShift16 {
     type Item = u16;
 
@@ -168,12 +168,12 @@ impl Iterator for XorShift32 {
 
 /// A randomized 64-bit value generator using the xorshift algorithm
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, Hash, PartialEq)]
-#[cfg(any(feature = "rand64"))]
+#[cfg(feature = "rand64")]
 pub struct XorShift64 {
     state: u64,
 }
 
-#[cfg(any(feature = "rand64"))]
+#[cfg(feature = "rand64")]
 impl Default for XorShift64 {
     fn default() -> Self {
         Self {
@@ -182,7 +182,7 @@ impl Default for XorShift64 {
     }
 }
 
-#[cfg(any(feature = "rand64"))]
+#[cfg(feature = "rand64")]
 impl XorShift64 {
     pub fn new(seed: Option<u64>) -> Self {
         let s = if let Some(v) = seed {
@@ -208,7 +208,7 @@ impl XorShift64 {
 }
 
 /// Next rand64 number using an Iterator
-#[cfg(any(feature = "rand64"))]
+#[cfg(feature = "rand64")]
 impl Iterator for XorShift64 {
     type Item = u64;
 

@@ -31,19 +31,10 @@ pub struct XmSampleHeader {
     name: String,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Default)]
 pub struct XmSample {
     header: XmSampleHeader,
     data: Option<SampleDataType>,
-}
-
-impl Default for XmSample {
-    fn default() -> Self {
-        XmSample {
-            header: XmSampleHeader::default(),
-            data: None,
-        }
-    }
 }
 
 impl XmSample {
@@ -150,8 +141,8 @@ impl XmSample {
                 3 => LoopType::PingPong,
                 _ => LoopType::No,
             },
-            loop_start: loop_start,
-            loop_length: loop_length,
+            loop_start,
+            loop_length,
             sustain_loop_flag: LoopType::No,
             sustain_loop_start: 0,
             sustain_loop_length: 0,
@@ -162,39 +153,37 @@ impl XmSample {
     pub fn from_instr(i: &Instrument) -> Vec<XmSample> {
         let mut output: Vec<XmSample> = vec![];
         if let InstrumentType::Default(id) = &i.instr_type {
-            for s in &id.sample {
-                if let Some(s) = s {
-                    let mut loop_start = s.loop_start;
-                    let mut loop_length = s.loop_length;
+            for s in id.sample.iter().flatten() {
+                let mut loop_start = s.loop_start;
+                let mut loop_length = s.loop_length;
 
-                    if let Some(SampleDataType::Mono16(_)) = &s.data {
-                        loop_start <<= 1;
-                        loop_length <<= 1;
-                    }
-
-                    let mut xms = XmSample::default();
-                    xms.header.length = match &s.data {
-                        Some(SampleDataType::Mono8(d)) => d.len() as u32,
-                        Some(SampleDataType::Mono16(d)) => 2 * d.len() as u32,
-                        Some(SampleDataType::Stereo8(d)) => 2 * d.len() as u32,
-                        Some(SampleDataType::Stereo16(d)) => 2 * 2 * d.len() as u32,
-                        Some(SampleDataType::StereoFloat(d)) => 4 * 2 * d.len() as u32,
-                        None => 0,
-                    };
-                    xms.header.loop_start = loop_start;
-                    xms.header.loop_length = loop_length;
-                    xms.header.volume = (s.volume * 64.0) as u8;
-                    xms.header.finetune = (s.finetune * 127.0) as i8;
-                    xms.header.flags = s.loop_flag.into();
-                    if let Some(SampleDataType::Mono16(_)) = &s.data {
-                        xms.header.flags |= 0b0001_0000;
-                    }
-                    xms.header.panning = (s.panning * 255.0) as u8;
-                    xms.header.relative_pitch = s.relative_pitch;
-                    xms.header.name = s.name.clone();
-                    xms.data = s.data.clone();
-                    output.push(xms);
+                if let Some(SampleDataType::Mono16(_)) = &s.data {
+                    loop_start <<= 1;
+                    loop_length <<= 1;
                 }
+
+                let mut xms = XmSample::default();
+                xms.header.length = match &s.data {
+                    Some(SampleDataType::Mono8(d)) => d.len() as u32,
+                    Some(SampleDataType::Mono16(d)) => 2 * d.len() as u32,
+                    Some(SampleDataType::Stereo8(d)) => 2 * d.len() as u32,
+                    Some(SampleDataType::Stereo16(d)) => 2 * 2 * d.len() as u32,
+                    Some(SampleDataType::StereoFloat(d)) => 4 * 2 * d.len() as u32,
+                    None => 0,
+                };
+                xms.header.loop_start = loop_start;
+                xms.header.loop_length = loop_length;
+                xms.header.volume = (s.volume * 64.0) as u8;
+                xms.header.finetune = (s.finetune * 127.0) as i8;
+                xms.header.flags = s.loop_flag.into();
+                if let Some(SampleDataType::Mono16(_)) = &s.data {
+                    xms.header.flags |= 0b0001_0000;
+                }
+                xms.header.panning = (s.panning * 255.0) as u8;
+                xms.header.relative_pitch = s.relative_pitch;
+                xms.header.name = s.name.clone();
+                xms.data = s.data.clone();
+                output.push(xms);
             }
         }
         output

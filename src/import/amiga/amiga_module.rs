@@ -38,7 +38,7 @@ impl AmigaModule {
             tag if tag.ends_with("CH") || tag.ends_with("CN") => {
                 match &tag[..tag.len() - 2].parse::<u8>().unwrap_or(0) {
                     0 => None,
-                    v @ _ => Some(*v),
+                    v => Some(*v),
                 }
             }
             _ => None,
@@ -151,7 +151,7 @@ impl AmigaModule {
 
         instr.instr_type = InstrumentType::Default(idef);
 
-        return instr;
+        instr
     }
 
     pub fn to_module(&self) -> Module {

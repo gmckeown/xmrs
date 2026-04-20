@@ -61,6 +61,6 @@ impl Module {
             return Ok(m);
         };
 
-        return Err(DecodeError::Other("Unknown data?"));
+        Err(DecodeError::Other("Unknown data?"))
     }
 }

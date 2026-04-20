@@ -172,10 +172,10 @@ impl ItModule {
         let message = if header.0.is_song_message_attached() && header.0.message_length != 0 {
             let start = header.0.message_offset as usize;
             let end = start + header.0.message_length as usize;
-            if (&ser_it_module[start..]).len() < header.0.message_length as usize {
+            if ser_it_module[start..].len() < header.0.message_length as usize {
                 return Err(DecodeError::ArrayLengthMismatch {
                     required: header.0.message_length as usize,
-                    found: (&ser_it_module[start..]).len(),
+                    found: ser_it_module[start..].len(),
                 });
             }
             let src = &ser_it_module[start..end];
@@ -250,7 +250,7 @@ impl ItModule {
                 }
 
                 let sample = sh.get_sample_data(&ser_it_module[start..])?;
-                if sample.len() != 0 {
+                if !sample.is_empty() {
                     samples.push(Some(sample));
                 } else {
                     samples.push(None);
@@ -277,7 +277,7 @@ impl ItModule {
             samples,
         };
 
-        return Ok(it);
+        Ok(it)
     }
 
     pub fn to_module(&self) -> Module {
@@ -326,7 +326,7 @@ impl ItModule {
                 &None
             };
 
-            let s = sh.to_sample(&pdata);
+            let s = sh.to_sample(pdata);
             samples.push(s);
 
             let vibrato = sh.to_vibrato();
@@ -335,7 +335,7 @@ impl ItModule {
 
         if self.header.is_instruments_used() {
             // Prepare Instrument then add samples
-            for (_index, i) in self.instruments.iter().enumerate() {
+            for i in self.instruments.iter() {
                 let mut instrument = i.prepare_instrument();
                 if let InstrumentType::Default(instrdef) = &mut instrument.instr_type {
                     // Find first referenced sample and use its vibrato
@@ -352,10 +352,8 @@ impl ItModule {
                             if instrdef.sample.len() <= i3 {
                                 instrdef.sample.resize_with(i3 + 1, || None);
                             }
-                            if let None = instrdef.sample[i3] {
-                                if samples.len() > i3 {
-                                    instrdef.sample[i3] = Some(samples[i3].clone());
-                                }
+                            if instrdef.sample[i3].is_none() && samples.len() > i3 {
+                                instrdef.sample[i3] = Some(samples[i3].clone());
                             }
                         }
                     }

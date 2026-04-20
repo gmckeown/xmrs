@@ -40,7 +40,6 @@ So the last call to the pattern will be the winner.
 
 */
 
-use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::import::it::it_effect::ItEffect;
@@ -683,6 +682,6 @@ impl ImportMemory {
                 }
             }
         }
-        return dest;
+        dest
     }
 }

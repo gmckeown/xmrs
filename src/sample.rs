@@ -36,6 +36,10 @@ impl SampleDataType {
             SampleDataType::StereoFloat(v) => v.len() / 2,
         }
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 /// A Real Data sample
@@ -78,6 +82,11 @@ impl Sample {
         } else {
             0
         }
+    }
+
+    /// `true` when the sample has no data or zero-length data.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     /// return sample at seek
@@ -125,7 +134,7 @@ impl Sample {
         length: usize,
         loop_type: LoopType,
     ) -> usize {
-        if self.len() == 0 {
+        if self.is_empty() {
             return 0;
         }
         let end = start + length;

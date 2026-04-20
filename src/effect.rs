@@ -8,17 +8,12 @@ use micromath::F32Ext;
 #[allow(unused_imports)]
 use num_traits::float::Float;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Default, Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum NoteRetrigOperator {
+    #[default]
     None,
     Sum(f32),
     Mul(f32),
-}
-
-impl Default for NoteRetrigOperator {
-    fn default() -> Self {
-        NoteRetrigOperator::None
-    }
 }
 
 #[repr(u8)]
@@ -398,7 +393,7 @@ impl TrackEffect {
                 },
             ) => {
                 Some(TrackEffect::PanbrelloWaveform {
-                    waveform: o1.clone(),
+                    waveform: *o1,
                     retrig: *o2,
                 }) // overwrite values
             }
@@ -448,7 +443,7 @@ impl TrackEffect {
                 },
             ) => {
                 Some(TrackEffect::TremoloWaveform {
-                    waveform: o1.clone(),
+                    waveform: *o1,
                     retrig: *o2,
                 }) // overwrite values
             }
@@ -495,7 +490,7 @@ impl TrackEffect {
                 },
             ) => {
                 Some(TrackEffect::VibratoWaveform {
-                    waveform: o1.clone(),
+                    waveform: *o1,
                     retrig: *o2,
                 }) // overwrite values
             }

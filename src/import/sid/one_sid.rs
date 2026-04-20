@@ -47,7 +47,7 @@ impl OneSid {
 
         let mut channels: Vec<Vec<u8>> = vec![];
         for offset in &channels_ptr {
-            let file_offset = *offset as usize + 126 - self.load_adress;
+            let file_offset = *offset + 126 - self.load_adress;
             let mut tracks: Vec<u8> = vec![];
             let mut j = 0;
             while self.song[file_offset + j] & 0x80 == 0 {

@@ -82,7 +82,7 @@ impl XiInstrument {
         if xi.num_samples == 0 {
             let xmi = XmInstrument {
                 instrument_header_len: 4 + XMINSTRUMENT_HEADER_SIZE as u32,
-                header: header,
+                header,
                 sample_header_size: XMSAMPLE_HEADER_SIZE as u32,
                 instr: XmInstrumentType::Default(Box::new(xi.instr)),
                 sample: vec![],
@@ -107,12 +107,12 @@ impl XiInstrument {
 
         let xmi = XmInstrument {
             instrument_header_len: 4 + XMINSTRUMENT_HEADER_SIZE as u32,
-            header: header,
+            header,
             sample_header_size: XMSAMPLE_HEADER_SIZE as u32,
             instr: XmInstrumentType::Default(Box::new(xi.instr)),
-            sample: sample,
+            sample,
         };
 
-        return Ok(xmi);
+        Ok(xmi)
     }
 }

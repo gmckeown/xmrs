@@ -10,16 +10,11 @@ use num_traits::float::Float;
 use crate::period_helper_cache::PeriodHelperCache;
 
 /// Historical Frequencies to load old data. Default is Linear.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
+#[derive(Default, Serialize, Deserialize, Clone, Copy, Debug)]
 pub enum FrequencyType {
     AmigaFrequencies,
+    #[default]
     LinearFrequencies,
-}
-
-impl Default for FrequencyType {
-    fn default() -> Self {
-        Self::LinearFrequencies
-    }
 }
 
 #[derive(Clone)]
@@ -161,7 +156,7 @@ impl PeriodHelper {
         const NOTE_B9: f32 = 10.0 * 12.0 - 1.0;
 
         let note = NOTE_C4 + relative_pitch;
-        if note < 0.0 || note > NOTE_B9 {
+        if !(0.0..=NOTE_B9).contains(&note) {
             return None;
         }
         let c4_period = self.note_to_period(note + finetune);

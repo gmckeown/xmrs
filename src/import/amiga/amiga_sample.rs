@@ -20,9 +20,9 @@ pub struct AmigaSample {
 
 impl fmt::Debug for AmigaSample {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
+        writeln!(
             f,
-            "Sample: {} (v:{}, f:{}, l:{}, ro:{}, rl:{})\n",
+            "Sample: {} (v:{}, f:{}, l:{}, ro:{}, rl:{})",
             self.name,
             self.volume,
             self.finetune,
@@ -36,7 +36,7 @@ impl fmt::Debug for AmigaSample {
 impl AmigaSample {
     pub fn load(ser_sample: &[u8]) -> Result<(&[u8], Self), DecodeError> {
         match bincode::serde::decode_from_slice::<AmigaSample, _>(
-            &ser_sample,
+            ser_sample,
             bincode::config::legacy(),
         ) {
             Ok((mut aspl, _)) => {
@@ -54,7 +54,7 @@ impl AmigaSample {
         let ro = if 2 * (self.repeat_offset_div2 as usize) < 2 * (self.length_div2 as usize) {
             2 * self.repeat_offset_div2 as usize
         } else {
-            0 as usize
+            0_usize
         };
         let rl = if ro + 2 * (self.repeat_length_div2 as usize) <= 2 * (self.length_div2 as usize) {
             2 * self.repeat_length_div2 as usize

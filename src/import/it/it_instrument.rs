@@ -116,7 +116,7 @@ impl ItEnvelopePre2 {
                 value: (*magnitude as f32) / 64.0,
             });
         }
-        points.sort_by(|a, b| a.frame.cmp(&b.frame));
+        points.sort_by_key(|a| a.frame);
         points
     }
 }
@@ -266,7 +266,7 @@ impl ItEnvelopePost2 {
                 value: (*value as f32) / 64.0,
             });
         }
-        points.sort_by(|a, b| a.frame.cmp(&b.frame));
+        points.sort_by_key(|a| a.frame);
         points
     }
 
@@ -349,7 +349,7 @@ impl ItInstrument {
             instr: instr_h.0,
             volume_envelope: vol.0,
         };
-        return Ok(ItInstrument::Pre2(instr));
+        Ok(ItInstrument::Pre2(instr))
     }
 
     pub fn load_post2(source: &[u8]) -> Result<Self, DecodeError> {
@@ -387,7 +387,7 @@ impl ItInstrument {
             panning_envelope: pan.0,
             pitch_envelope: pitch.0,
         };
-        return Ok(ItInstrument::Post2(instr));
+        Ok(ItInstrument::Post2(instr))
     }
 
     pub fn prepare_instrument(&self) -> Instrument {
@@ -398,7 +398,7 @@ impl ItInstrument {
 
         match self {
             ItInstrument::Pre2(source) => {
-                name = if source.instr.instrument_name.len() != 0 {
+                name = if !source.instr.instrument_name.is_empty() {
                     source.instr.instrument_name.clone()
                 } else {
                     source.instr.dos_filename.clone()
@@ -434,7 +434,7 @@ impl ItInstrument {
                 muted = source.instr.dnc == 0;
             }
             ItInstrument::Post2(source) => {
-                name = if source.instr.instrument_name.len() != 0 {
+                name = if !source.instr.instrument_name.is_empty() {
                     source.instr.instrument_name.clone()
                 } else {
                     source.instr.dos_filename.clone()
@@ -460,9 +460,9 @@ impl ItInstrument {
                 };
 
                 let dca = match source.instr.duplicate_check_action {
-                    1 => DuplicateCheckAction::NoteOff(nna.clone()),
-                    2 => DuplicateCheckAction::NoteFadeOut(nna.clone()),
-                    _ => DuplicateCheckAction::NoteCut(nna.clone()),
+                    1 => DuplicateCheckAction::NoteOff(nna),
+                    2 => DuplicateCheckAction::NoteFadeOut(nna),
+                    _ => DuplicateCheckAction::NoteCut(nna),
                 };
 
                 instr.duplicate_check = match source.instr.duplicate_check_type {
@@ -501,10 +501,10 @@ impl ItInstrument {
             }
         }
 
-        return Instrument {
+        Instrument {
             name,
             instr_type: InstrumentType::Default(instr),
-            muted: muted,
-        };
+            muted,
+        }
     }
 }

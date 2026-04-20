@@ -28,7 +28,7 @@ impl SidModule {
                 "{} - {} (song #{})",
                 self.sid.copyright, self.sid.author, song_number
             );
-            module.default_tempo = (1 + self.sid.resetspd) as usize;
+            module.default_tempo = 1 + self.sid.resetspd;
 
             let mut patterns = self.pattern_helper.get_patterns(song_number);
             PatternHelper::split_large_patterns(&mut patterns);
@@ -51,39 +51,39 @@ impl SidModule {
             modules.push(module);
         }
 
-        return modules;
+        modules
     }
 }
 
 impl SidModule {
     pub fn get_sid_commando() -> Self {
         let sid = OneSid::get_sid_commando();
-        return sid.to_sidmodule();
+        sid.to_sidmodule()
     }
 
     pub fn get_sid_crazy_comets() -> Self {
         let sid = OneSid::get_sid_crazy_comets();
-        return sid.to_sidmodule();
+        sid.to_sidmodule()
     }
 
     pub fn get_sid_last_v8() -> Self {
         let sid = OneSid::get_sid_last_v8();
-        return sid.to_sidmodule();
+        sid.to_sidmodule()
     }
 
     pub fn get_sid_monty_on_the_run() -> Self {
         let sid = OneSid::get_sid_monty_on_the_run();
-        return sid.to_sidmodule();
+        sid.to_sidmodule()
     }
 
     pub fn get_sid_thing_on_a_spring() -> Self {
         let sid = OneSid::get_sid_thing_on_a_spring();
-        return sid.to_sidmodule();
+        sid.to_sidmodule()
     }
 
     pub fn get_sid_zoid() -> Self {
         let sid = OneSid::get_sid_zoid();
-        return sid.to_sidmodule();
+        sid.to_sidmodule()
     }
 
     //--------------------------
@@ -91,46 +91,46 @@ impl SidModule {
 
     pub fn get_sid_ace_2() -> Self {
         let sid = OneSid::get_sid_ace_2();
-        return sid.to_sidmodule();
+        sid.to_sidmodule()
     }
 
     pub fn get_sid_delta() -> Self {
         let sid = OneSid::get_sid_delta();
-        return sid.to_sidmodule();
+        sid.to_sidmodule()
     }
 
     pub fn get_sid_human_race() -> Self {
         let sid = OneSid::get_sid_human_race();
-        return sid.to_sidmodule();
+        sid.to_sidmodule()
     }
 
     pub fn get_sid_international_karate() -> Self {
         let sid = OneSid::get_sid_international_karate();
-        return sid.to_sidmodule();
+        sid.to_sidmodule()
     }
 
     pub fn get_sid_lightforce() -> Self {
         let sid = OneSid::get_sid_lightforce();
-        return sid.to_sidmodule();
+        sid.to_sidmodule()
     }
 
     pub fn get_sid_sanxion_song_1() -> Self {
         let sid = OneSid::get_sid_sanxion_song_1();
-        return sid.to_sidmodule();
+        sid.to_sidmodule()
     }
 
     pub fn get_sid_sanxion_song_2() -> Self {
         let sid = OneSid::get_sid_sanxion_song_2();
-        return sid.to_sidmodule();
+        sid.to_sidmodule()
     }
 
     pub fn get_sid_spellbound() -> Self {
         let sid = OneSid::get_sid_spellbound();
-        return sid.to_sidmodule();
+        sid.to_sidmodule()
     }
 
     pub fn get_sid_thrust() -> Self {
         let sid = OneSid::get_sid_thrust();
-        return sid.to_sidmodule();
+        sid.to_sidmodule()
     }
 }

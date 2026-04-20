@@ -15,9 +15,9 @@ impl XpPattern {
         }
 
         data.append(
-            &mut bincode::serde::encode_to_vec(&version, bincode::config::legacy()).unwrap(),
+            &mut bincode::serde::encode_to_vec(version, bincode::config::legacy()).unwrap(),
         );
-        data.append(&mut bincode::serde::encode_to_vec(&nrow, bincode::config::legacy()).unwrap());
+        data.append(&mut bincode::serde::encode_to_vec(nrow, bincode::config::legacy()).unwrap());
 
         for row in pattern {
             for ps in row {
