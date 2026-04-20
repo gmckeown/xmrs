@@ -1,5 +1,3 @@
-//FIXME: find a way to share period_helper cache beetween Channels
-
 #[derive(Copy, Clone)]
 pub struct CacheEntry {
     key: (f32, f32, f32, bool),

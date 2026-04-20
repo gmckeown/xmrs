@@ -124,7 +124,7 @@ impl PeriodHelper {
         }
     }
 
-    // ==== Generic (TODO: use a trait any day?)
+    // ==== Generic
 
     pub fn note_to_period(&self, note: f32) -> f32 {
         match self.freq_type {

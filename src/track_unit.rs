@@ -10,7 +10,6 @@ use alloc::vec::Vec;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct TrackUnit {
-    // TODO?: Option<Pitch>
     pub note: Pitch,
     pub velocity: f32,
     pub instrument: Option<usize>,
