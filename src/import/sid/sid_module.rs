@@ -128,4 +128,9 @@ impl SidModule {
         let sid = OneSid::get_sid_spellbound();
         return sid.to_sidmodule();
     }
+
+    pub fn get_sid_thrust() -> Self {
+        let sid = OneSid::get_sid_thrust();
+        return sid.to_sidmodule();
+    }
 }

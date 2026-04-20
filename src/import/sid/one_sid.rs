@@ -597,4 +597,30 @@ impl OneSid {
             skydive_v1_add: 256,
         }
     }
+
+    pub fn get_sid_thrust() -> Self {
+        OneSid {
+            song: include_bytes!("songs/thrust.sid"),
+            name: "Thrust",
+            author: "Rob Hubbard",
+            copyright: "1986 Firebird",
+            version: 10,
+            load_adress: 0x0800,
+            song_track_qty: 3,
+            song_list_offset: 0x0dd7,
+            song_list_qty: 1,
+            patt_ptl_offset: 0x0ddd,
+            patt_pth_offset: 0x0e04,
+            patt_qty: 39,
+            instr_offset: 0x0cf7,
+            instr_qty: 27,
+            fx_v1_offset: 0,
+            fx_v1_qty: 0,
+            fx_v2_offset: 0,
+            fx_v2_qty: 0,
+            resetspd: 2,
+            skydive_v1_when: 0,
+            skydive_v1_add: 0, // Thrust skydive uses note increment, not freq add
+        }
+    }
 }
