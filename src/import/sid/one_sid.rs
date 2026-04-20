@@ -72,7 +72,10 @@ impl OneSid {
             for j in 0..self.song_track_qty {
                 //let k = channels_ptr[i * self.song_track_qty + j] + 126 - self.load_adress;
                 let k = channels_ptr[i * self.song_track_qty + j];
-                let index: usize = channels_ptr.iter().position(|&x| x == k).unwrap_or_default();
+                let index: usize = channels_ptr
+                    .iter()
+                    .position(|&x| x == k)
+                    .unwrap_or_default();
                 s.push(index);
             }
             songs.push(s);

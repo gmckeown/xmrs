@@ -261,14 +261,12 @@ impl TrackImportEffect {
                 }
             }
             TrackImportEffect::Panning(pos) => Some(TrackEffect::Panning(pos)),
-            TrackImportEffect::PanningSlide0(speed) => Some(TrackEffect::PanningSlide {
-                speed,
-                fine: true,
-            }),
-            TrackImportEffect::PanningSlideN(speed) => Some(TrackEffect::PanningSlide {
-                speed,
-                fine: false,
-            }),
+            TrackImportEffect::PanningSlide0(speed) => {
+                Some(TrackEffect::PanningSlide { speed, fine: true })
+            }
+            TrackImportEffect::PanningSlideN(speed) => {
+                Some(TrackEffect::PanningSlide { speed, fine: false })
+            }
             TrackImportEffect::ChannelVolume(pos) => Some(TrackEffect::ChannelVolume(pos)),
             TrackImportEffect::ChannelVolumeSlide0(pos) => Some(TrackEffect::ChannelVolumeSlide {
                 speed: pos,
@@ -357,9 +355,7 @@ impl TrackImportEffect {
             TrackImportEffect::PanbrelloWaveform(waveform, retrig) => {
                 Some(TrackEffect::PanbrelloWaveform { waveform, retrig })
             }
-            TrackImportEffect::Tremolo(speed, depth) => {
-                Some(TrackEffect::Tremolo { speed, depth })
-            }
+            TrackImportEffect::Tremolo(speed, depth) => Some(TrackEffect::Tremolo { speed, depth }),
             TrackImportEffect::TremoloWaveform(waveform, retrig) => {
                 Some(TrackEffect::TremoloWaveform { waveform, retrig })
             }
