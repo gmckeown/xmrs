@@ -26,8 +26,8 @@ pub struct OneSid {
     fx_v2_offset: usize,
     fx_v2_qty: usize,
     pub resetspd: usize,
-    skydive_v1_when: usize, // When length > skydive_v1_when
-    skydive_v1_add: isize,  // XXX if freq+skydive_v1_add<0x10000
+    skydive_v1_when: usize, // Skydive active when note length > this value
+    skydive_v1_add: isize,  // Added to frequency each frame (can be negative)
 }
 
 impl OneSid {
@@ -148,9 +148,11 @@ impl OneSid {
             re.pw_delay = (self.song[start + 6] & mask_lo) as u16;
             re.pw_speed = (self.song[start + 6] & mask_hi) as i8;
 
-            //FIXME
-            let _commando_change_pw_effect = (self.song[start + 7] & 0b0000_1000) != 0;
-            let _fx_use = (self.song[start + 7] & 0b00_111_000) >> 3;
+            // Instrument FX byte (byte 7 of instrument data):
+            //   Bit 0: drum (noise + rapid freq slide)
+            //   Bit 1: skydive (slow freq down)
+            //   Bit 2: octave arpeggio
+            //   Bits 3-7: unused in early routines (Commando/Monty)
             if self.song[start + 7] & 0b0000_0001 != 0 {
                 re.drum = true;
             }
@@ -162,7 +164,7 @@ impl OneSid {
             }
 
             re.skydive_config_if = self.skydive_v1_when as u8;
-            re.skydive_config_add = self.skydive_v1_add as u8;
+            re.skydive_config_add = self.skydive_v1_add as i16;
 
             let mut irsid = InstrRobSid::default();
             irsid.sid = isid;
@@ -576,7 +578,7 @@ impl OneSid {
             name: "Spellbound",
             author: "Rob Hubbard",
             copyright: "1986 MAD/Mastertronic",
-            version: 15, // XXX WARN: 0xE0E5 second byte & 0b1000_0000 is instrnr: not a vibrato! no vibrato. Using version 15 -- check soundfx too
+            version: 15, // Spellbound variant: byte 2 is always instrument (never portamento), different vibrato/pulse bit layout
             load_adress: 0xE000,
             song_track_qty: 3,
             song_list_offset: 0xE6B6,

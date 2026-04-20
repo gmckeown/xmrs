@@ -21,7 +21,7 @@ pub struct RobEffects {
     // 4. Skydive
     pub skydive: bool,
     pub skydive_config_if: u8,
-    pub skydive_config_add: u8,
+    pub skydive_config_add: i16,
 
     // 5. Arpeggio
     pub arpeggio: bool,

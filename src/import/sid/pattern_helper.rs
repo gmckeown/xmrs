@@ -47,10 +47,12 @@ impl PatternHelper {
                                 current.instrument = Some((source[index] & 0b0111_1111) as usize);
                                 last_instr = current.instrument;
                             } else {
-                                // FIXME: can be E1 or E2?
+                                // Portamento: bit 7 = portamento flag, bits 1-6 = speed,
+                                // bit 0 = direction (0=up, 1=down).
+                                // Speed is raw 16-bit freq delta per frame, >> 1 to scale for XM effects.
                                 let p = source[index] & 0b0111_1110;
                                 if p != 0 {
-                                    current.effect_parameter = p >> 1; // use max
+                                    current.effect_parameter = p >> 1;
                                     if source[index] & 1 == 0 {
                                         current.effect_type = 1; // portamento up
                                     } else {
@@ -60,12 +62,16 @@ impl PatternHelper {
                             }
                         }
                         15 => {
+                            // Spellbound variant: byte 2 is always instrument, never portamento
                             if source[index] & 0b1000_0000 == 0 {
                                 current.instrument = Some((source[index] & 0b0111_1111) as usize);
                                 last_instr = current.instrument;
                             }
                         }
                         _ => {
+                            // Version 20+: portamento uses 14-bit value across 2 bytes
+                            // Byte 1: bit 7=portamento, bit 6=direction, bits 5-0=high 6 bits
+                            // Byte 2: low 8 bits of portamento speed
                             if source[index] & 0b1000_0000 == 0 {
                                 current.instrument = Some((source[index] & 0b0111_1111) as usize);
                                 last_instr = current.instrument;
@@ -78,16 +84,17 @@ impl PatternHelper {
                                     );
                                     index -= 2;
                                 } else {
+                                    let direction_down = source[index] & 0b0100_0000 != 0;
                                     let p: u16 = ((source[index] as u16 & 0b0011_1111) << 8)
                                         | source[index + 1] as u16;
                                     index += 1;
                                     if p != 0 {
-                                        // FIXME: can i do better with that 6+8=14 bits type?
-                                        current.effect_parameter = p as u8;
-                                        if source[index] & 0b0100_0000 == 0 {
-                                            current.effect_type = 1; // portamento up
-                                        } else {
+                                        // Scale 14-bit value (0-16383) to 8-bit (0-255)
+                                        current.effect_parameter = (p >> 6).min(255) as u8;
+                                        if direction_down {
                                             current.effect_type = 2; // portamento down
+                                        } else {
+                                            current.effect_type = 1; // portamento up
                                         }
                                     }
                                 }
@@ -97,20 +104,22 @@ impl PatternHelper {
                     index += 1;
                 }
 
-                // correction of a table overflow in the original code
+                // Note byte: bits 0-6 = note number (0-84 for 7 octaves)
+                // Values > 96 are overflows in the original SID data where the
+                // player reads from memory locations instead of the frequency table.
+                // The hardcoded fixups below reproduce the original (buggy) behaviour.
                 let n = source[index] & 0b0111_1111;
                 let note = if n > 8 * 12 {
-                    // max is 96
                     match n {
-                        96 => 0,   // self.regoffsets[0], for crazycomet
-                        97 => 0,   // self.regoffsets[0], for commando
-                        98 => 12,  // 8 for crazycomet, 16 for commando
-                        100 => 3,  // 3 for commando, // self.patoffset[0],
-                        104 => 65, // self.voicectrl[1],    // Good for Monty on the Run, Commando
-                        105 => 65, // self.voicectrl[2],
-                        107 => 6,  // self.instrnr[0],
+                        96 => 0,
+                        97 => 0,
+                        98 => 12,
+                        100 => 3,
+                        104 => 65,
+                        105 => 65,
+                        107 => 6,
                         127 => 0,
-                        _ => n & 0b0011_1111, // FIXME: force limit 0..63
+                        _ => n & 0b0011_1111, // clamp to 0-63 for unmapped overflows
                     }
                 } else {
                     n
@@ -118,20 +127,15 @@ impl PatternHelper {
                 current.note = note.try_into().unwrap_or(Pitch::None);
             }
 
-            // FIXME: last high bit from last byte is a bool about reset effect
-            // let reset_effect = if self.version == 30 && source[index] & 0b1000_0000 == 0 {
-            //     false
-            // } else {
-            //     true
-            // };
+            // Bit 7 of the note byte is unused in versions 10/15/20.
+            // Version 30 (Delta) may use it as a reset-effect flag,
+            // but no disassembly confirms this — left unimplemented.
 
             if release {
                 if current.note == Pitch::None {
-                    // current.note = Note::KeyOff;
-                    // FIXME: Hack, KeyOff currently forget instrument value?
-                    current.volume = 0x10;
+                    current.note = Pitch::Off;
                 } else {
-                    current.volume = 0x50;
+                    current.volume = 0x50; // set volume 64 (XM encoding)
                 }
                 current.instrument = last_instr;
             }
