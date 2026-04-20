@@ -321,8 +321,6 @@ impl TrackImportEffect {
                 volume_modifier: NoteRetrigOperator::None,
             }),
             TrackImportEffect::NoteRetrigExtended(interval, vol) => {
-                // FT2 Rxy volume-modifier table works on a 0..64 volume scale
-                // (see ft2_replayer.c::doMultiNoteRetrig). xmrs uses 0..1, so
                 // each additive delta is divided by 64. Multiplicative ratios
                 // are scale-independent.
                 const S: f32 = 1.0 / 64.0;
