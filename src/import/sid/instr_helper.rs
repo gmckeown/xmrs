@@ -52,11 +52,11 @@ impl InstrHelper {
         let mut lfsr: u16 = 0xACE1;
         let mut noise_data: Vec<i8> = vec![0; 128];
 
-        for i in 0..128 {
+        for v in noise_data.iter_mut().take(128) {
             let new_bit = lfsr ^ (lfsr >> 1) & 1;
             lfsr = (lfsr >> 1) | (new_bit << 15);
             let value_u8 = (lfsr & 0xFF) as u8;
-            noise_data[i] = value_u8.wrapping_sub(128) as i8;
+            *v = value_u8.wrapping_sub(128) as i8;
         }
 
         SampleDataType::Mono8(noise_data)
@@ -65,8 +65,8 @@ impl InstrHelper {
     fn generate_pulse_sample(pw: u16) -> SampleDataType {
         let mut pulse_data: Vec<i8> = vec![0; 128];
         let duty_cycle = (pw as f32 / 4095.0 * 128.0) as usize;
-        for i in 0..128 {
-            pulse_data[i] = if i < duty_cycle { 127 } else { -127 };
+        for (i, v) in pulse_data.iter_mut().enumerate().take(128) {
+            *v = if i < duty_cycle { 127 } else { -127 };
         }
         SampleDataType::Mono8(pulse_data)
     }

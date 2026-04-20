@@ -87,9 +87,7 @@ impl AmigaModule {
         data = &data[2..];
 
         // positions
-        for i in 0..128 {
-            amiga.positions.push(data[i]);
-        }
+        amiga.positions.extend_from_slice(&data[..128]);
         data = &data[128..];
 
         // tag?

@@ -51,13 +51,8 @@ impl PatternSlot {
         let effect = ((input >> 8) & 0x000F) as u8;
         let data = (input & 0x00FF) as u8;
 
-        let nu8 = match Self::amiga_pitch(period) {
-            Some(n) => n,
-            None => {
-                // period is not an Amiga one?
-                0
-            }
-        };
+        // period may not match an Amiga table entry; default to 0 in that case.
+        let nu8 = Self::amiga_pitch(period).unwrap_or_default();
 
         let note: Pitch = if nu8 == 0 {
             Pitch::None

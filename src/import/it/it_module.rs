@@ -346,15 +346,13 @@ impl ItModule {
                         }
                     }
 
-                    for i2 in instrdef.sample_for_pitch {
-                        if let Some(i3) = i2 {
-                            // I must add i3 sample to instrdef
-                            if instrdef.sample.len() <= i3 {
-                                instrdef.sample.resize_with(i3 + 1, || None);
-                            }
-                            if instrdef.sample[i3].is_none() && samples.len() > i3 {
-                                instrdef.sample[i3] = Some(samples[i3].clone());
-                            }
+                    for i3 in instrdef.sample_for_pitch.into_iter().flatten() {
+                        // I must add i3 sample to instrdef
+                        if instrdef.sample.len() <= i3 {
+                            instrdef.sample.resize_with(i3 + 1, || None);
+                        }
+                        if instrdef.sample[i3].is_none() && samples.len() > i3 {
+                            instrdef.sample[i3] = Some(samples[i3].clone());
                         }
                     }
                 }

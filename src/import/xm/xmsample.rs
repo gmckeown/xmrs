@@ -135,7 +135,7 @@ impl XmSample {
             finetune: (self.header.finetune as f32 / 127.0).clamp(-1.0, 1.0),
             volume: self.header.volume as f32 / 64.0,
             panning: self.header.panning as f32 / 255.0,
-            loop_flag: match self.header.flags & 0b000000_11 {
+            loop_flag: match self.header.flags & 0b0000_0011 {
                 1 => LoopType::Forward,
                 2 => LoopType::PingPong,
                 3 => LoopType::PingPong,
@@ -195,5 +195,9 @@ impl XmSample {
             Some(SampleDataType::Mono16(d)) => d.len() as u32,
             _ => 0,
         }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }

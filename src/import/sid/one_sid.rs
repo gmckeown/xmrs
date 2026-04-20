@@ -72,10 +72,7 @@ impl OneSid {
             for j in 0..self.song_track_qty {
                 //let k = channels_ptr[i * self.song_track_qty + j] + 126 - self.load_adress;
                 let k = channels_ptr[i * self.song_track_qty + j];
-                let index = match channels_ptr.iter().position(|&x| x == k) {
-                    Some(index) => index,
-                    None => 0,
-                };
+                let index: usize = channels_ptr.iter().position(|&x| x == k).unwrap_or_default();
                 s.push(index);
             }
             songs.push(s);
@@ -92,8 +89,8 @@ impl OneSid {
         }
 
         let mut tracks: Vec<Vec<u8>> = vec![];
-        for i in 0..self.patt_qty {
-            let file_offset = 126 + tracks_ptr[i] as usize - self.load_adress;
+        for &tp in tracks_ptr.iter().take(self.patt_qty) {
+            let file_offset = 126 + tp as usize - self.load_adress;
             let mut track: Vec<u8> = vec![];
             let mut j = 0;
             loop {
@@ -127,8 +124,8 @@ impl OneSid {
                 re.vibrato_depth = self.song[start + 5] << 2; // original seems 0..3
                 re.vibrato_div = 7;
             } else {
-                re.vibrato_depth = (self.song[start + 5] & 0b0_1111_000) >> 3;
-                re.vibrato_div = self.song[start + 5] & 0b0000_111;
+                re.vibrato_depth = (self.song[start + 5] & 0b0111_1000) >> 3;
+                re.vibrato_div = self.song[start + 5] & 0b0000_0111;
             }
             if re.vibrato_depth != 0 {
                 re.vibrato = true;
@@ -137,12 +134,12 @@ impl OneSid {
             let mask_lo: u8 = if let 15 = self.version {
                 0b0000_1111
             } else {
-                0b000_11111
+                0b0001_1111
             };
             let mask_hi: u8 = if let 15 = self.version {
                 0b1111_0000
             } else {
-                0b111_00000
+                0b1110_0000
             };
 
             re.pw_delay = (self.song[start + 6] & mask_lo) as u16;
@@ -188,7 +185,7 @@ impl OneSid {
             };
             let note_start = self.song[start + 1]; // as u16|(self.song[start+2] as u16)<<8;
             let note_delta = self.song[start + 8] & 0b0011_1111;
-            let note_end = self.song[start + 15] & 0b00_111111;
+            let note_end = self.song[start + 15] & 0b0011_1111;
             let flipflop_voice1_ctrl =
                 ((self.song[start + 8] as u16 | (self.song[start + 9] as u16) << 8) & 0b0100_0000)
                     != 0;

@@ -291,8 +291,8 @@ impl ItSampleHeader {
                 dst.push(r);
             }
         } else {
-            for i in 0..length {
-                dst.push(p[i] ^ xor)
+            for &v in p.iter().take(length) {
+                dst.push(v ^ xor)
             }
         }
         dst
@@ -318,8 +318,8 @@ impl ItSampleHeader {
                 dst.push(r);
             }
         } else {
-            for i in 0..length {
-                dst.push(p[i] ^ xor)
+            for &v in p.iter().take(length) {
+                dst.push(v ^ xor)
             }
         }
         dst

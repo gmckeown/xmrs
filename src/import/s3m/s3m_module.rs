@@ -146,8 +146,8 @@ impl S3mPcmInstr {
                 dst.push(r as i8);
             }
         } else {
-            for i in 0..length {
-                dst.push((p[i] ^ 0x80) as i8)
+            for &v in p.iter().take(length) {
+                dst.push((v ^ 0x80) as i8)
             }
         }
         dst
@@ -168,8 +168,8 @@ impl S3mPcmInstr {
                 dst.push(r as i16);
             }
         } else {
-            for i in 0..length {
-                dst.push((p[i] ^ 0x8000) as i16)
+            for &v in p.iter().take(length) {
+                dst.push((v ^ 0x8000) as i16)
             }
         }
         dst

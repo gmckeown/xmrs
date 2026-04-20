@@ -136,7 +136,7 @@ impl ItHeader {
         (self.created_with_tracker >> 8) >= 2
     }
 
-    /// Configuration Flags
+    // === Configuration Flags ===
 
     /// Bit 0: Checks if Stereo is on.
     pub fn is_stereo(&self) -> bool {
@@ -178,7 +178,7 @@ impl ItHeader {
         (self.flags & (1 << 7)) != 0
     }
 
-    /// Special Configuration Flags
+    // === Special Configuration Flags ===
 
     /// Bit 0: Checks if Song message is attached.
     pub fn is_song_message_attached(&self) -> bool {
