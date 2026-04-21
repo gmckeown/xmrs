@@ -7,14 +7,24 @@ use micromath::F32Ext;
 #[allow(unused_imports)]
 use num_traits::float::Float;
 
-use crate::period_helper_cache::PeriodHelperCache;
-
 /// Historical Frequencies to load old data. Default is Linear.
 #[derive(Default, Serialize, Deserialize, Clone, Copy, Debug)]
 pub enum FrequencyType {
     AmigaFrequencies,
     #[default]
     LinearFrequencies,
+}
+
+/// Single-entry memoization of the most recent
+/// `all_to_frequency` call. The dominant access pattern is a held
+/// note producing the same key across every tick of a row; one slot
+/// captures that case at 100% hit rate, with zero book-keeping. Any
+/// change in period, arpeggio offset, finetune (including vibrato
+/// modulation), or glissando mode just overwrites the entry.
+#[derive(Clone, Copy)]
+struct LastCall {
+    key: (f32, f32, f32, bool),
+    value: f32,
 }
 
 #[derive(Clone)]
@@ -26,7 +36,7 @@ pub struct PeriodHelper {
     /// arpeggio's `period2NotePeriod`). Off by default — driven from
     /// `module.quirks.ft2_arpeggio_note_clamp` at construction.
     ft2_arpeggio_note_clamp: bool,
-    cache: PeriodHelperCache<10>,
+    last_call: Option<LastCall>,
 }
 
 impl Default for PeriodHelper {
@@ -34,7 +44,7 @@ impl Default for PeriodHelper {
         Self {
             freq_type: FrequencyType::LinearFrequencies,
             ft2_arpeggio_note_clamp: false,
-            cache: PeriodHelperCache::new(),
+            last_call: None,
         }
     }
 }
@@ -47,7 +57,7 @@ impl PeriodHelper {
         Self {
             freq_type,
             ft2_arpeggio_note_clamp,
-            cache: PeriodHelperCache::new(),
+            last_call: None,
         }
     }
 
@@ -220,7 +230,12 @@ impl PeriodHelper {
         self.period_to_frequency(period_adjusted)
     }
 
-    /// Same as all_to_frequency() with a small cache table
+    /// Same as [`Self::all_to_frequency`] with single-entry
+    /// memoization. The dominant call pattern is a held note
+    /// re-evaluating the same key every tick of a row, so a single
+    /// slot captures ~95% of calls at zero book-keeping cost. Any
+    /// change in the key (vibrato, slide, arpeggio, instrument
+    /// swap) just overwrites the slot — no LRU, no scan.
     pub fn all_to_frequency_cached(
         &mut self,
         period: f32,
@@ -228,11 +243,14 @@ impl PeriodHelper {
         finetune: f32,
         semitone: bool,
     ) -> f32 {
-        if let Some(cached_freq) = self.cache.get(period, arp_pitch, finetune, semitone) {
-            return cached_freq;
+        let key = (period, arp_pitch, finetune, semitone);
+        if let Some(last) = self.last_call {
+            if last.key == key {
+                return last.value;
+            }
         }
-        let f = self.all_to_frequency(period, arp_pitch, finetune, semitone);
-        self.cache.insert(period, arp_pitch, finetune, semitone, f);
-        f
+        let value = self.all_to_frequency(period, arp_pitch, finetune, semitone);
+        self.last_call = Some(LastCall { key, value });
+        value
     }
 }

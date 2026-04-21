@@ -246,6 +246,31 @@ impl S3mEffect {
         }
     }
 
+    /// Pxx panning slide — OpenMPT / extended-S3M convention.
+    ///
+    /// ST3 does NOT natively implement Pxx (both `soncejmp[16]` and
+    /// `sotherjmp[16]` in `digcmd.c` point to `s_ret`, a no-op).
+    /// xmrs supports Pxx as an OpenMPT/extended-S3M extension using
+    /// the standard FT2 panning-slide encoding:
+    ///
+    /// * `P0y` → regular slide left by `y/16` per tick > 0
+    /// * `Px0` → regular slide right by `x/16` per tick > 0
+    /// * `PxF` → fine slide right by `x/16` at tick 0
+    /// * `PFy` → fine slide left by `y/16` at tick 0
+    /// * `P00` → no-op (memory handled at [`super::import_memory`])
+    /// * `P0F` / `PF0` → no-op (fine slide with amount 0 — legitimate
+    ///   under FT2 semantics, see below)
+    ///
+    /// **Why this does NOT mirror the D0F / DF0 double-emission
+    /// pattern in [`Self::s3m_volume_slide`]:** the volume slide
+    /// corner case exists because ST3 natively implements Dxy AND
+    /// breaks from FT2 convention — ST3's `s_volslide` fires every
+    /// tick (including tick 0), so `D0F` / `DF0` encode a full-range
+    /// per-tick slide rather than FT2's tick-0-only fine slide. For
+    /// Pxx there is no native ST3 behaviour to reconcile, so the
+    /// FT2 semantics apply unchanged: an amount of 0 is a no-op on
+    /// whichever side carries it. The `fastvolslide` masterflag is
+    /// intentionally NOT applied here either, for the same reason.
     fn s3m_panning_slide(param: u8) -> Option<TrackImportEffect> {
         let high = (param & 0xF0) >> 4;
         let low = param & 0x0F;
@@ -375,6 +400,19 @@ impl S3mEffect {
             }
 
             // L - Tone portamento + Volume slide
+            //
+            // The emitted `TonePortamento(0.0)` is NOT a no-op — it
+            // signals "load from memory" in `ImportMemory`. Since G
+            // writes to the same `TONE_PORTAMENTO` slot with its
+            // speed (when `param > 0`) and L only reads from it, the
+            // pair ends up sharing the slot exactly like ST3 shares
+            // `alasteff1` between `s_toneslide` (G) and the
+            // `KxyLxxVolslideType == 1` branch called from
+            // `s_tonevol` (digcmd.c:s_toneslide lines 473-475).
+            // L intentionally never writes to the slot — if a module
+            // plays L before any G has set the memory, ST3 uses its
+            // initial-zero `alasteff1` (no slide), which xmrs
+            // reproduces via the zero-initialised slot.
             12 => {
                 let mut v = vec![TrackImportEffect::TonePortamento(0.0)];
                 v.extend(Self::s3m_volume_slide(param, flags));

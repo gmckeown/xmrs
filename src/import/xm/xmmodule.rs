@@ -12,9 +12,8 @@ use super::xmpattern::XmPattern;
 use crate::import::import_memory::{ImportMemory, MemoryType};
 use crate::import::orders_helper;
 use crate::import::patternslot::PatternSlot;
-use crate::module::{Module, ModuleFormat};
+use crate::module::{Module, ModuleFormat, PlaybackQuirks};
 use crate::period_helper::FrequencyType;
-use crate::prelude::PlaybackQuirks;
 
 #[derive(Default, Serialize, Deserialize, Debug)]
 pub struct XmModule {

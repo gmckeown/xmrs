@@ -119,10 +119,31 @@ impl ModXmEffect {
             0x0E => {
                 let param = current.effect_parameter & 0x0F;
                 match current.effect_parameter >> 4 {
-                    0x1 => (param != 0)
-                        .then(|| vec![TrackImportEffect::PortamentoFineUp(-4.0 * param as f32)]),
-                    0x2 => (param != 0)
-                        .then(|| vec![TrackImportEffect::PortamentoFineDown(4.0 * param as f32)]),
+                    // E1y / E2y: Fine portamento up / down. Same
+                    // scaling as regular 1xx/2xx (FT2 `realPeriod -=
+                    // param * 4`), just tick-0-only. Mode-aware:
+                    // Linear uses `* 4`, Amiga uses `* 1` because
+                    // xmrs stores Amiga periods at 1/4 of FT2's
+                    // native scale (see the regular Portamento arm
+                    // above for the same reasoning). ProTracker MOD
+                    // is always Amiga, so the * 1 path matches it
+                    // directly.
+                    0x1 => (param != 0).then(|| {
+                        let p = param as f32;
+                        let speed = match freq_type {
+                            FrequencyType::LinearFrequencies => -4.0 * p,
+                            FrequencyType::AmigaFrequencies => -p,
+                        };
+                        vec![TrackImportEffect::PortamentoFineUp(speed)]
+                    }),
+                    0x2 => (param != 0).then(|| {
+                        let p = param as f32;
+                        let speed = match freq_type {
+                            FrequencyType::LinearFrequencies => 4.0 * p,
+                            FrequencyType::AmigaFrequencies => p,
+                        };
+                        vec![TrackImportEffect::PortamentoFineDown(speed)]
+                    }),
                     0x3 => Some(vec![TrackImportEffect::Glissando(
                         current.effect_parameter != 0,
                     )]),
@@ -210,16 +231,28 @@ impl ModXmEffect {
 
                 match effect_case {
                     1 => {
-                        // X1y: Extra fine portamento up
-                        Some(vec![TrackImportEffect::PortamentoExtraFineUp(
-                            -(param as f32),
-                        )])
+                        // X1y: Extra fine portamento up. FT2 uses
+                        // `realPeriod -= param * 1` (no *4), hence
+                        // "extra fine" — 4× finer than regular 1xx.
+                        // Mode-aware: Linear uses `* 1` (matches
+                        // FT2), Amiga uses `* 0.25` (xmrs Amiga is
+                        // 4× coarser). This applies at tick 0 only.
+                        let p = param as f32;
+                        let speed = match freq_type {
+                            FrequencyType::LinearFrequencies => -p,
+                            FrequencyType::AmigaFrequencies => -p * 0.25,
+                        };
+                        Some(vec![TrackImportEffect::PortamentoExtraFineUp(speed)])
                     }
                     2 => {
-                        // X2y: Extra fine portamento down
-                        Some(vec![TrackImportEffect::PortamentoExtraFineDown(
-                            param as f32,
-                        )])
+                        // X2y: Extra fine portamento down. Same
+                        // reasoning as X1y above.
+                        let p = param as f32;
+                        let speed = match freq_type {
+                            FrequencyType::LinearFrequencies => p,
+                            FrequencyType::AmigaFrequencies => p * 0.25,
+                        };
+                        Some(vec![TrackImportEffect::PortamentoExtraFineDown(speed)])
                     }
                     _ => None,
                 }
@@ -234,13 +267,17 @@ impl ModXmEffect {
     ) -> Option<TrackImportEffect> {
         match current.volume >> 4 {
             0x0 => None,
-            // V - Set volume (0..63)
-            0x1..=0x4 => Some(TrackImportEffect::Volume(
-                (current.volume - 0x10) as f32 / 64.0,
-                0,
-            )),
-            // V - 0x51..0x5F undefined...
-            0x5 => None,
+            // V - Set volume (FT2 VJumpTab_TickZero[1..=5] = v_SetVolume).
+            // The volume byte range is 0x10..=0x5F: subtract 0x10 to
+            // get the XM volume in 0..=79, then clamp to 64 (FT2's
+            // `if (*volColumnData > 64) *volColumnData = 64`). The
+            // `0x50` byte is the common idiom for "set volume to
+            // max" — dropping it would silently discard a very
+            // frequent vol-column command.
+            0x1..=0x5 => {
+                let clamped = current.volume.min(0x50);
+                Some(TrackImportEffect::Volume((clamped - 0x10) as f32 / 64.0, 0))
+            }
             // - - Volume slide down (0..15). Regular slide: applies at
             //     ticks > 0, i.e. VolumeSlideN in our vocabulary
             //     (FT2 VJumpTab_TickNonZero[6] = v_VolSlideDown).

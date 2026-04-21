@@ -49,7 +49,6 @@ pub mod instrument;
 pub mod module;
 /// Period Helper
 pub mod period_helper;
-pub(crate) mod period_helper_cache;
 /// A typical Note
 pub mod pitch;
 /// Sample with Steroid
