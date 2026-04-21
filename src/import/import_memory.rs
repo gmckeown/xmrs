@@ -87,11 +87,18 @@ const TEMPO_DOWN: usize = 23;
 const SAMPLE_OFFSET_ADD_HIGH: usize = 24;
 const ARRAY_SIZE: usize = 25;
 
+use crate::import::s3m::s3m_effect::S3mImportFlags;
+
 /// For compatibility between formats and to compensate for special case difficulties with memory management, a best effort analysis is performed during import to associate the exact value with each effect.
 // Horrible hack to store values...use from left to right. First usable type wins.
 pub struct ImportMemory {
     global: [(f32, f32, usize, usize); ARRAY_SIZE], // s3m way: shared across all channels
     channel: [[(f32, f32, usize, usize); ARRAY_SIZE]; 64], // mod, xm, it way
+    /// S3M-specific masterflags resolved at import time. Only read
+    /// when `mem` is `MemoryType::S3m`; importers of other formats
+    /// leave it at its default (all-zero). Configured by the S3M
+    /// importer before calling [`Self::unpack_patterns`].
+    pub s3m_flags: S3mImportFlags,
 }
 
 impl Default for ImportMemory {
@@ -99,6 +106,7 @@ impl Default for ImportMemory {
         Self {
             global: [(0.0, 0.0, 0, 0); ARRAY_SIZE],
             channel: [[(0.0, 0.0, 0, 0); ARRAY_SIZE]; 64],
+            s3m_flags: S3mImportFlags::default(),
         }
     }
 }
@@ -614,7 +622,9 @@ impl ImportMemory {
                 MemoryType::Mod | MemoryType::Xm => {
                     ModXmEffect::mod_xm_unpack_pattern(freq_type, pattern)
                 }
-                MemoryType::S3m => S3mEffect::s3m_unpack_pattern(freq_type, pattern),
+                MemoryType::S3m => {
+                    S3mEffect::s3m_unpack_pattern(freq_type, self.s3m_flags, pattern)
+                }
                 MemoryType::It => ItEffect::it_unpack_pattern(freq_type, pattern),
                 // _ => todo!(),
             })

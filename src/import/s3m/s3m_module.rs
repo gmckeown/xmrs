@@ -13,7 +13,7 @@ use alloc::string::String;
 use alloc::string::ToString;
 use alloc::{vec, vec::Vec};
 
-use super::s3m_effect::S3mEffect;
+use super::s3m_effect::{S3mEffect, S3mImportFlags};
 
 #[repr(C)]
 #[derive(Default, Deserialize, Debug)]
@@ -224,7 +224,7 @@ struct S3mOplInstr {
 impl S3mOplInstr {
     pub fn to_instr_opl(&self) -> InstrOpl {
         // Match the PCM path — S3M is Amiga-period natively.
-        let ph = PeriodHelper::new(FrequencyType::AmigaFrequencies, ModuleFormat::S3m);
+        let ph = PeriodHelper::new(FrequencyType::AmigaFrequencies, false);
         let mut i_opl = InstrOpl::default();
         i_opl.element.modulator = MdiOpl {
             ksl: ((self.mod2 & 0b0100_0000) >> 6) | (self.mod2 >> 7),
@@ -638,12 +638,48 @@ impl S3mModule {
         // Unlike IT, S3M has no file flag to select Linear mode — the
         // format predates that option. All S3M files should be treated
         // as Amiga.
-        let ph = PeriodHelper::new(FrequencyType::AmigaFrequencies, ModuleFormat::S3m);
+        let ph = PeriodHelper::new(FrequencyType::AmigaFrequencies, false);
         let mut module = Module::default();
+
+        // ST3 masterflags (see dig.c:setmasterflags). Bits we care
+        // about:
+        //   * bit 0x01 — `oldstvib`: ST2-compatibility vibrato
+        //       (depth doubled). Absorbed at import.
+        //   * bit 0x10 — `amigalimits`: period clamped to Amiga
+        //       hardware range at runtime. Flipped into
+        //       `module.quirks.period_clamp`.
+        //   * bit 0x40 — `fastvolslide`: Dxy / Nxy apply on every
+        //       tick. Absorbed at import via double-emission.
+        // Other flags (bit 0x08 "vol0 opt", bit 0x20 "stereo") are
+        // either performance hints or have no replay impact.
+        let s3m_mflags = self.header.flags;
+        let import_flags = S3mImportFlags {
+            fastvolslide: s3m_mflags & 0x40 != 0,
+            oldstvib: s3m_mflags & 0x01 != 0,
+        };
+        let amigalimits = s3m_mflags & 0x10 != 0;
 
         module.name = self.header.title.clone();
         module.comment = "XmRs reader".to_string();
         module.format = ModuleFormat::S3m;
+        // Canonical ST3 replay quirks. Editor-authored modules that
+        // leave `quirks` at default get MOD-like clean playback; the
+        // S3M importer opts in to the four knobs that define ST3's
+        // behaviour. Period-clamp varies per-file based on
+        // amigalimits; the other three are always on for ST3.
+        module.quirks = PlaybackQuirks {
+            period_clamp: if amigalimits {
+                // ST3 `aspd` range `[453, 3424]` → xmrs Amiga units
+                // `[113.25, 856]` (xmrs periods are 1/4 of ST3's).
+                Some((113.25, 856.0))
+            } else {
+                None
+            },
+            allow_zero_period: true,
+            pattern_loop_resumes: true,
+            tremor_state_persists: true,
+            ..PlaybackQuirks::default()
+        };
         module.frequency_type = FrequencyType::AmigaFrequencies;
         module.default_tempo = self.header.speed as usize;
         module.default_bpm = self.header.tempo as usize;
@@ -659,6 +695,7 @@ impl S3mModule {
         module.pattern_order = orders_helper::parse_orders(&self.positions);
 
         let mut im = ImportMemory::default();
+        im.s3m_flags = import_flags;
         module.pattern = im.unpack_patterns(
             module.frequency_type,
             MemoryType::S3m,

@@ -294,6 +294,11 @@ impl ItModule {
                 self.message
             ),
             format: ModuleFormat::It,
+            // IT's canonical semantics (notably: note-off fades via
+            // `volume_fadeout` rather than cutting, unlike XM) all
+            // fall out of the default `PlaybackQuirks` — no FT2 or
+            // ST3 quirks are enabled for an IT source.
+            quirks: PlaybackQuirks::default(),
             frequency_type: if self.header.is_linear_slides() {
                 FrequencyType::LinearFrequencies
             } else {

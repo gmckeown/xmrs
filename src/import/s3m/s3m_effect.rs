@@ -10,6 +10,30 @@ use crate::import::track_import_effect::TrackImportEffect;
 use crate::import::track_import_unit::TrackImportUnit;
 use crate::prelude::*;
 
+/// ST3 masterflags that have to be resolved at import time.
+///
+/// Only flags whose effect can be fully absorbed into the emitted
+/// `TrackImportEffect`s live here. Runtime-relevant flags (currently
+/// `amigalimits`) are stored separately on [`ModuleFormat::S3m`] so
+/// the replayer can consult them per-tick.
+///
+/// * `fastvolslide` (masterflags bit 64) — ST3 applies Dxy and Nxy
+///   (channel vol slide) on *every* tick including tick 0 when this
+///   is set. Without it, they only apply from tick 1. The importer
+///   handles this by also emitting a `VolumeSlide0` / `ChannelVolumeSlide0`
+///   alongside the usual `*SlideN`, so the tick-0 dose is added to
+///   the regular tick>0 cascade.
+///
+/// * `oldstvib` (masterflags bit 1) — ST2-compatibility vibrato. The
+///   depth is scaled `>>4` instead of `>>5` (H/K), and `>>6` instead
+///   of `>>7` (U fine vibrato) — i.e. twice as deep. The importer
+///   pre-multiplies the emitted `Vibrato`/`VibratoFine` depth by 2.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct S3mImportFlags {
+    pub fastvolslide: bool,
+    pub oldstvib: bool,
+}
+
 /// S3M shared effect memory and direct effect parser
 #[derive(Debug)]
 pub struct S3mEffect {
@@ -86,30 +110,139 @@ impl S3mEffect {
 
     // --- Volume slide helpers ---
 
-    fn s3m_volume_slide(param: u8) -> Option<TrackImportEffect> {
+    /// Convert a Dxy volume-slide param into zero, one, or two
+    /// `TrackImportEffect`s. Returns a `Vec` (not `Option`) because
+    /// two ST3 corner cases need a simultaneous tick-0 + tick>0 pair:
+    ///
+    /// * **`D0F` / `DF0`** — `infolo == 0xF, infohi == 0` and the
+    ///   mirror. These look like fine slides but ST3 actually fires
+    ///   `avol -= 0xF` (resp. `+=`) *unconditionally* on every tick
+    ///   including tick 0 (`digcmd.c:s_volslide` lines 433-446, not
+    ///   gated on `song.musiccount`). xmrs models this by emitting
+    ///   both `VolumeSlide0` and `VolumeSlideN` with the same speed.
+    ///
+    /// * **fastvolslide** (masterflags bit 64) — when set, ST3 runs
+    ///   regular `Dx0`/`D0y` on every tick too. Same fix: emit both
+    ///   `VolumeSlide0` and `VolumeSlideN`.
+    ///
+    /// Genuine fine slides (`DxF`, `DFy` with y != 0) stay tick-0-
+    /// only and keep a single `VolumeSlide0`.
+    fn s3m_volume_slide(param: u8, flags: S3mImportFlags) -> Vec<TrackImportEffect> {
         let high = (param & 0xF0) >> 4;
         let low = param & 0x0F;
 
+        let speed = |v: u8| -(v as f32) / 64.0;
+        let speed_up = |v: u8| v as f32 / 64.0;
+
         match (high, low) {
-            (0xF, f) => Some(TrackImportEffect::VolumeSlide0(-(f as f32) / 64.0)),
-            (f, 0xF) => Some(TrackImportEffect::VolumeSlide0(f as f32 / 64.0)),
-            (0, f) => Some(TrackImportEffect::VolumeSlideN(-(f as f32) / 64.0)),
-            (f, 0) => Some(TrackImportEffect::VolumeSlideN(f as f32 / 64.0)),
-            // ST3: when both nibbles non-zero, last nibble has priority (slide down)
-            (_, f) => Some(TrackImportEffect::VolumeSlideN(-(f as f32) / 64.0)),
+            // D0F: slide down by 0xF every tick including tick 0.
+            // Note: xmrs ordering `(0, 0xF)` has the low-nibble-F
+            // priority, matching ST3's `if (infolo == 0xF) { if
+            // (infohi == 0) avol -= infolo; ... }` branch.
+            (0, 0xF) => vec![
+                TrackImportEffect::VolumeSlide0(speed(0xF)),
+                TrackImportEffect::VolumeSlideN(speed(0xF)),
+            ],
+            // DF0: slide up by 0xF every tick including tick 0.
+            (0xF, 0) => vec![
+                TrackImportEffect::VolumeSlide0(speed_up(0xF)),
+                TrackImportEffect::VolumeSlideN(speed_up(0xF)),
+            ],
+            // DxF (fine up): tick 0 only.
+            (f, 0xF) => vec![TrackImportEffect::VolumeSlide0(speed_up(f))],
+            // DFy (fine down): tick 0 only.
+            (0xF, f) => vec![TrackImportEffect::VolumeSlide0(speed(f))],
+            // Regular D0y (slide down): tick > 0. With fastvolslide,
+            // also tick 0.
+            (0, f) => {
+                if flags.fastvolslide {
+                    vec![
+                        TrackImportEffect::VolumeSlide0(speed(f)),
+                        TrackImportEffect::VolumeSlideN(speed(f)),
+                    ]
+                } else {
+                    vec![TrackImportEffect::VolumeSlideN(speed(f))]
+                }
+            }
+            // Regular Dx0 (slide up): tick > 0. With fastvolslide,
+            // also tick 0.
+            (f, 0) => {
+                if flags.fastvolslide {
+                    vec![
+                        TrackImportEffect::VolumeSlide0(speed_up(f)),
+                        TrackImportEffect::VolumeSlideN(speed_up(f)),
+                    ]
+                } else {
+                    vec![TrackImportEffect::VolumeSlideN(speed_up(f))]
+                }
+            }
+            // Both nibbles non-zero and neither is 0xF: ST3 treats
+            // this as illegal at tick 0 (returns) but still slides
+            // down by infolo at tick > 0 (or every tick with
+            // fastvolslide). Last-nibble-wins priority.
+            (_, f) => {
+                if flags.fastvolslide {
+                    vec![
+                        TrackImportEffect::VolumeSlide0(speed(f)),
+                        TrackImportEffect::VolumeSlideN(speed(f)),
+                    ]
+                } else {
+                    vec![TrackImportEffect::VolumeSlideN(speed(f))]
+                }
+            }
         }
     }
 
-    fn s3m_channel_volume_slide(param: u8) -> Option<TrackImportEffect> {
+    /// Mirror of [`Self::s3m_volume_slide`] for Nxy (channel volume
+    /// slide). Same D0F/DF0 corner cases, same fastvolslide behaviour.
+    fn s3m_channel_volume_slide(param: u8, flags: S3mImportFlags) -> Vec<TrackImportEffect> {
         let high = (param & 0xF0) >> 4;
         let low = param & 0x0F;
 
+        let speed = |v: u8| -(v as f32) / 64.0;
+        let speed_up = |v: u8| v as f32 / 64.0;
+
         match (high, low) {
-            (0xF, f) => Some(TrackImportEffect::ChannelVolumeSlide0(-(f as f32) / 64.0)),
-            (f, 0xF) => Some(TrackImportEffect::ChannelVolumeSlide0(f as f32 / 64.0)),
-            (0, f) => Some(TrackImportEffect::ChannelVolumeSlideN(-(f as f32) / 64.0)),
-            (f, 0) => Some(TrackImportEffect::ChannelVolumeSlideN(f as f32 / 64.0)),
-            (_, f) => Some(TrackImportEffect::ChannelVolumeSlideN(-(f as f32) / 64.0)),
+            (0, 0xF) => vec![
+                TrackImportEffect::ChannelVolumeSlide0(speed(0xF)),
+                TrackImportEffect::ChannelVolumeSlideN(speed(0xF)),
+            ],
+            (0xF, 0) => vec![
+                TrackImportEffect::ChannelVolumeSlide0(speed_up(0xF)),
+                TrackImportEffect::ChannelVolumeSlideN(speed_up(0xF)),
+            ],
+            (f, 0xF) => vec![TrackImportEffect::ChannelVolumeSlide0(speed_up(f))],
+            (0xF, f) => vec![TrackImportEffect::ChannelVolumeSlide0(speed(f))],
+            (0, f) => {
+                if flags.fastvolslide {
+                    vec![
+                        TrackImportEffect::ChannelVolumeSlide0(speed(f)),
+                        TrackImportEffect::ChannelVolumeSlideN(speed(f)),
+                    ]
+                } else {
+                    vec![TrackImportEffect::ChannelVolumeSlideN(speed(f))]
+                }
+            }
+            (f, 0) => {
+                if flags.fastvolslide {
+                    vec![
+                        TrackImportEffect::ChannelVolumeSlide0(speed_up(f)),
+                        TrackImportEffect::ChannelVolumeSlideN(speed_up(f)),
+                    ]
+                } else {
+                    vec![TrackImportEffect::ChannelVolumeSlideN(speed_up(f))]
+                }
+            }
+            (_, f) => {
+                if flags.fastvolslide {
+                    vec![
+                        TrackImportEffect::ChannelVolumeSlide0(speed(f)),
+                        TrackImportEffect::ChannelVolumeSlideN(speed(f)),
+                    ]
+                } else {
+                    vec![TrackImportEffect::ChannelVolumeSlideN(speed(f))]
+                }
+            }
         }
     }
 
@@ -130,38 +263,56 @@ impl S3mEffect {
 
     fn s3m_walk_effect(
         freq_type: FrequencyType,
+        flags: S3mImportFlags,
         current: &PatternSlot,
     ) -> Option<Vec<TrackImportEffect>> {
         let param = current.effect_parameter;
+        // Scale factor for pitch slides. ST3's raw `param` operates
+        // on ST3's `aspd` which is 4× finer than xmrs's Amiga period,
+        // so in Amiga mode we use `1.0` and in Linear mode (which
+        // has 4× finer period resolution than xmrs's Amiga periods)
+        // we use `4.0`. This scale also applies to the fine/extra-
+        // fine sub-commands: previously only the main slide respected
+        // it, which left E/F high-nibble-F fine slides 4× too fast
+        // in Amiga mode.
+        let main_scale = match freq_type {
+            FrequencyType::LinearFrequencies => 4.0,
+            FrequencyType::AmigaFrequencies => 1.0,
+        };
+        // oldstvib (masterflags bit 1) doubles the vibrato depth —
+        // ST3 uses a `>> 4` shift under this flag instead of the
+        // regular `>> 5`, giving 2× the depth. The same applies to
+        // the fine vibrato U (`>> 6` vs `>> 7`). Absorbed into the
+        // emitted depth so the player stays agnostic.
+        let vib_depth_scale: f32 = if flags.oldstvib { 2.0 } else { 1.0 };
         match current.effect_type {
             // D - Volume slide
-            4 => Self::s3m_volume_slide(param).map(|e| vec![e]),
+            4 => {
+                let v = Self::s3m_volume_slide(param, flags);
+                if v.is_empty() {
+                    None
+                } else {
+                    Some(v)
+                }
+            }
 
             // E - Portamento down
             5 => {
                 let high = (param & 0xF0) >> 4;
                 let low = param & 0x0F;
-                // Main portamento is mode-aware. Both FT2 and ST3 apply
-                // `delta = param * 4` per tick in the native Amiga-period
-                // scale (where C-4 = 1712). xmrs internally stores Amiga
-                // periods at 1/4 of that scale (C-4 ≈ 427, verify with
-                // `amiga_pitch_to_period(48)` ≈ 427, ft2-clone LUT entry
-                // for C-4 = 1712 — the ratio is exactly 4). So in xmrs's
-                // Amiga mode, the same audible slide speed requires the
-                // raw `param` multiplier, not `param * 4`. Linear mode
-                // has 4× finer period resolution in the other direction,
-                // and keeps the traditional `param * 4` scaling.
-                //
-                // Fine/extra-fine sub-commands (Fxy/Exy high nibble) are
-                // left at their historical scalings — they're small
-                // corrections where the off-by-4× isn't audible.
-                let main_scale = match freq_type {
-                    FrequencyType::LinearFrequencies => 4.0,
-                    FrequencyType::AmigaFrequencies => 1.0,
-                };
                 match (high, low) {
-                    (0xE, f) => Some(vec![TrackImportEffect::PortamentoExtraFineDown(f as f32)]),
-                    (0xF, f) => Some(vec![TrackImportEffect::PortamentoFineDown(4.0 * f as f32)]),
+                    // EEy: extra-fine slide down (ST3: `info & 0xF`
+                    // subtracted from aspd at tick 0 only). 1x scale
+                    // in ST3 units = `main_scale` in xmrs period
+                    // units.
+                    (0xE, f) => Some(vec![TrackImportEffect::PortamentoExtraFineDown(
+                        main_scale * f as f32,
+                    )]),
+                    // EFy: "extra" fine slide down (4x scale, once
+                    // at tick 0).
+                    (0xF, f) => Some(vec![TrackImportEffect::PortamentoFineDown(
+                        main_scale * 4.0 * f as f32,
+                    )]),
                     _ => Some(vec![TrackImportEffect::PortamentoDown(
                         main_scale * param as f32,
                     )]),
@@ -172,13 +323,13 @@ impl S3mEffect {
             6 => {
                 let high = (param & 0xF0) >> 4;
                 let low = param & 0x0F;
-                let main_scale = match freq_type {
-                    FrequencyType::LinearFrequencies => 4.0,
-                    FrequencyType::AmigaFrequencies => 1.0,
-                };
                 match (high, low) {
-                    (0xE, f) => Some(vec![TrackImportEffect::PortamentoExtraFineUp(-(f as f32))]),
-                    (0xF, f) => Some(vec![TrackImportEffect::PortamentoFineUp(-4.0 * f as f32)]),
+                    (0xE, f) => Some(vec![TrackImportEffect::PortamentoExtraFineUp(
+                        -main_scale * f as f32,
+                    )]),
+                    (0xF, f) => Some(vec![TrackImportEffect::PortamentoFineUp(
+                        -main_scale * 4.0 * f as f32,
+                    )]),
                     _ => Some(vec![TrackImportEffect::PortamentoUp(
                         -main_scale * param as f32,
                     )]),
@@ -187,17 +338,14 @@ impl S3mEffect {
 
             // G - Tone portamento
             7 => {
-                let speed = match freq_type {
-                    FrequencyType::LinearFrequencies => 4.0 * param as f32,
-                    FrequencyType::AmigaFrequencies => param as f32,
-                };
+                let speed = main_scale * param as f32;
                 Some(vec![TrackImportEffect::TonePortamento(speed)])
             }
 
             // H - Vibrato
             8 => {
                 let speed = ((param & 0xF0) >> 4) as f32 / 64.0;
-                let depth = (param & 0x0F) as f32 / 16.0;
+                let depth = (param & 0x0F) as f32 / 16.0 * vib_depth_scale;
                 Some(vec![TrackImportEffect::Vibrato(speed, depth)])
             }
 
@@ -221,16 +369,16 @@ impl S3mEffect {
 
             // K - Vibrato + Volume slide
             11 => {
-                let vs =
-                    Self::s3m_volume_slide(param).unwrap_or(TrackImportEffect::VolumeSlideN(0.0));
-                Some(vec![TrackImportEffect::Vibrato(0.0, 0.0), vs])
+                let mut v = vec![TrackImportEffect::Vibrato(0.0, 0.0)];
+                v.extend(Self::s3m_volume_slide(param, flags));
+                Some(v)
             }
 
             // L - Tone portamento + Volume slide
             12 => {
-                let vs =
-                    Self::s3m_volume_slide(param).unwrap_or(TrackImportEffect::VolumeSlideN(0.0));
-                Some(vec![TrackImportEffect::TonePortamento(0.0), vs])
+                let mut v = vec![TrackImportEffect::TonePortamento(0.0)];
+                v.extend(Self::s3m_volume_slide(param, flags));
+                Some(v)
             }
 
             // M - Set channel volume
@@ -239,7 +387,14 @@ impl S3mEffect {
             )]),
 
             // N - Channel volume slide
-            14 => Self::s3m_channel_volume_slide(param).map(|e| vec![e]),
+            14 => {
+                let v = Self::s3m_channel_volume_slide(param, flags);
+                if v.is_empty() {
+                    None
+                } else {
+                    Some(v)
+                }
+            }
 
             // O - Sample offset
             15 => Some(vec![TrackImportEffect::InstrumentSampleOffset(
@@ -249,17 +404,20 @@ impl S3mEffect {
             // P - Panning slide
             16 => Self::s3m_panning_slide(param).map(|e| vec![e]),
 
-            // Q - Retrigger
+            // Q - Retrigger. ST3's Qxy uses a LUT that differs from
+            // FT2's Rxy on nibble 6 (`10/16` vs `11/16`); the
+            // dedicated `NoteRetrigExtendedS3m` variant keeps that
+            // split out of the generic converter.
             17 => {
                 let vol = (param >> 4) as usize;
                 let speed = (param & 0x0F) as usize;
-                Some(vec![TrackImportEffect::NoteRetrigExtended(speed, vol)])
+                Some(vec![TrackImportEffect::NoteRetrigExtendedS3m(speed, vol)])
             }
 
             // R - Tremolo
             18 => {
                 let speed = ((param & 0xF0) >> 4) as f32 / 64.0;
-                let depth = (param & 0x0F) as f32 / 16.0;
+                let depth = (param & 0x0F) as f32 / 16.0 * vib_depth_scale;
                 Some(vec![TrackImportEffect::Tremolo(speed, depth)])
             }
 
@@ -311,7 +469,7 @@ impl S3mEffect {
             // U - Fine vibrato (4x finer depth than H)
             21 => {
                 let speed = ((param & 0xF0) >> 4) as f32 / 64.0;
-                let depth = (param & 0x0F) as f32 / 64.0;
+                let depth = (param & 0x0F) as f32 / 64.0 * vib_depth_scale;
                 Some(vec![TrackImportEffect::VibratoFine(speed, depth)])
             }
 
@@ -413,8 +571,12 @@ impl S3mEffect {
 
     // --- Public API ---
 
-    pub fn s3m_unpack(freq_type: FrequencyType, current: &PatternSlot) -> TrackImportUnit {
-        let te = Self::s3m_walk_effect(freq_type, current);
+    pub fn s3m_unpack(
+        freq_type: FrequencyType,
+        flags: S3mImportFlags,
+        current: &PatternSlot,
+    ) -> TrackImportUnit {
+        let te = Self::s3m_walk_effect(freq_type, flags, current);
         let ve = Self::s3m_walk_volume(current);
         let ge = Self::s3m_walk_global_effect(current);
 
@@ -435,13 +597,14 @@ impl S3mEffect {
 
     pub fn s3m_unpack_pattern(
         freq_type: FrequencyType,
+        flags: S3mImportFlags,
         pattern: &[Vec<PatternSlot>],
     ) -> Vec<Vec<TrackImportUnit>> {
         pattern
             .iter()
             .map(|row| {
                 row.iter()
-                    .map(|slot| Self::s3m_unpack(freq_type, slot))
+                    .map(|slot| Self::s3m_unpack(freq_type, flags, slot))
                     .collect()
             })
             .collect()

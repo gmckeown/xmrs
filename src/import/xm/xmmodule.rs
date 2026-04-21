@@ -14,6 +14,7 @@ use crate::import::orders_helper;
 use crate::import::patternslot::PatternSlot;
 use crate::module::{Module, ModuleFormat};
 use crate::period_helper::FrequencyType;
+use crate::prelude::PlaybackQuirks;
 
 #[derive(Default, Serialize, Deserialize, Debug)]
 pub struct XmModule {
@@ -70,6 +71,20 @@ impl XmModule {
                 self.header.version_number & 0xFF
             ),
             format: ModuleFormat::Xm,
+            // FT2 canonical replay behaviour — every XM module is
+            // authored against these, so the XM importer opts them
+            // all on. Editor-authored modules that leave `quirks` at
+            // default play without any of these historical edges.
+            quirks: PlaybackQuirks {
+                ft2_pitch_slide_overflow: true,
+                ft2_arpeggio_lut: true,
+                ft2_arpeggio_note_clamp: true,
+                keyoff_cuts_without_vol_env: true,
+                k00_eats_note: true,
+                volcol_b_advances_vibrato: true,
+                e60_leaks_to_next_pattern: true,
+                ..PlaybackQuirks::default()
+            },
             frequency_type: match self.header.flags {
                 XmFlagType::XmAmigaFrequencies => FrequencyType::AmigaFrequencies,
                 XmFlagType::XmLinearFrequencies => FrequencyType::LinearFrequencies,

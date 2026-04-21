@@ -11,6 +11,37 @@ use micromath::F32Ext;
 #[allow(unused_imports)]
 use num_traits::float::Float;
 
+/// FT2/ST3 multi-retrig volume modifier table.
+///
+/// FT2 (`doMultiRetrig`) and ST3 (`s_retrig` via `retrigvoladd`) share
+/// the same shape: nibbles 1–5 subtract 1/2/4/8/16, nibbles 9–D add
+/// the same, and nibbles 6/7/E/F are multiplicative. The two formats
+/// disagree on the nibble-6 constant only — FT2 uses `11/16`, ST3
+/// `10/16` — which the caller supplies via `mul6`.
+///
+/// Additive deltas use `1/64` as the unit (xmrs's normalised volume
+/// scale, where 0.0 = silent and 1.0 = full).
+fn note_retrig_volume_modifier(nibble: usize, mul6: f32) -> NoteRetrigOperator {
+    const S: f32 = 1.0 / 64.0;
+    match nibble {
+        1 => NoteRetrigOperator::Sum(-S),
+        2 => NoteRetrigOperator::Sum(-2.0 * S),
+        3 => NoteRetrigOperator::Sum(-4.0 * S),
+        4 => NoteRetrigOperator::Sum(-8.0 * S),
+        5 => NoteRetrigOperator::Sum(-16.0 * S),
+        6 => NoteRetrigOperator::Mul(mul6),
+        7 => NoteRetrigOperator::Mul(1.0 / 2.0),
+        9 => NoteRetrigOperator::Sum(S),
+        0xA => NoteRetrigOperator::Sum(2.0 * S),
+        0xB => NoteRetrigOperator::Sum(4.0 * S),
+        0xC => NoteRetrigOperator::Sum(8.0 * S),
+        0xD => NoteRetrigOperator::Sum(16.0 * S),
+        0xE => NoteRetrigOperator::Mul(3.0 / 2.0),
+        0xF => NoteRetrigOperator::Mul(2.0),
+        _ => NoteRetrigOperator::None,
+    }
+}
+
 // This step is mandatory to manage the effects memory before TrackEffect...
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub enum TrackImportEffect {
@@ -87,6 +118,17 @@ pub enum TrackImportEffect {
     /// Extended version of the `TrackImportEffectffect::NoteRetrig` effect
     /// V / XM0=0x1B(R), XM=0x1B(R)
     NoteRetrigExtended(usize, usize),
+
+    /// `(interval, volume modifier)` — ST3/S3M flavour of
+    /// [`Self::NoteRetrigExtended`] (command Qxy). The LUT differs
+    /// from FT2's on nibble 6 only: FT2 uses `vol * 11/16` (from
+    /// `doMultiRetrig` in `ft2_replayer.c`), ST3 uses `vol * 10/16 =
+    /// vol * 5/8` (`retrigvoladd[22] = 10` in `digdata.c`). All other
+    /// nibbles share identical semantics across the two formats, so
+    /// keeping a separate variant only for this bucket is wasteful,
+    /// but variant-level splitting is the simplest way to keep the
+    /// format-specific constant out of the generic converter.
+    NoteRetrigExtendedS3m(usize, usize),
 
     /// `(speed, depth)`, set Panbrello
     Panbrello(f32, f32),
@@ -367,28 +409,20 @@ impl TrackImportEffect {
                 // ft2_replayer.c:doMultiNoteRetrig. The common 2/3 and 3/2
                 // approximations diverge from FT2 by ~3% on nibble 6 which
                 // is audible over a long Rxy passage; keep 11/16 here.
-                const S: f32 = 1.0 / 64.0;
-                let volume = match vol {
-                    1 => NoteRetrigOperator::Sum(-S),
-                    2 => NoteRetrigOperator::Sum(-2.0 * S),
-                    3 => NoteRetrigOperator::Sum(-4.0 * S),
-                    4 => NoteRetrigOperator::Sum(-8.0 * S),
-                    5 => NoteRetrigOperator::Sum(-16.0 * S),
-                    6 => NoteRetrigOperator::Mul(11.0 / 16.0),
-                    7 => NoteRetrigOperator::Mul(1.0 / 2.0),
-                    9 => NoteRetrigOperator::Sum(S),
-                    0xA => NoteRetrigOperator::Sum(2.0 * S),
-                    0xB => NoteRetrigOperator::Sum(4.0 * S),
-                    0xC => NoteRetrigOperator::Sum(8.0 * S),
-                    0xD => NoteRetrigOperator::Sum(16.0 * S),
-                    0xE => NoteRetrigOperator::Mul(3.0 / 2.0),
-                    0xF => NoteRetrigOperator::Mul(2.0),
-                    _ => NoteRetrigOperator::None,
-                };
-
                 Some(TrackEffect::NoteRetrig {
                     speed: interval,
-                    volume_modifier: volume,
+                    volume_modifier: note_retrig_volume_modifier(vol, 11.0 / 16.0),
+                })
+            }
+            TrackImportEffect::NoteRetrigExtendedS3m(interval, vol) => {
+                // ST3 Qxy: same LUT as FT2 Rxy except nibble 6, where
+                // `retrigvoladd[22] = 10` yields `vol * 10/16 = vol *
+                // 5/8` (`digcmd.c:s_retrig`). All other nibbles match,
+                // so we share `note_retrig_volume_modifier` with just
+                // a different nibble-6 constant.
+                Some(TrackEffect::NoteRetrig {
+                    speed: interval,
+                    volume_modifier: note_retrig_volume_modifier(vol, 10.0 / 16.0),
                 })
             }
             TrackImportEffect::Panbrello(speed, depth) => {

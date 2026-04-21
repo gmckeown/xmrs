@@ -23,37 +23,173 @@ pub type Row = Vec<TrackUnit>;
 /// Patterns are sequences of lines
 pub type Pattern = Vec<Row>;
 
-/// Which tracker convention this module expects at playback.
+/// Which tracker convention this module was imported from.
 ///
-/// Different trackers have different playback semantics even when the
-/// underlying data shapes look similar. The most common example:
-/// a note-column `===` on an instrument without a volume envelope
-/// CUTS the note in FT2/XM but FADES (via `volume_fadeout`) in IT.
-/// Neither is a "bug"; they are the canonical behaviours of their
-/// respective formats. Importers set this field and the player uses
-/// it to pick the right replay semantics, including format-specific
-/// quirks (e.g. FT2's arpeggio LUT, portamento-down signed overflow,
-/// K00-eats-note) that XM modules are authored against.
+/// This is **metadata only** — it identifies the source format for
+/// display, export, and editor UI purposes. Runtime playback
+/// decisions are driven entirely by [`PlaybackQuirks`] on [`Module`],
+/// which an editor can set independently of the format tag. This
+/// lets a new module be authored with any combination of historical
+/// quirks (or none at all) without having to lie about the format
+/// it "came from".
+///
+/// Importers set two things: the `format` tag here (as metadata) and
+/// the `quirks` struct (as behaviour). An editor creating a fresh
+/// module from scratch typically leaves `format = Unknown` and
+/// `quirks = PlaybackQuirks::default()` (all-off) for a clean,
+/// quirk-free playback.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ModuleFormat {
-    /// Unknown / hand-constructed / non-tracker source. Conservative
-    /// defaults — no format-specific semantics are applied.
+    /// Unknown / hand-constructed / non-tracker source.
     #[default]
     Unknown,
     /// ProTracker-style MOD (Amiga Soundtracker family).
     Mod,
     /// ScreamTracker III (S3M).
     S3m,
-    /// Fasttracker II (XM). Selecting this format activates the
-    /// canonical FT2 replay behaviour, including the historical FT2
-    /// quirks that XM modules are authored against (arpeggio LUT,
-    /// E60 pattern-loop, arpeggio period clamp, portamento-down
-    /// signed overflow, K00-eats-note, vol-col `Bx` advances vibrato,
-    /// ...). FT2's behaviour is the format's reference, so there is
-    /// no separate "quirks" toggle — the format IS the switch.
+    /// Fasttracker II (XM).
     Xm,
     /// Impulse Tracker (IT), including OpenMPT's IT extensions.
     It,
+}
+
+impl ModuleFormat {
+    /// `true` when this tag is `Xm`.
+    #[inline]
+    pub fn is_xm(&self) -> bool {
+        matches!(self, ModuleFormat::Xm)
+    }
+
+    /// `true` when this tag is `S3m`.
+    #[inline]
+    pub fn is_s3m(&self) -> bool {
+        matches!(self, ModuleFormat::S3m)
+    }
+
+    /// `true` when this tag is `It`.
+    #[inline]
+    pub fn is_it(&self) -> bool {
+        matches!(self, ModuleFormat::It)
+    }
+
+    /// `true` when this tag is `Mod`.
+    #[inline]
+    pub fn is_mod(&self) -> bool {
+        matches!(self, ModuleFormat::Mod)
+    }
+}
+
+/// Per-module playback behaviour switches.
+///
+/// These are the **runtime** knobs the replayer consults to decide
+/// how to render a module. Each knob is an orthogonal switch for a
+/// single historical tracker behaviour, named for what it *does*
+/// rather than which tracker it came from — so an editor can compose
+/// any subset of them without pretending the output is a specific
+/// historical format.
+///
+/// The `Default` impl is fully conservative: every quirk is off
+/// (`false` / `None`). A module built from scratch by an editor plays
+/// cleanly, without inheriting any historical bug or edge case. The
+/// importers (XM, S3M, IT, MOD) enable the quirks that are canonical
+/// for their source format.
+///
+/// Every comment below is structured as: *what the knob does* ·
+/// *which format(s) enable it by default* · *the upstream reference
+/// point*.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Default)]
+pub struct PlaybackQuirks {
+    // --- Period / pitch ---
+    /// Reproduce FT2's signed-overflow quirk in portamento-down:
+    /// periods in `[32000, 32767]` snap to `31999`, but periods that
+    /// grow past `32768` pass through unchanged (the int16 cast in
+    /// FT2's source flips negative, so its own clamp check fails).
+    /// Some XM modules rely on this to produce very deep pitch
+    /// slides past the audible range. XM on. ft2_replayer.c:1914
+    /// (explicit "FT2 bug" marker).
+    pub ft2_pitch_slide_overflow: bool,
+
+    /// If `Some((min, max))`, pitch slides clamp the period to this
+    /// inclusive range. Models ST3's `amigalimits` masterflag
+    /// (`[113.25, 856]` in xmrs Amiga-period units, = ST3's
+    /// `[453, 3424]` / 4). Leave `None` for the default
+    /// `[1 or 0 .. 31999]` fallback. S3M sets it when masterflag
+    /// bit 0x10 is on. dig.c:setmasterflags.
+    pub period_clamp: Option<(f32, f32)>,
+
+    /// When a pitch slide tries to make the period go below 1,
+    /// allow it to reach 0 ("infinitely high note") instead of
+    /// clamping at 1. S3M convention (the minimum period is
+    /// effectively silent anyway). FT2/IT clamp at 1.
+    pub allow_zero_period: bool,
+
+    // --- Arpeggio ---
+    /// Use FT2's historical `arpeggioTab` for arpeggio index
+    /// selection — a reverse-tick LUT with hand-crafted holes
+    /// that produces FT2's signature odd rhythm at high speeds.
+    /// Off = plain `tick % 3` rotation. XM on. ft2_replayer.c
+    /// `arpeggioTab` + the reverse `song.tick` semantics.
+    pub ft2_arpeggio_lut: bool,
+
+    /// When arpeggio is active, clamp the base note to `≤ 95` in
+    /// `adjust_period` to keep the octave-perturbed lookup inside
+    /// FT2's 0–95 note range. Paired with `ft2_arpeggio_lut`.
+    /// XM on. ft2_replayer.c:arpNote → `period2NotePeriod`.
+    pub ft2_arpeggio_note_clamp: bool,
+
+    // --- Envelopes / note triggering ---
+    /// A note-off on a channel whose instrument has no volume
+    /// envelope CUTS the note (quick anti-click ramp to zero)
+    /// instead of FADING via `volume_fadeout`. XM on; IT off (IT
+    /// always fades). ft2_replayer.c:`keyOff`. Canonical XM
+    /// playback — not a "bug" per se.
+    pub keyoff_cuts_without_vol_env: bool,
+
+    /// `K00` (note-off effect with param 0) at tick 0 swallows
+    /// the note trigger on the same row — the note column is
+    /// ignored and the channel just receives a keyoff. Only
+    /// applies to `K00` (param 0); `K0y` with `y > 0` plays the
+    /// note normally and the keyoff fires at tick `y`. XM on.
+    /// ft2_replayer.c:`getNewNote`, early-return before
+    /// `triggerNote`.
+    pub k00_eats_note: bool,
+
+    // --- Vibrato ---
+    /// A vol-column vibrato-depth slot (FT2 `Bx`) without a
+    /// main-effect 4xy on the same row still ticks the vibrato
+    /// LFO on every non-zero tick. FT2's `v_Vibrato` calls
+    /// `doVibrato` unconditionally after updating the depth.
+    /// Without this, modules that drive vibrato primarily from
+    /// the vol column leave the LFO frozen at its last position.
+    /// XM on.
+    pub volcol_b_advances_vibrato: bool,
+
+    // --- Pattern loop ---
+    /// An `E60` / `SB0` (set loop start) also leaks its row
+    /// number into the song-level break position, so when the
+    /// pattern ends naturally the NEXT pattern starts at that
+    /// row instead of row 0. FT2 bug that some XM modules rely
+    /// on. XM on. ft2_replayer.c:`patternLoop` → `pBreakPos`
+    /// side-effect.
+    pub e60_leaks_to_next_pattern: bool,
+
+    /// A pattern loop that completes (`SBx` / `E6x` after `x`
+    /// iterations) updates its origin to `current_row + 1`, so
+    /// a subsequent loop in the same pattern resumes *after*
+    /// the previous loop's end instead of re-using the original
+    /// origin. S3M on. digcmd.c:s_patloop — `song.patloopstart
+    /// = song.np_row + 1` at exit.
+    pub pattern_loop_resumes: bool,
+
+    // --- Tremor ---
+    /// The tremor effect (I / T) uses a persistent state machine
+    /// whose on/off counter carries across rows — consecutive
+    /// rows of tremor form a single continuous cycle. Off = FT2
+    /// per-row modular formula, which restarts the phase at
+    /// every row. S3M on. digcmd.c:`s_tremor` (`atremor` +
+    /// `atreon` both live on the channel struct, never reset
+    /// at row load).
+    pub tremor_state_persists: bool,
 }
 
 /// SoundTracker Module with Steroid
@@ -61,11 +197,14 @@ pub enum ModuleFormat {
 pub struct Module {
     pub name: String,
     pub comment: String,
-    /// Canonical playback semantics for this module. Set by the
-    /// importer that produced the `Module` (XM importer sets `Xm`,
-    /// IT importer sets `It`, …). Hand-constructed `Module`s default
-    /// to `Unknown`.
+    /// Source-format metadata (see [`ModuleFormat`]). Not used for
+    /// runtime playback decisions — those come from [`Self::quirks`].
     pub format: ModuleFormat,
+    /// Per-module playback behaviour switches. Importers populate
+    /// this to match the source format's canonical semantics;
+    /// editor-authored modules typically leave it at
+    /// [`PlaybackQuirks::default`] for clean, quirk-free playback.
+    pub quirks: PlaybackQuirks,
     pub frequency_type: FrequencyType,
     /// Restart index in `pattern_order`
     pub restart_position: usize,
@@ -86,6 +225,7 @@ impl Default for Module {
             name: "".to_string(),
             comment: "".to_string(),
             format: ModuleFormat::Unknown,
+            quirks: PlaybackQuirks::default(),
             frequency_type: FrequencyType::LinearFrequencies,
             restart_position: 0,
             default_tempo: 6,

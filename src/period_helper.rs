@@ -7,7 +7,6 @@ use micromath::F32Ext;
 #[allow(unused_imports)]
 use num_traits::float::Float;
 
-use crate::module::ModuleFormat;
 use crate::period_helper_cache::PeriodHelperCache;
 
 /// Historical Frequencies to load old data. Default is Linear.
@@ -21,11 +20,12 @@ pub enum FrequencyType {
 #[derive(Clone)]
 pub struct PeriodHelper {
     pub freq_type: FrequencyType,
-    /// Module format drives the FT2-specific rounding in
-    /// [`Self::adjust_period`]: for `Xm`, arpeggio-perturbed periods
-    /// are clamped through FT2's octave-limited note lookup; for
-    /// anything else the raw period calculation is used.
-    format: ModuleFormat,
+    /// Behaviour knob: when `true`, `adjust_period` clamps the base
+    /// note to ≤ 95 under active arpeggio so the period lookup stays
+    /// inside FT2's 0–95 note range (matches `ft2_replayer.c`
+    /// arpeggio's `period2NotePeriod`). Off by default — driven from
+    /// `module.quirks.ft2_arpeggio_note_clamp` at construction.
+    ft2_arpeggio_note_clamp: bool,
     cache: PeriodHelperCache<10>,
 }
 
@@ -33,7 +33,7 @@ impl Default for PeriodHelper {
     fn default() -> Self {
         Self {
             freq_type: FrequencyType::LinearFrequencies,
-            format: ModuleFormat::Unknown,
+            ft2_arpeggio_note_clamp: false,
             cache: PeriodHelperCache::new(),
         }
     }
@@ -43,10 +43,10 @@ impl PeriodHelper {
     /// historical amiga module sample frequency (Paula chipset related)
     pub const C4_FREQ: f32 = 8363.0;
 
-    pub fn new(freq_type: FrequencyType, format: ModuleFormat) -> Self {
+    pub fn new(freq_type: FrequencyType, ft2_arpeggio_note_clamp: bool) -> Self {
         Self {
             freq_type,
-            format,
+            ft2_arpeggio_note_clamp,
             cache: PeriodHelperCache::new(),
         }
     }
@@ -191,7 +191,7 @@ impl PeriodHelper {
             note_orig
         };
 
-        if self.format == ModuleFormat::Xm && arp_pitch != 0.0 {
+        if self.ft2_arpeggio_note_clamp && arp_pitch != 0.0 {
             // FT2-canonical note clamp when arpeggio is active: FT2's
             // arpeggio period lookup walks a 0..95 note range
             // (`period2NotePeriod` in ft2_replayer.c), so any base note
