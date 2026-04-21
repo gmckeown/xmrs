@@ -20,7 +20,11 @@ pub enum FrequencyType {
 #[derive(Clone)]
 pub struct PeriodHelper {
     pub freq_type: FrequencyType,
-    historical: bool,
+    /// When true, the period-to-frequency path under arpeggio applies
+    /// FT2's specific rounding (see `frequency_for_period`). This is an
+    /// FT2 replay *quirk*, not a generic property of the format — a
+    /// strict XM module without FT2 bugs doesn't need it.
+    ft2_quirks: bool,
     cache: PeriodHelperCache<10>,
 }
 
@@ -28,7 +32,7 @@ impl Default for PeriodHelper {
     fn default() -> Self {
         Self {
             freq_type: FrequencyType::LinearFrequencies,
-            historical: false,
+            ft2_quirks: false,
             cache: PeriodHelperCache::new(),
         }
     }
@@ -38,10 +42,10 @@ impl PeriodHelper {
     /// historical amiga module sample frequency (Paula chipset related)
     pub const C4_FREQ: f32 = 8363.0;
 
-    pub fn new(freq_type: FrequencyType, historical: bool) -> Self {
+    pub fn new(freq_type: FrequencyType, ft2_quirks: bool) -> Self {
         Self {
             freq_type,
-            historical,
+            ft2_quirks,
             cache: PeriodHelperCache::new(),
         }
     }
@@ -186,7 +190,7 @@ impl PeriodHelper {
             note_orig
         };
 
-        if self.historical && arp_pitch != 0.0 {
+        if self.ft2_quirks && arp_pitch != 0.0 {
             // From C-0 (0) to B-7 (95) only
             let mut note = note;
             if note.ceil() >= 95.0 {

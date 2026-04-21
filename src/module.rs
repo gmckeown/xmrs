@@ -23,11 +23,45 @@ pub type Row = Vec<TrackUnit>;
 /// Patterns are sequences of lines
 pub type Pattern = Vec<Row>;
 
+/// Which tracker convention this module expects at playback.
+///
+/// Different trackers have different playback semantics even when the
+/// underlying data shapes look similar. The most common example:
+/// a note-column `===` on an instrument without a volume envelope
+/// CUTS the note in FT2/XM but FADES (via `volume_fadeout`) in IT.
+/// Neither is a "bug"; they are the canonical behaviours of their
+/// respective formats. Importers set this field and the player uses
+/// it to pick the right replay semantics, independent of any tracker
+/// quirks/bugs which are gated by a separate flag (`ft2_quirks`).
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ModuleFormat {
+    /// Unknown / hand-constructed / non-tracker source. Conservative
+    /// defaults — no format-specific semantics are applied.
+    #[default]
+    Unknown,
+    /// ProTracker-style MOD (Amiga Soundtracker family).
+    Mod,
+    /// ScreamTracker III (S3M).
+    S3m,
+    /// Fasttracker II (XM). Note: enabling "XM" semantics does NOT by
+    /// itself enable FT2-specific replay *bugs* (arpeggio table overflow,
+    /// K00+note quirk, E60 pattern-loop quirk, …) — those are opt-in
+    /// via `XmrsPlayer::new(…, ft2_quirks = true)`.
+    Xm,
+    /// Impulse Tracker (IT), including OpenMPT's IT extensions.
+    It,
+}
+
 /// SoundTracker Module with Steroid
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Module {
     pub name: String,
     pub comment: String,
+    /// Canonical playback semantics for this module. Set by the
+    /// importer that produced the `Module` (XM importer sets `Xm`,
+    /// IT importer sets `It`, …). Hand-constructed `Module`s default
+    /// to `Unknown`.
+    pub format: ModuleFormat,
     pub frequency_type: FrequencyType,
     /// Restart index in `pattern_order`
     pub restart_position: usize,
@@ -47,6 +81,7 @@ impl Default for Module {
         Module {
             name: "".to_string(),
             comment: "".to_string(),
+            format: ModuleFormat::Unknown,
             frequency_type: FrequencyType::LinearFrequencies,
             restart_position: 0,
             default_tempo: 6,

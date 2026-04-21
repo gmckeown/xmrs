@@ -284,13 +284,18 @@ impl S3mEffect {
         }
     }
 
-    // --- Volume column (raw S3M: 0-64 or absent) ---
+    // --- Volume column (raw S3M: 0-64, 0x80-0xC0 panning, or absent) ---
 
     fn s3m_walk_volume(current: &PatternSlot) -> Option<TrackImportEffect> {
-        if current.volume <= 64 {
-            Some(TrackImportEffect::Volume(current.volume as f32 / 64.0, 0))
-        } else {
-            None
+        match current.volume {
+            v if v <= 64 => Some(TrackImportEffect::Volume(v as f32 / 64.0, 0)),
+            // MPT-style S3M panning via the volume column. 0x80 = hard left,
+            // 0xC0 = hard right; 65 discrete steps in between. We scale to
+            // the [0.0, 1.0] range used by TrackImportEffect::Panning.
+            v if (0x80..=0xC0).contains(&v) => {
+                Some(TrackImportEffect::Panning((v - 0x80) as f32 / 64.0))
+            }
+            _ => None,
         }
     }
 

@@ -17,7 +17,7 @@ pub use crate::{
     instr_robsid::InstrRobSid,
     instr_sid::InstrSid,
     instrument::{Instrument, InstrumentType},
-    module::{Module, Pattern, Row, MAX_NUM_ROWS},
+    module::{Module, ModuleFormat, Pattern, Row, MAX_NUM_ROWS},
     period_helper::{FrequencyType, PeriodHelper},
     pitch::Pitch,
     sample::{LoopType, Sample, SampleDataType},

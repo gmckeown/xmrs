@@ -12,7 +12,7 @@ use super::xmpattern::XmPattern;
 use crate::import::import_memory::{ImportMemory, MemoryType};
 use crate::import::orders_helper;
 use crate::import::patternslot::PatternSlot;
-use crate::module::Module;
+use crate::module::{Module, ModuleFormat};
 use crate::period_helper::FrequencyType;
 
 #[derive(Default, Serialize, Deserialize, Debug)]
@@ -69,6 +69,7 @@ impl XmModule {
                 self.header.version_number >> 8,
                 self.header.version_number & 0xFF
             ),
+            format: ModuleFormat::Xm,
             frequency_type: match self.header.flags {
                 XmFlagType::XmAmigaFrequencies => FrequencyType::AmigaFrequencies,
                 XmFlagType::XmLinearFrequencies => FrequencyType::LinearFrequencies,

@@ -293,6 +293,7 @@ impl ItModule {
                 self.header.compatible_with_tracker & 0x00FF,
                 self.message
             ),
+            format: ModuleFormat::It,
             frequency_type: if self.header.is_linear_slides() {
                 FrequencyType::LinearFrequencies
             } else {

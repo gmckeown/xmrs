@@ -169,8 +169,57 @@ impl Sample {
         }
     }
 
-    /// Returns the real position in the sample
+    /// Returns the real position in the sample buffer for a virtual
+    /// play-head position, or `None` when the play head has run past
+    /// the end of a non-looping sample (or the sample is empty).
+    ///
+    /// This is the honest version of [`Sample::meta_seek`]: callers
+    /// driving a voice should use `seek` and treat `None` as "the
+    /// voice is done, disable it", rather than reading the last frame
+    /// forever.
+    pub fn seek(&self, pos: usize, sustain: bool) -> Option<usize> {
+        if self.is_empty() {
+            return None;
+        }
+
+        let (start, length, loop_type) = if sustain && self.sustain_loop_flag != LoopType::No {
+            (
+                self.sustain_loop_start as usize,
+                self.sustain_loop_length as usize,
+                self.sustain_loop_flag,
+            )
+        } else {
+            (
+                self.loop_start as usize,
+                self.loop_length as usize,
+                self.loop_flag,
+            )
+        };
+
+        match loop_type {
+            LoopType::No => {
+                if pos < self.len() {
+                    Some(pos)
+                } else {
+                    None
+                }
+            }
+            // For looped samples `calculate_loop` already returns a
+            // valid index for any `pos`, so just reuse it.
+            LoopType::Forward | LoopType::PingPong => {
+                Some(self.calculate_loop(pos, start, length, loop_type))
+            }
+        }
+    }
+
+    /// Returns the real position in the sample.
     /// The calling function must save the real position at sustain end to avoid problems
+    ///
+    /// **Note**: when the play head is past the end of a non-looping
+    /// sample, this clamps to the last frame. That makes the voice hold
+    /// its tail value forever, which is almost never what a player
+    /// wants — prefer [`Sample::seek`] and treat `None` as "stop the
+    /// voice". This wrapper is kept for backward compatibility.
     pub fn meta_seek(&self, pos: usize, sustain: bool) -> usize {
         if sustain && self.sustain_loop_flag != LoopType::No {
             self.calculate_loop(
@@ -273,5 +322,61 @@ mod tests {
     fn zero_loop_length_no_panic() {
         let s = make_sample(10, LoopType::Forward, 4, 0);
         let _ = s.meta_seek(5, false);
+    }
+
+    // --- seek() — honest version returning Option ---
+
+    #[test]
+    fn seek_empty_sample_is_none() {
+        let s = make_sample(0, LoopType::No, 0, 0);
+        assert_eq!(s.seek(0, false), None);
+        assert_eq!(s.seek(100, false), None);
+    }
+
+    #[test]
+    fn seek_no_loop_past_end_is_none() {
+        // Key case: this was the "string never stops" bug. Past-end on a
+        // non-looping sample must report None, not clamp to len-1.
+        let s = make_sample(10, LoopType::No, 0, 0);
+        assert_eq!(s.seek(0, false), Some(0));
+        assert_eq!(s.seek(9, false), Some(9));
+        assert_eq!(s.seek(10, false), None);
+        assert_eq!(s.seek(100, false), None);
+    }
+
+    #[test]
+    fn seek_forward_loop_wraps() {
+        let s = make_sample(10, LoopType::Forward, 4, 4);
+        assert_eq!(s.seek(3, false), Some(3));
+        assert_eq!(s.seek(7, false), Some(7));
+        assert_eq!(s.seek(8, false), Some(4));
+        assert_eq!(s.seek(9, false), Some(5));
+        // Forward loop never ends.
+        assert_eq!(s.seek(1000, false), Some(4 + (1000 - 4) % 4));
+    }
+
+    #[test]
+    fn seek_pingpong_loop_wraps() {
+        let s = make_sample(10, LoopType::PingPong, 4, 4);
+        assert_eq!(s.seek(3, false), Some(3));
+        assert_eq!(s.seek(7, false), Some(7));
+        assert_eq!(s.seek(8, false), Some(7));
+        assert_eq!(s.seek(9, false), Some(6));
+    }
+
+    #[test]
+    fn seek_sustain_loop_used_while_sustained() {
+        // With sustain_loop != No, the sustain loop is used while
+        // sustain == true; after key-off (sustain == false) the normal
+        // loop takes over.
+        let mut s = make_sample(20, LoopType::No, 0, 0);
+        s.sustain_loop_flag = LoopType::Forward;
+        s.sustain_loop_start = 4;
+        s.sustain_loop_length = 4;
+        // Sustained: sustain loop wraps within [4, 8).
+        assert_eq!(s.seek(8, true), Some(4));
+        assert_eq!(s.seek(100, true), Some(4 + (100 - 4) % 4));
+        // Released: falls back to the (No) loop, so past-end → None.
+        assert_eq!(s.seek(100, false), None);
     }
 }

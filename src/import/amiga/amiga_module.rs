@@ -157,6 +157,7 @@ impl AmigaModule {
 
         module.name = self.title.clone();
         module.comment = "XmRs reader".to_string();
+        module.format = ModuleFormat::Mod;
         module.frequency_type = FrequencyType::AmigaFrequencies;
         module.default_tempo = 6;
         module.default_bpm = 125;

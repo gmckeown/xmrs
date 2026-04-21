@@ -91,15 +91,30 @@ impl S3mPcmInstr {
 
     fn get_sample_data(&self, data: &[u8]) -> Result<SampleDataType, DecodeError> {
         let offset = self.get_sample_offset();
-        let len = if self.get_sample_offset() + self.len as usize > data.len() {
-            // fixes "miracle man.s3m" and other broken S3Ms
-            data.len() - offset
-        } else {
-            self.len as usize
-        };
+
+        if offset > data.len() {
+            return Err(DecodeError::Other("S3M sample offset out of bounds"));
+        }
+        let available = data.len() - offset;
+
+        // `self.len` is a count of sample *values* on disk (not frames, not
+        // raw bytes). For 16-bit samples each value takes 2 bytes, hence
+        // `bytes_per_value`. Stereo is handled downstream: `convert_*_sample`
+        // splits the buffer in half (L then R), so stereo gets half as many
+        // final frames as `self.len`, which matches the original behaviour.
+        let bytes_per_value: usize = if self.is_16bits() { 2 } else { 1 };
+        let wanted_bytes = (self.len as usize).saturating_mul(bytes_per_value);
+
+        // Truncate to what is actually available — fixes "miracle man.s3m"
+        // and other broken S3Ms where the sample header over-claims. We
+        // must keep whole values (2 bytes for 16-bit), otherwise the
+        // u8→u16 conversion would fail on an odd tail.
+        let usable_bytes = wanted_bytes.min(available);
+        let usable_bytes = usable_bytes - (usable_bytes % bytes_per_value);
+        let len = usable_bytes / bytes_per_value; // count in sample *values*
 
         let dst = if self.is_16bits() {
-            let src = Self::convert_u8_to_u16_vec(&data[offset..(offset + len * 2)])?;
+            let src = Self::convert_u8_to_u16_vec(&data[offset..offset + len * 2])?;
             if self.is_stereo() {
                 SampleDataType::Stereo16(self.convert_16bit_sample(src.as_slice()))
             } else {
@@ -268,6 +283,18 @@ struct S3mMetaInstrument {
 }
 
 impl S3mMetaInstrument {
+    /// Placeholder for an empty instrument slot (parapointer == 0).
+    /// Needed to preserve 1:1 indexing between file slots and `self.instruments`,
+    /// since S3M pattern slots reference instruments by absolute index.
+    fn empty() -> Self {
+        Self {
+            discriminator: 0,
+            filename: String::new(),
+            value: S3mInstrument::PcmInstrument(S3mPcmInstr::default()),
+            sample: None,
+        }
+    }
+
     fn new(data: &[u8], offset: usize) -> Result<Self, DecodeError> {
         let discriminator = data[offset];
         let filename = String::from_utf8_lossy(&data[offset + 1..offset + 13])
@@ -390,20 +417,29 @@ impl S3mModule {
             .collect();
 
         // === Samples
+        //
+        // S3M pattern slots reference instruments by absolute 1-based index,
+        // so empty slots (parapointer == 0) MUST be kept as placeholders
+        // to preserve the mapping.
 
         for offset in sample_offsets {
             if offset == 0 {
+                s3m.instruments.push(S3mMetaInstrument::empty());
                 continue;
             }
-            // let data = &ser_s3m_module[offset as usize..];
             s3m.instruments
                 .push(S3mMetaInstrument::new(ser_s3m_module, offset as usize)?);
         }
 
         // === Patterns
+        //
+        // Order list entries reference patterns by absolute index, so empty
+        // slots (parapointer == 0) MUST be kept as placeholders (mirroring the
+        // IT loader convention) instead of being skipped.
 
         for offset in pattern_offsets {
             if offset == 0 {
+                s3m.patterns.push(vec![vec![]]);
                 continue;
             }
             let data = &ser_s3m_module[offset as usize..];
@@ -426,7 +462,17 @@ impl S3mModule {
     // load one pattern row
     fn process_pattern_row(data: &[u8]) -> Result<(Vec<PatternSlot>, &[u8]), DecodeError> {
         let mut d2 = data;
-        let mut pss: Vec<PatternSlot> = vec![PatternSlot::default(); 32];
+        // IMPORTANT: 255 is the sentinel for "no volume command". Using 0
+        // here would be interpreted by `s3m_walk_volume` as an explicit
+        // Volume(0.0), which silences every channel on every row that has
+        // no volume column — i.e. the vast majority of S3M rows.
+        let mut pss: Vec<PatternSlot> = vec![
+            PatternSlot {
+                volume: 255,
+                ..PatternSlot::default()
+            };
+            32
+        ];
         while !d2.is_empty() {
             match Self::decode_pattern_slot(d2) {
                 Some((channel, ps, next)) => {
@@ -455,7 +501,14 @@ impl S3mModule {
 
         let channel = (what & 0x1F) as usize;
 
-        let mut slot: PatternSlot = PatternSlot::default();
+        // 255 is the "no volume command" sentinel — same reason as in
+        // `process_pattern_row`. Must be set BEFORE the volume-column
+        // branch so that when the slot has no volume column (bit 0x40 of
+        // `what` clear), the slot doesn't accidentally carry volume 0.
+        let mut slot: PatternSlot = PatternSlot {
+            volume: 255,
+            ..PatternSlot::default()
+        };
 
         // Note+Instr?
         if what & 0x20 != 0 {
@@ -487,11 +540,18 @@ impl S3mModule {
         }
 
         // Volume?
+        //
+        // Valid ranges:
+        //   0..=64       → set volume
+        //   0x80..=0xC0  → MPT-style "set panning" (left=0x80, right=0xC0)
+        //   anything else → invalid → map to 255 (the "no command" sentinel)
         if what & 0x40 != 0 && k < packed_data.len() {
-            slot.volume = packed_data[k];
-            if slot.volume > 64 {
-                slot.volume = 255; // invalid / default instrument volume
-            }
+            let v = packed_data[k];
+            slot.volume = if v <= 64 || (0x80..=0xC0).contains(&v) {
+                v
+            } else {
+                255
+            };
             k += 1;
         }
 
@@ -511,23 +571,112 @@ impl S3mModule {
         Some((channel, slot, &packed_data[k..]))
     }
 
+    /// Build a synthetic one-row pattern that materialises S3M header
+    /// defaults that `Module` has no dedicated field for: default channel
+    /// panning (from `channel_settings`) and global volume. Returns the
+    /// built pattern plus the list of positions (with the init pattern
+    /// prepended) to feed into `orders_helper::parse_orders`, or `None`
+    /// if there was nothing worth injecting.
+    fn build_init_setup(&self) -> Option<(Vec<Vec<PatternSlot>>, Vec<u8>, u8)> {
+        // Guard: we need a free pattern index that won't collide with the
+        // S3M order-list sentinels 254 ("skip") and 255 ("end").
+        let new_idx: u8 = match self.patterns.len().try_into() {
+            Ok(n) if n < 254 => n,
+            _ => return None,
+        };
+
+        let gv = self.header.global_volume.min(64);
+        let gv_needed = gv != 64; // 64 == 1.0 == player default
+
+        // Scan enabled PCM channels for default panning.
+        let pan_rows: Vec<(usize, u8)> = self
+            .header
+            .channel_settings
+            .iter()
+            .enumerate()
+            .filter_map(|(ch, &s)| {
+                // Skip disabled, Adlib, or fully-unused slots.
+                if s & 0x80 != 0 || s & 0x10 != 0 || s == 0xFF {
+                    return None;
+                }
+                // PCM: bit 3 clear → Left, set → Right.
+                // 0x40 / 0xC0 in /256 = soft-L / soft-R, matching the
+                // convention most modern S3M players use for ST3 defaults.
+                let pan = if s & 0x08 != 0 { 0xC0 } else { 0x40 };
+                Some((ch, pan))
+            })
+            .collect();
+
+        if !gv_needed && pan_rows.is_empty() {
+            return None;
+        }
+
+        // Build the row — 32 slots, all carrying the "no volume" sentinel.
+        let mut row: Vec<PatternSlot> = vec![
+            PatternSlot {
+                volume: 255,
+                ..PatternSlot::default()
+            };
+            32
+        ];
+
+        // Default panning: Xxx (effect 24).
+        for (ch, pan) in &pan_rows {
+            row[*ch].effect_type = 24;
+            row[*ch].effect_parameter = *pan;
+        }
+
+        // Global volume: Vxx (effect 22). Find a slot without an effect —
+        // any channel can carry a global effect.
+        if gv_needed {
+            if let Some(slot) = row.iter_mut().find(|s| s.effect_type == 0) {
+                slot.effect_type = 22;
+                slot.effect_parameter = gv;
+            }
+            // If every PCM channel was already taken by a panning Xxx,
+            // we drop the global-volume setup rather than overwrite. Not
+            // observed in real S3Ms (always < 32 active channels).
+        }
+
+        // Prepend the init pattern's index to the order list.
+        let mut positions = Vec::with_capacity(self.positions.len() + 1);
+        positions.push(new_idx);
+        positions.extend_from_slice(&self.positions);
+
+        Some((vec![row], positions, new_idx))
+    }
+
     pub fn to_module(&self) -> Module {
         let ph = PeriodHelper::new(FrequencyType::LinearFrequencies, false);
         let mut module = Module::default();
 
         module.name = self.header.title.clone();
         module.comment = "XmRs reader".to_string();
+        module.format = ModuleFormat::S3m;
         module.frequency_type = FrequencyType::LinearFrequencies;
         module.default_tempo = self.header.speed as usize;
         module.default_bpm = self.header.tempo as usize;
-        module.pattern_order = orders_helper::parse_orders(&self.positions);
+
+        // Optionally inject a one-row init pattern carrying the header
+        // defaults (channel panning, global volume). Appended at the END
+        // of the patterns list so we don't shift existing indices.
+        let (patterns_for_unpack, positions_for_orders) = match self.build_init_setup() {
+            Some((init_pattern, positions, _idx)) => {
+                let mut patterns = self.patterns.clone();
+                patterns.push(init_pattern);
+                (patterns, positions)
+            }
+            None => (self.patterns.clone(), self.positions.clone()),
+        };
+
+        module.pattern_order = orders_helper::parse_orders(&positions_for_orders);
 
         let mut im = ImportMemory::default();
         module.pattern = im.unpack_patterns(
             module.frequency_type,
             MemoryType::S3m,
             &module.pattern_order,
-            &self.patterns,
+            &patterns_for_unpack,
         );
 
         for s3m_meta_instr in &self.instruments {
@@ -535,7 +684,15 @@ impl S3mModule {
                 S3mInstrument::PcmInstrument(pcm) => {
                     // Prepare sample
                     let data = s3m_meta_instr.sample.clone();
-                    let rn = ph.c4freq_to_relative_pitch(pcm.c2spd as f32);
+                    // Guard against degenerate c2spd values (0, or absurdly
+                    // small) producing NaN/inf in `c4freq_to_relative_pitch`.
+                    // 8363 Hz is the historical Amiga/ST3 default for C-4.
+                    let c2spd = if pcm.c2spd == 0 {
+                        PeriodHelper::C4_FREQ as u32
+                    } else {
+                        pcm.c2spd
+                    };
+                    let rn = ph.c4freq_to_relative_pitch(c2spd as f32);
                     let sample = Sample {
                         name: s3m_meta_instr.filename.clone(),
                         relative_pitch: rn.0,
@@ -548,7 +705,7 @@ impl S3mModule {
                             LoopType::No
                         },
                         loop_start: pcm.loop_start,
-                        loop_length: pcm.loop_end - pcm.loop_start,
+                        loop_length: pcm.loop_end.saturating_sub(pcm.loop_start),
                         sustain_loop_flag: LoopType::No,
                         sustain_loop_start: 0,
                         sustain_loop_length: 0,
