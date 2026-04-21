@@ -34,12 +34,29 @@ impl ModXmEffect {
                     None
                 }
             }
-            0x01 => Some(vec![TrackImportEffect::PortamentoUp(
-                -4.0 * current.effect_parameter as f32,
-            )]),
-            0x02 => Some(vec![TrackImportEffect::PortamentoDown(
-                4.0 * current.effect_parameter as f32,
-            )]),
+            0x01 => {
+                // Mode-aware scaling. xmrs stores Amiga periods at 1/4
+                // of the native scale (C-4 ≈ 427 vs ft2-clone's 1712),
+                // so FT2's `realPeriod -= param * 4` in real Amiga units
+                // equals `period -= param * 1` in xmrs units. Linear
+                // mode keeps the classic ×4 multiplier because its
+                // period resolution is 4× finer than Amiga's the other
+                // way around.
+                let param = current.effect_parameter as f32;
+                let speed = match freq_type {
+                    FrequencyType::LinearFrequencies => -4.0 * param,
+                    FrequencyType::AmigaFrequencies => -param,
+                };
+                Some(vec![TrackImportEffect::PortamentoUp(speed)])
+            }
+            0x02 => {
+                let param = current.effect_parameter as f32;
+                let speed = match freq_type {
+                    FrequencyType::LinearFrequencies => 4.0 * param,
+                    FrequencyType::AmigaFrequencies => param,
+                };
+                Some(vec![TrackImportEffect::PortamentoDown(speed)])
+            }
             0x03 => {
                 let param = current.effect_parameter as f32;
                 let speed = match freq_type {

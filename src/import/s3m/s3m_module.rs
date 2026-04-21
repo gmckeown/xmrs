@@ -223,7 +223,8 @@ struct S3mOplInstr {
 
 impl S3mOplInstr {
     pub fn to_instr_opl(&self) -> InstrOpl {
-        let ph = PeriodHelper::new(FrequencyType::LinearFrequencies, false);
+        // Match the PCM path — S3M is Amiga-period natively.
+        let ph = PeriodHelper::new(FrequencyType::AmigaFrequencies, false);
         let mut i_opl = InstrOpl::default();
         i_opl.element.modulator = MdiOpl {
             ksl: ((self.mod2 & 0b0100_0000) >> 6) | (self.mod2 >> 7),
@@ -571,105 +572,91 @@ impl S3mModule {
         Some((channel, slot, &packed_data[k..]))
     }
 
-    /// Build a synthetic one-row pattern that materialises S3M header
-    /// defaults that `Module` has no dedicated field for: default channel
-    /// panning (from `channel_settings`) and global volume. Returns the
-    /// built pattern plus the list of positions (with the init pattern
-    /// prepended) to feed into `orders_helper::parse_orders`, or `None`
-    /// if there was nothing worth injecting.
-    fn build_init_setup(&self) -> Option<(Vec<Vec<PatternSlot>>, Vec<u8>, u8)> {
-        // Guard: we need a free pattern index that won't collide with the
-        // S3M order-list sentinels 254 ("skip") and 255 ("end").
-        let new_idx: u8 = match self.patterns.len().try_into() {
-            Ok(n) if n < 254 => n,
-            _ => return None,
+    /// Inject S3M header defaults (channel panning from `channel_settings`,
+    /// global volume) as effects on row 0 of the first pattern that playback
+    /// will start with. This avoids renumbering patterns/positions — which
+    /// would break any `goto(position, …)` call made by the player.
+    ///
+    /// Panning is written as `Xxx` (effect 24) on the affected PCM channel.
+    /// Global volume is written as `Vxx` (effect 22) on any channel that
+    /// hasn't already been used on row 0. If every slot on that row already
+    /// carries an effect, the default is silently dropped — better to lose
+    /// a default than overwrite explicit user data. Mirrors real tracker
+    /// behaviour: state is established at song-start; a `goto` mid-song
+    /// forfeits that state, which is correct.
+    fn inject_header_defaults(&self, patterns: &mut [Vec<Vec<PatternSlot>>]) {
+        let first_pat = match self.positions.first() {
+            Some(&p) => p as usize,
+            None => return,
+        };
+        let row = match patterns.get_mut(first_pat).and_then(|p| p.first_mut()) {
+            Some(r) if !r.is_empty() => r,
+            _ => return,
         };
 
+        // Default panning from `channel_settings` — PCM channels only.
+        for (ch, &s) in self.header.channel_settings.iter().enumerate() {
+            if ch >= row.len() {
+                break;
+            }
+            // Skip disabled, Adlib, or fully-unused entries.
+            if s & 0x80 != 0 || s & 0x10 != 0 || s == 0xFF {
+                continue;
+            }
+            // Only inject into slots that have no explicit effect yet.
+            // 0x40 / 0xC0 in /256 ≈ soft-L / soft-R (ST3 convention).
+            if row[ch].effect_type == 0 && row[ch].effect_parameter == 0 {
+                row[ch].effect_type = 24; // Xxx — Set panning
+                row[ch].effect_parameter = if s & 0x08 != 0 { 0xC0 } else { 0x40 };
+            }
+        }
+
+        // Global volume (Vxx = effect 22). Any channel can carry a global
+        // effect; pick the first free slot.
         let gv = self.header.global_volume.min(64);
-        let gv_needed = gv != 64; // 64 == 1.0 == player default
-
-        // Scan enabled PCM channels for default panning.
-        let pan_rows: Vec<(usize, u8)> = self
-            .header
-            .channel_settings
-            .iter()
-            .enumerate()
-            .filter_map(|(ch, &s)| {
-                // Skip disabled, Adlib, or fully-unused slots.
-                if s & 0x80 != 0 || s & 0x10 != 0 || s == 0xFF {
-                    return None;
-                }
-                // PCM: bit 3 clear → Left, set → Right.
-                // 0x40 / 0xC0 in /256 = soft-L / soft-R, matching the
-                // convention most modern S3M players use for ST3 defaults.
-                let pan = if s & 0x08 != 0 { 0xC0 } else { 0x40 };
-                Some((ch, pan))
-            })
-            .collect();
-
-        if !gv_needed && pan_rows.is_empty() {
-            return None;
-        }
-
-        // Build the row — 32 slots, all carrying the "no volume" sentinel.
-        let mut row: Vec<PatternSlot> = vec![
-            PatternSlot {
-                volume: 255,
-                ..PatternSlot::default()
-            };
-            32
-        ];
-
-        // Default panning: Xxx (effect 24).
-        for (ch, pan) in &pan_rows {
-            row[*ch].effect_type = 24;
-            row[*ch].effect_parameter = *pan;
-        }
-
-        // Global volume: Vxx (effect 22). Find a slot without an effect —
-        // any channel can carry a global effect.
-        if gv_needed {
-            if let Some(slot) = row.iter_mut().find(|s| s.effect_type == 0) {
+        if gv != 64 {
+            if let Some(slot) = row
+                .iter_mut()
+                .find(|s| s.effect_type == 0 && s.effect_parameter == 0)
+            {
                 slot.effect_type = 22;
                 slot.effect_parameter = gv;
             }
-            // If every PCM channel was already taken by a panning Xxx,
-            // we drop the global-volume setup rather than overwrite. Not
-            // observed in real S3Ms (always < 32 active channels).
         }
-
-        // Prepend the init pattern's index to the order list.
-        let mut positions = Vec::with_capacity(self.positions.len() + 1);
-        positions.push(new_idx);
-        positions.extend_from_slice(&self.positions);
-
-        Some((vec![row], positions, new_idx))
     }
 
     pub fn to_module(&self) -> Module {
-        let ph = PeriodHelper::new(FrequencyType::LinearFrequencies, false);
+        // S3M is natively an Amiga-period format — Scream Tracker 3
+        // inherited the Amiga clock-divider period math, and every
+        // portamento/slide parameter in the wild was authored against
+        // that model (including its natural period-saturation at high
+        // pitches). Playing S3M data through Linear period math makes
+        // extreme Fxy/Exy values (F80 in PANIC.S3M, etc.) sweep far
+        // beyond where ST3 would saturate, producing aliased "shriek"
+        // frequencies that don't exist in the original playback.
+        //
+        // Unlike IT, S3M has no file flag to select Linear mode — the
+        // format predates that option. All S3M files should be treated
+        // as Amiga.
+        let ph = PeriodHelper::new(FrequencyType::AmigaFrequencies, false);
         let mut module = Module::default();
 
         module.name = self.header.title.clone();
         module.comment = "XmRs reader".to_string();
         module.format = ModuleFormat::S3m;
-        module.frequency_type = FrequencyType::LinearFrequencies;
+        module.frequency_type = FrequencyType::AmigaFrequencies;
         module.default_tempo = self.header.speed as usize;
         module.default_bpm = self.header.tempo as usize;
 
-        // Optionally inject a one-row init pattern carrying the header
-        // defaults (channel panning, global volume). Appended at the END
-        // of the patterns list so we don't shift existing indices.
-        let (patterns_for_unpack, positions_for_orders) = match self.build_init_setup() {
-            Some((init_pattern, positions, _idx)) => {
-                let mut patterns = self.patterns.clone();
-                patterns.push(init_pattern);
-                (patterns, positions)
-            }
-            None => (self.patterns.clone(), self.positions.clone()),
-        };
+        // Inject header defaults (channel panning, global volume) into
+        // row 0 of the first-played pattern. This preserves the original
+        // position/pattern indexing — any `goto(position, …)` call keeps
+        // referencing the same patterns it did before these defaults
+        // were materialised.
+        let mut patterns_for_unpack = self.patterns.clone();
+        self.inject_header_defaults(&mut patterns_for_unpack);
 
-        module.pattern_order = orders_helper::parse_orders(&positions_for_orders);
+        module.pattern_order = orders_helper::parse_orders(&self.positions);
 
         let mut im = ImportMemory::default();
         module.pattern = im.unpack_patterns(

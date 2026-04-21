@@ -45,21 +45,33 @@ impl S3mEffect {
                 let efx = slot.effect_type;
                 let param = slot.effect_parameter;
 
-                // Store non-zero parameters
+                // Store non-zero parameters. ST3 has THREE memory pools per
+                // channel, and they MUST NOT cross-pollute:
+                //
+                //   * alastnfo   — shared across D/E/F/I/J/K/L/Q/R/S
+                //   * alastvibnfo — H and U (vibrato variants)
+                //   * G (tone portamento) has its own memory, handled later
+                //     in import_memory.rs via `TrackImportEffect::TonePortamento`
+                //
+                // The previous implementation used `(4..=12)` to write
+                // alastnfo, which wrongly included G (7) and H (8). That
+                // caused, for example, a G05 followed by F00 to "recall"
+                // 0x05 — ST3 actually keeps those pools disjoint.
                 if param > 0 {
                     if efx == 8 || efx == 21 {
                         self.alastvibnfo[ch] = param;
-                    }
-                    if (4..=12).contains(&efx) || (17..=19).contains(&efx) {
+                    } else if matches!(efx, 4 | 5 | 6 | 9 | 10 | 11 | 12 | 17 | 18 | 19) {
                         self.alastnfo[ch] = param;
                     }
                 }
 
-                // Recall from memory when parameter is zero
+                // Recall from memory when parameter is zero.
+                // `efx != 7` excludes G from the recall path — G's memory
+                // is handled by import_memory.rs.
                 if param == 0 && efx != 7 {
                     if efx == 8 || efx == 21 {
                         slot.effect_parameter = self.alastvibnfo[ch];
-                    } else if (4..=12).contains(&efx) || (17..=19).contains(&efx) {
+                    } else if matches!(efx, 4 | 5 | 6 | 9 | 10 | 11 | 12 | 17 | 18 | 19) {
                         slot.effect_parameter = self.alastnfo[ch];
                     }
                 }
@@ -129,10 +141,30 @@ impl S3mEffect {
             5 => {
                 let high = (param & 0xF0) >> 4;
                 let low = param & 0x0F;
+                // Main portamento is mode-aware. Both FT2 and ST3 apply
+                // `delta = param * 4` per tick in the native Amiga-period
+                // scale (where C-4 = 1712). xmrs internally stores Amiga
+                // periods at 1/4 of that scale (C-4 ≈ 427, verify with
+                // `amiga_pitch_to_period(48)` ≈ 427, ft2-clone LUT entry
+                // for C-4 = 1712 — the ratio is exactly 4). So in xmrs's
+                // Amiga mode, the same audible slide speed requires the
+                // raw `param` multiplier, not `param * 4`. Linear mode
+                // has 4× finer period resolution in the other direction,
+                // and keeps the traditional `param * 4` scaling.
+                //
+                // Fine/extra-fine sub-commands (Fxy/Exy high nibble) are
+                // left at their historical scalings — they're small
+                // corrections where the off-by-4× isn't audible.
+                let main_scale = match freq_type {
+                    FrequencyType::LinearFrequencies => 4.0,
+                    FrequencyType::AmigaFrequencies => 1.0,
+                };
                 match (high, low) {
                     (0xE, f) => Some(vec![TrackImportEffect::PortamentoExtraFineDown(f as f32)]),
                     (0xF, f) => Some(vec![TrackImportEffect::PortamentoFineDown(4.0 * f as f32)]),
-                    _ => Some(vec![TrackImportEffect::PortamentoDown(4.0 * param as f32)]),
+                    _ => Some(vec![TrackImportEffect::PortamentoDown(
+                        main_scale * param as f32,
+                    )]),
                 }
             }
 
@@ -140,10 +172,16 @@ impl S3mEffect {
             6 => {
                 let high = (param & 0xF0) >> 4;
                 let low = param & 0x0F;
+                let main_scale = match freq_type {
+                    FrequencyType::LinearFrequencies => 4.0,
+                    FrequencyType::AmigaFrequencies => 1.0,
+                };
                 match (high, low) {
                     (0xE, f) => Some(vec![TrackImportEffect::PortamentoExtraFineUp(-(f as f32))]),
                     (0xF, f) => Some(vec![TrackImportEffect::PortamentoFineUp(-4.0 * f as f32)]),
-                    _ => Some(vec![TrackImportEffect::PortamentoUp(-4.0 * param as f32)]),
+                    _ => Some(vec![TrackImportEffect::PortamentoUp(
+                        -main_scale * param as f32,
+                    )]),
                 }
             }
 
