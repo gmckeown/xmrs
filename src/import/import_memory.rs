@@ -42,8 +42,14 @@ So the last call to the pattern will be the winner.
 
 use alloc::vec::Vec;
 
+// Format-specific effect parsers. Each is pulled in only when its
+// format importer is enabled. The MOD importer reuses XM's effect
+// parser (`ModXmEffect`), so either feature brings it in.
+#[cfg(feature = "import_it")]
 use crate::import::it::it_effect::ItEffect;
+#[cfg(feature = "import_s3m")]
 use crate::import::s3m::s3m_effect::S3mEffect;
+#[cfg(any(feature = "import_mod", feature = "import_xm"))]
 use crate::import::xm::mod_xm_effect::ModXmEffect;
 
 use super::patternslot::PatternSlot;
@@ -87,7 +93,31 @@ const TEMPO_DOWN: usize = 23;
 const SAMPLE_OFFSET_ADD_HIGH: usize = 24;
 const ARRAY_SIZE: usize = 25;
 
-use crate::import::s3m::s3m_effect::S3mImportFlags;
+/// S3M masterflag-derived import flags, resolved at import time and
+/// stored on [`ImportMemory`].
+///
+/// This lives here — rather than under `import::s3m` — so the type is
+/// compiled in every build that enables any importer, not just `import_s3m`.
+/// It is a two-bool POD (≈2 bytes) whose sole job is to be settable on
+/// `ImportMemory`; keeping the definition format-agnostic lets every
+/// dispatch site live in one place and removes a dependency cycle
+/// between the shared helper and the S3M importer.
+///
+/// Fields:
+///
+/// * `fastvolslide` (S3M masterflags bit 6) — ST3-style "fast volume
+///   slide" quirk. When set, volume-slide effects (`Dxy`) apply their
+///   delta on tick 0 as well, rather than only on the regular tick>0
+///   cascade.
+/// * `oldstvib` (masterflags bit 1) — ST2-compatibility vibrato. The
+///   depth is scaled `>>4` instead of `>>5` (H/K), and `>>6` instead
+///   of `>>7` (U fine vibrato) — i.e. twice as deep. The importer
+///   pre-multiplies the emitted `Vibrato`/`VibratoFine` depth by 2.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct S3mImportFlags {
+    pub fastvolslide: bool,
+    pub oldstvib: bool,
+}
 
 /// For compatibility between formats and to compensate for special case difficulties with memory management, a best effort analysis is performed during import to associate the exact value with each effect.
 // Horrible hack to store values...use from left to right. First usable type wins.
@@ -619,14 +649,23 @@ impl ImportMemory {
         let mut source: Vec<Vec<Vec<TrackImportUnit>>> = patterns
             .iter()
             .map(|pattern| match mem {
+                #[cfg(any(feature = "import_mod", feature = "import_xm"))]
                 MemoryType::Mod | MemoryType::Xm => {
                     ModXmEffect::mod_xm_unpack_pattern(freq_type, pattern)
                 }
+                #[cfg(feature = "import_s3m")]
                 MemoryType::S3m => {
                     S3mEffect::s3m_unpack_pattern(freq_type, self.s3m_flags, pattern)
                 }
+                #[cfg(feature = "import_it")]
                 MemoryType::It => ItEffect::it_unpack_pattern(freq_type, pattern),
-                // _ => todo!(),
+                // Reached only if a `MemoryType` variant is dispatched
+                // from code compiled without its corresponding
+                // `import_*` feature. Callers of `apply_memory` always
+                // pass a variant matching their own feature, so in a
+                // well-formed build this arm is dead code.
+                #[allow(unreachable_patterns)]
+                _ => unreachable!("MemoryType dispatched to a disabled format importer"),
             })
             .collect();
 

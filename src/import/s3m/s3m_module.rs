@@ -13,7 +13,8 @@ use alloc::string::String;
 use alloc::string::ToString;
 use alloc::{vec, vec::Vec};
 
-use super::s3m_effect::{S3mEffect, S3mImportFlags};
+use super::s3m_effect::S3mEffect;
+use crate::import::import_memory::S3mImportFlags;
 
 #[repr(C)]
 #[derive(Default, Deserialize, Debug)]

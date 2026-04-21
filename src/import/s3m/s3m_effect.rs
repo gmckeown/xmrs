@@ -5,34 +5,23 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
+use crate::import::import_memory::S3mImportFlags;
 use crate::import::patternslot::PatternSlot;
 use crate::import::track_import_effect::TrackImportEffect;
 use crate::import::track_import_unit::TrackImportUnit;
 use crate::prelude::*;
 
-/// ST3 masterflags that have to be resolved at import time.
-///
-/// Only flags whose effect can be fully absorbed into the emitted
-/// `TrackImportEffect`s live here. Runtime-relevant flags (currently
-/// `amigalimits`) are stored separately on [`ModuleFormat::S3m`] so
-/// the replayer can consult them per-tick.
-///
-/// * `fastvolslide` (masterflags bit 64) — ST3 applies Dxy and Nxy
-///   (channel vol slide) on *every* tick including tick 0 when this
-///   is set. Without it, they only apply from tick 1. The importer
-///   handles this by also emitting a `VolumeSlide0` / `ChannelVolumeSlide0`
-///   alongside the usual `*SlideN`, so the tick-0 dose is added to
-///   the regular tick>0 cascade.
-///
-/// * `oldstvib` (masterflags bit 1) — ST2-compatibility vibrato. The
-///   depth is scaled `>>4` instead of `>>5` (H/K), and `>>6` instead
-///   of `>>7` (U fine vibrato) — i.e. twice as deep. The importer
-///   pre-multiplies the emitted `Vibrato`/`VibratoFine` depth by 2.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct S3mImportFlags {
-    pub fastvolslide: bool,
-    pub oldstvib: bool,
-}
+// `S3mImportFlags` — the two-bool POD wrapping ST3 masterflag bits
+// `fastvolslide` (bit 64) and `oldstvib` (bit 1) — is defined on the
+// shared `ImportMemory` helper (see `crate::import::import_memory`)
+// rather than here, so it stays compiled in every build that enables
+// any importer (not just `import_s3m`). Its fields carry the same
+// semantics described there: the importer pre-absorbs ST3's tick-0
+// volume-slide quirk by co-emitting `VolumeSlide0` / `ChannelVolumeSlide0`
+// alongside the cascade slides, and pre-scales vibrato depth ×2 for
+// ST2-style deep vibrato. Runtime-relevant flags (e.g. `amigalimits`)
+// are carried separately on `ModuleFormat::S3m` so the replayer can
+// consult them per-tick.
 
 /// S3M shared effect memory and direct effect parser
 #[derive(Debug)]

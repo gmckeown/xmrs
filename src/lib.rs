@@ -74,9 +74,20 @@ pub mod xorshift;
 /// The Xmrs Prelude
 pub mod prelude;
 
-#[cfg(feature = "import")]
 /// Import historical files.
-/// Do not use it directly: see Module load* fn impl
+/// Do not use it directly: see Module load* fn impl.
+///
+/// Compiled whenever at least one historical-format importer is
+/// enabled. Granular selection lives behind the `import_mod`,
+/// `import_xm`, `import_s3m`, `import_it`, and `import_sid` features;
+/// the umbrella `import` feature turns them all on.
+#[cfg(any(
+    feature = "import_mod",
+    feature = "import_xm",
+    feature = "import_s3m",
+    feature = "import_it",
+    feature = "import_sid",
+))]
 pub mod import;
 
 #[cfg(test)]
@@ -86,7 +97,7 @@ mod tests {
         assert_eq!(42, 42);
     }
 
-    #[cfg(feature = "import")]
+    #[cfg(feature = "import_xm")]
     #[test]
     fn load_empty_xm() {
         let data = include_bytes!("../examples/empty.xm");
@@ -98,7 +109,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "import")]
+    #[cfg(feature = "import_xm")]
     #[test]
     fn load_note_xm() {
         let data = include_bytes!("../examples/note.xm");
@@ -110,7 +121,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "import")]
+    #[cfg(feature = "import_xm")]
     #[test]
     fn load_xi_instrument() {
         let data = include_bytes!("../examples/instr.xi");
@@ -118,7 +129,7 @@ mod tests {
         assert!(xmi.is_ok(), "Failed to load instr.xi: {:?}", xmi.err());
     }
 
-    #[cfg(feature = "import")]
+    #[cfg(feature = "import_xm")]
     #[test]
     fn autodetect_xm() {
         let data = include_bytes!("../examples/note.xm");
