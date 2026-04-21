@@ -3,10 +3,12 @@ use alloc::format;
 use alloc::string::String;
 use alloc::{vec, vec::Vec};
 
-#[cfg(feature = "micromath")]
+// Float math backend (only needed when `std` is disabled).
+// Priority: std > libm > micromath.
+#[cfg(all(not(feature = "std"), not(feature = "libm"), feature = "micromath"))]
 #[allow(unused_imports)]
 use micromath::F32Ext;
-#[cfg(feature = "libm")]
+#[cfg(all(not(feature = "std"), feature = "libm"))]
 #[allow(unused_imports)]
 use num_traits::float::Float;
 

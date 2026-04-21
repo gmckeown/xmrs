@@ -27,6 +27,15 @@
 
 extern crate alloc;
 
+// `no_std` builds need a float math backend because `f32`'s transcendental
+// methods (`sqrt`, `sin`, `log2`, ...) live in `std`. Users must opt into
+// exactly one of `libm` or `micromath` when `std` is disabled.
+#[cfg(not(any(feature = "std", feature = "libm", feature = "micromath")))]
+::core::compile_error!(
+    "xmrs: with `std` disabled, enable exactly one float math backend: \
+     feature `libm` or feature `micromath`."
+);
+
 /// All effects
 pub mod effect;
 /// Envelope with Steroid
