@@ -31,8 +31,9 @@ pub type Pattern = Vec<Row>;
 /// CUTS the note in FT2/XM but FADES (via `volume_fadeout`) in IT.
 /// Neither is a "bug"; they are the canonical behaviours of their
 /// respective formats. Importers set this field and the player uses
-/// it to pick the right replay semantics, independent of any tracker
-/// quirks/bugs which are gated by a separate flag (`ft2_quirks`).
+/// it to pick the right replay semantics, including format-specific
+/// quirks (e.g. FT2's arpeggio LUT, portamento-down signed overflow,
+/// K00-eats-note) that XM modules are authored against.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ModuleFormat {
     /// Unknown / hand-constructed / non-tracker source. Conservative
@@ -43,10 +44,13 @@ pub enum ModuleFormat {
     Mod,
     /// ScreamTracker III (S3M).
     S3m,
-    /// Fasttracker II (XM). Note: enabling "XM" semantics does NOT by
-    /// itself enable FT2-specific replay *bugs* (arpeggio table overflow,
-    /// K00+note quirk, E60 pattern-loop quirk, …) — those are opt-in
-    /// via `XmrsPlayer::new(…, ft2_quirks = true)`.
+    /// Fasttracker II (XM). Selecting this format activates the
+    /// canonical FT2 replay behaviour, including the historical FT2
+    /// quirks that XM modules are authored against (arpeggio LUT,
+    /// E60 pattern-loop, arpeggio period clamp, portamento-down
+    /// signed overflow, K00-eats-note, vol-col `Bx` advances vibrato,
+    /// ...). FT2's behaviour is the format's reference, so there is
+    /// no separate "quirks" toggle — the format IS the switch.
     Xm,
     /// Impulse Tracker (IT), including OpenMPT's IT extensions.
     It,

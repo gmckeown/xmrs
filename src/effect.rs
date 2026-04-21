@@ -148,9 +148,25 @@ pub enum TrackEffect {
         fine: bool,
     },
 
-    /// `speed`
-    /// Pitch effect
-    Portamento(f32),
+    /// `speed` (period units added per application), `fine` flag.
+    ///
+    /// Pitch effect, covering every FT2 pitch-slide variant that
+    /// manipulates the raw period directly (as opposed to
+    /// [`Self::TonePortamento`] which slides toward a target note):
+    ///
+    /// * `fine = false` — *regular* slide (FT2 1xx, 2xx; S3M Exx, Fxx
+    ///   with hi-nibble < 0xE; IT Exx, Fxx with hi-nibble < 0xE): the
+    ///   replayer applies `speed` to the period on every non-zero
+    ///   tick of the row.
+    /// * `fine = true` — *fine* or *extra-fine* slide (FT2 E1x, E2x,
+    ///   X1y, X2y; S3M EFx/FFx, EEx/FEx; IT EFx/FFx, EEx/FEx): the
+    ///   replayer applies `speed` exactly once, at tick 0 of the row.
+    ///
+    /// Sign encodes direction: a negative speed shortens the period
+    /// (pitch up); a positive speed lengthens it (pitch down). The
+    /// importer pre-scales by the format's unit factor so `speed` is
+    /// always in xmrs period units ready to be added to `period`.
+    Portamento { speed: f32, fine: bool },
 
     /// `speed`, portamento to note at speed.
     /// see `::Glissando` to round to the nearest halftone
@@ -293,15 +309,15 @@ impl TrackEffect {
             (
                 TrackEffect::ChannelVolumeSlide {
                     speed: h1,
-                    fine: _tick1,
+                    fine: h_fine,
                 },
                 TrackEffect::ChannelVolumeSlide {
                     speed: o1,
-                    fine: tick2,
+                    fine: o_fine,
                 },
-            ) => Some(TrackEffect::ChannelVolumeSlide {
+            ) if h_fine == o_fine => Some(TrackEffect::ChannelVolumeSlide {
                 speed: h1 + o1,
-                fine: *tick2,
+                fine: *o_fine,
             }),
             (TrackEffect::Glissando(_h1), TrackEffect::Glissando(o1)) => {
                 Some(TrackEffect::Glissando(*o1)) // overwrite glissando value.
@@ -403,19 +419,29 @@ impl TrackEffect {
             (
                 TrackEffect::PanningSlide {
                     speed: h1,
-                    fine: _tick1,
+                    fine: h_fine,
                 },
                 TrackEffect::PanningSlide {
                     speed: o1,
-                    fine: tick2,
+                    fine: o_fine,
                 },
-            ) => Some(TrackEffect::PanningSlide {
+            ) if h_fine == o_fine => Some(TrackEffect::PanningSlide {
                 speed: h1 + o1,
-                fine: *tick2,
+                fine: *o_fine,
             }),
-            (TrackEffect::Portamento(h1), TrackEffect::Portamento(o1)) => {
-                Some(TrackEffect::Portamento(h1 + o1))
-            }
+            (
+                TrackEffect::Portamento {
+                    speed: h1,
+                    fine: h_fine,
+                },
+                TrackEffect::Portamento {
+                    speed: o1,
+                    fine: o_fine,
+                },
+            ) if h_fine == o_fine => Some(TrackEffect::Portamento {
+                speed: h1 + o1,
+                fine: *o_fine,
+            }),
             (TrackEffect::TonePortamento(h1), TrackEffect::TonePortamento(o1)) => {
                 Some(TrackEffect::TonePortamento(h1 + o1))
             }
@@ -510,17 +536,22 @@ impl TrackEffect {
             (
                 TrackEffect::VolumeSlide {
                     speed: speed1,
-                    fine: _tick_based1,
+                    fine: h_fine,
                 },
                 TrackEffect::VolumeSlide {
                     speed: speed2,
-                    fine: tick_based2,
+                    fine: o_fine,
                 },
-            ) => {
+            ) if h_fine == o_fine => {
+                // Only merge slides that share the same tick scope
+                // (both fine OR both regular). A row may legitimately
+                // carry one of each (e.g. XM main-effect Axy + vol-col
+                // D/U), and `remove_duplicates_and_merge` keeps them as
+                // parallel entries when `merge` returns `None`.
                 Some(TrackEffect::VolumeSlide {
                     speed: speed1 + speed2,
-                    fine: *tick_based2,
-                }) // overwrite tick_based
+                    fine: *o_fine,
+                })
             }
             _ => None,
         }

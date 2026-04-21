@@ -224,7 +224,7 @@ struct S3mOplInstr {
 impl S3mOplInstr {
     pub fn to_instr_opl(&self) -> InstrOpl {
         // Match the PCM path — S3M is Amiga-period natively.
-        let ph = PeriodHelper::new(FrequencyType::AmigaFrequencies, false);
+        let ph = PeriodHelper::new(FrequencyType::AmigaFrequencies, ModuleFormat::S3m);
         let mut i_opl = InstrOpl::default();
         i_opl.element.modulator = MdiOpl {
             ksl: ((self.mod2 & 0b0100_0000) >> 6) | (self.mod2 >> 7),
@@ -638,7 +638,7 @@ impl S3mModule {
         // Unlike IT, S3M has no file flag to select Linear mode — the
         // format predates that option. All S3M files should be treated
         // as Amiga.
-        let ph = PeriodHelper::new(FrequencyType::AmigaFrequencies, false);
+        let ph = PeriodHelper::new(FrequencyType::AmigaFrequencies, ModuleFormat::S3m);
         let mut module = Module::default();
 
         module.name = self.header.title.clone();

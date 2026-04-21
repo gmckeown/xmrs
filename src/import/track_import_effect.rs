@@ -226,24 +226,61 @@ impl TrackImportEffect {
         }
     }
 
-    fn sum_portamento_speeds(effects: &[TrackImportEffect]) -> Option<TrackEffect> {
-        let s = effects
+    /// Sum all *regular* (tick > 0) pitch-slide speeds on the row.
+    /// Returns `Some(Portamento { fine: false, ... })` if any regular
+    /// slide is present, else `None`.
+    fn sum_portamento_speeds_regular(effects: &[TrackImportEffect]) -> Option<TrackEffect> {
+        let s: f32 = effects
             .iter()
             .map(|effect| match effect {
                 TrackImportEffect::PortamentoUp(speed)
-                | TrackImportEffect::PortamentoDown(speed)
-                | TrackImportEffect::PortamentoFineUp(speed)
-                | TrackImportEffect::PortamentoFineDown(speed)
-                | TrackImportEffect::PortamentoExtraFineUp(speed)
-                | TrackImportEffect::PortamentoExtraFineDown(speed) => *speed,
-                _ => 0.0, // Ignore other variants
+                | TrackImportEffect::PortamentoDown(speed) => *speed,
+                _ => 0.0,
             })
             .sum();
 
         if s == 0.0 {
             None
         } else {
-            Some(TrackEffect::Portamento(s))
+            Some(TrackEffect::Portamento {
+                speed: s,
+                fine: false,
+            })
+        }
+    }
+
+    /// Sum all *fine* and *extra-fine* (tick 0) pitch-slide speeds on
+    /// the row. Fine and extra-fine share a tick scope (both fire at
+    /// tick 0) and the importer has already applied the correct per-
+    /// variant unit scaling, so their speeds can be summed directly.
+    /// Returns `Some(Portamento { fine: true, ... })` or `None`.
+    ///
+    /// Keeping this separate from the regular sum is critical: in FT2
+    /// a row can carry both a regular 2xx on the main effect column
+    /// AND a fine E2x or extra-fine X2y on another row-level slot
+    /// (e.g. via format-specific extensions), and they must fire at
+    /// their own tick scopes. Before this split, everything collapsed
+    /// into a single `Portamento` that fired at tick > 0 only, over-
+    /// applying fine slides by `(speed − 1)×`.
+    fn sum_portamento_speeds_fine(effects: &[TrackImportEffect]) -> Option<TrackEffect> {
+        let s: f32 = effects
+            .iter()
+            .map(|effect| match effect {
+                TrackImportEffect::PortamentoFineUp(speed)
+                | TrackImportEffect::PortamentoFineDown(speed)
+                | TrackImportEffect::PortamentoExtraFineUp(speed)
+                | TrackImportEffect::PortamentoExtraFineDown(speed) => *speed,
+                _ => 0.0,
+            })
+            .sum();
+
+        if s == 0.0 {
+            None
+        } else {
+            Some(TrackEffect::Portamento {
+                speed: s,
+                fine: true,
+            })
         }
     }
 
@@ -323,6 +360,13 @@ impl TrackImportEffect {
             TrackImportEffect::NoteRetrigExtended(interval, vol) => {
                 // each additive delta is divided by 64. Multiplicative ratios
                 // are scale-independent.
+                //
+                // The nibble-6 and nibble-E ratios mirror FT2's integer
+                // arithmetic: `vol * 11/16` (= vol>>1 + vol>>3 + vol>>4) and
+                // `vol * 3/2` (= vol>>1 + vol) respectively — see
+                // ft2_replayer.c:doMultiNoteRetrig. The common 2/3 and 3/2
+                // approximations diverge from FT2 by ~3% on nibble 6 which
+                // is audible over a long Rxy passage; keep 11/16 here.
                 const S: f32 = 1.0 / 64.0;
                 let volume = match vol {
                     1 => NoteRetrigOperator::Sum(-S),
@@ -330,7 +374,7 @@ impl TrackImportEffect {
                     3 => NoteRetrigOperator::Sum(-4.0 * S),
                     4 => NoteRetrigOperator::Sum(-8.0 * S),
                     5 => NoteRetrigOperator::Sum(-16.0 * S),
-                    6 => NoteRetrigOperator::Mul(2.0 / 3.0),
+                    6 => NoteRetrigOperator::Mul(11.0 / 16.0),
                     7 => NoteRetrigOperator::Mul(1.0 / 2.0),
                     9 => NoteRetrigOperator::Sum(S),
                     0xA => NoteRetrigOperator::Sum(2.0 * S),
@@ -378,19 +422,38 @@ impl TrackImportEffect {
         }
     }
 
+    /// Collapse effects that can be merged; **preserve** entries that
+    /// share a discriminant but whose `merge` returns `None`.
+    ///
+    /// `TrackEffect::merge` returns `None` when two effects of the same
+    /// Rust variant are semantically distinct — today this happens for
+    /// `VolumeSlide`, `PanningSlide`, `ChannelVolumeSlide` and
+    /// `Portamento`, where the `fine` flag partitions the variant into
+    /// two independent tick scopes (tick 0 vs ticks > 0). Those pairs
+    /// must coexist on the same row (e.g. XM row with main-effect Axy
+    /// + vol-column D/U produces both a regular and a fine
+    /// `VolumeSlide`).
+    ///
+    /// The previous implementation used `Vec::iter().position()` to
+    /// find the first same-discriminant entry and discarded the new
+    /// one when `merge` returned `None`, which dropped the fine
+    /// variant on the floor. The updated loop walks entries, accepts
+    /// the first one whose `merge` actually succeeds, and otherwise
+    /// pushes the new effect as a parallel entry.
     fn remove_duplicates_and_merge(mut effects: Vec<TrackEffect>) -> Vec<TrackEffect> {
-        let mut unique_effects = Vec::new();
+        let mut unique_effects: Vec<TrackEffect> = Vec::new();
 
         for effect in effects.drain(..) {
-            if let Some(existing_index) = unique_effects
-                .iter()
-                .position(|e| core::mem::discriminant(e) == core::mem::discriminant(&effect))
-            {
-                if let Some(merged_effect) = unique_effects[existing_index].merge(&effect) {
-                    unique_effects[existing_index] = merged_effect;
+            let merge_target = unique_effects.iter().enumerate().find_map(|(idx, e)| {
+                if core::mem::discriminant(e) == core::mem::discriminant(&effect) {
+                    e.merge(&effect).map(|m| (idx, m))
+                } else {
+                    None
                 }
-            } else {
-                unique_effects.push(effect);
+            });
+            match merge_target {
+                Some((idx, merged)) => unique_effects[idx] = merged,
+                None => unique_effects.push(effect),
             }
         }
 
@@ -403,8 +466,14 @@ impl TrackImportEffect {
         // This part is used to aggregate sub-effects which are subject
         // to memory management in the different trackers
 
-        // Portamento
-        if let Some(te) = Self::sum_portamento_speeds(effects) {
+        // Portamento — regular (tick > 0) and fine (tick 0) are summed
+        // independently and emitted as two separate TrackEffects so the
+        // replayer can apply each at its own tick scope. A row may
+        // legitimately carry both (e.g. 2xx + E2x).
+        if let Some(te) = Self::sum_portamento_speeds_regular(effects) {
+            vte.push(te);
+        }
+        if let Some(te) = Self::sum_portamento_speeds_fine(effects) {
             vte.push(te);
         }
 

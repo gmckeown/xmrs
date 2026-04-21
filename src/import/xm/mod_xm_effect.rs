@@ -241,20 +241,24 @@ impl ModXmEffect {
             )),
             // V - 0x51..0x5F undefined...
             0x5 => None,
-            // - - Volume slide down (0..15)
-            0x6 => Some(TrackImportEffect::VolumeSlide0(
+            // - - Volume slide down (0..15). Regular slide: applies at
+            //     ticks > 0, i.e. VolumeSlideN in our vocabulary
+            //     (FT2 VJumpTab_TickNonZero[6] = v_VolSlideDown).
+            0x6 => Some(TrackImportEffect::VolumeSlideN(
                 -((current.volume & 0x0F) as f32) / 64.0,
             )),
-            // + - Volume slide up (0..15)
-            0x7 => Some(TrackImportEffect::VolumeSlide0(
+            // + - Volume slide up (0..15). Same tick scope as 0x6.
+            0x7 => Some(TrackImportEffect::VolumeSlideN(
                 ((current.volume & 0x0F) as f32) / 64.0,
             )),
-            // D - Fine volume slide down (0..15)
-            0x8 => Some(TrackImportEffect::VolumeSlideN(
+            // D - Fine volume slide down (0..15). Fine slide: applies once
+            //     at tick 0, i.e. VolumeSlide0
+            //     (FT2 VJumpTab_TickZero[8] = v_FineVolSlideDown).
+            0x8 => Some(TrackImportEffect::VolumeSlide0(
                 -((current.volume & 0x0F) as f32) / 64.0,
             )),
-            // U - Fine volume slide up (0..15)
-            0x9 => Some(TrackImportEffect::VolumeSlideN(
+            // U - Fine volume slide up (0..15). Same tick scope as 0x8.
+            0x9 => Some(TrackImportEffect::VolumeSlide0(
                 ((current.volume & 0x0F) as f32) / 64.0,
             )),
             // S - Vibrato speed (0..15)
@@ -280,9 +284,22 @@ impl ModXmEffect {
                 ((current.volume & 0x0F) as f32) / 16.0,
             )),
             // L - Panning slide left
-            0xD => Some(TrackImportEffect::PanningSlideN(
-                -((current.volume & 0x0F) as f32) / 16.0,
-            )),
+            0xD => {
+                let nibble = current.volume & 0x0F;
+                if nibble == 0 {
+                    // FT2 quirk: pan-slide-left with nibble 0 sets the pan
+                    // to full-left (0). In ft2_replayer.c:v_PanSlideLeft
+                    // the check `if (tmp16 < 256) tmp16 = 0;` fires
+                    // unconditionally when nibble == 0, because tmp16 then
+                    // equals outPan (always < 256). Documented there as an
+                    // FT2 bug that some XM modules rely on. Materializing
+                    // this as an explicit `Panning(0.0)` keeps the replayer
+                    // path simple.
+                    Some(TrackImportEffect::Panning(0.0))
+                } else {
+                    Some(TrackImportEffect::PanningSlideN(-(nibble as f32) / 16.0))
+                }
+            }
             // R - Panning slide right
             0xE => Some(TrackImportEffect::PanningSlideN(
                 ((current.volume & 0x0F) as f32) / 16.0,
@@ -312,7 +329,12 @@ impl ModXmEffect {
                 let ten = (param >> 4) as usize * 10;
                 let unit = (param & 0x0F) as usize;
                 let total = ten + unit;
-                Some(GlobalEffect::PatternBreak(total))
+                // FT2 clamps the break target: any BCD value greater than
+                // 63 is silently converted to 0 (ft2_replayer.c:patternBreak).
+                // Without this, malformed Dxx values (e.g. D64..D99, D9F)
+                // would point at a non-existent row.
+                let target = if total > 63 { 0 } else { total };
+                Some(GlobalEffect::PatternBreak(target))
             }
             // EXy: Extended command
             0x0E => {

@@ -7,6 +7,7 @@ use micromath::F32Ext;
 #[allow(unused_imports)]
 use num_traits::float::Float;
 
+use crate::module::ModuleFormat;
 use crate::period_helper_cache::PeriodHelperCache;
 
 /// Historical Frequencies to load old data. Default is Linear.
@@ -20,11 +21,11 @@ pub enum FrequencyType {
 #[derive(Clone)]
 pub struct PeriodHelper {
     pub freq_type: FrequencyType,
-    /// When true, the period-to-frequency path under arpeggio applies
-    /// FT2's specific rounding (see `frequency_for_period`). This is an
-    /// FT2 replay *quirk*, not a generic property of the format — a
-    /// strict XM module without FT2 bugs doesn't need it.
-    ft2_quirks: bool,
+    /// Module format drives the FT2-specific rounding in
+    /// [`Self::adjust_period`]: for `Xm`, arpeggio-perturbed periods
+    /// are clamped through FT2's octave-limited note lookup; for
+    /// anything else the raw period calculation is used.
+    format: ModuleFormat,
     cache: PeriodHelperCache<10>,
 }
 
@@ -32,7 +33,7 @@ impl Default for PeriodHelper {
     fn default() -> Self {
         Self {
             freq_type: FrequencyType::LinearFrequencies,
-            ft2_quirks: false,
+            format: ModuleFormat::Unknown,
             cache: PeriodHelperCache::new(),
         }
     }
@@ -42,10 +43,10 @@ impl PeriodHelper {
     /// historical amiga module sample frequency (Paula chipset related)
     pub const C4_FREQ: f32 = 8363.0;
 
-    pub fn new(freq_type: FrequencyType, ft2_quirks: bool) -> Self {
+    pub fn new(freq_type: FrequencyType, format: ModuleFormat) -> Self {
         Self {
             freq_type,
-            ft2_quirks,
+            format,
             cache: PeriodHelperCache::new(),
         }
     }
@@ -190,8 +191,13 @@ impl PeriodHelper {
             note_orig
         };
 
-        if self.ft2_quirks && arp_pitch != 0.0 {
-            // From C-0 (0) to B-7 (95) only
+        if self.format == ModuleFormat::Xm && arp_pitch != 0.0 {
+            // FT2-canonical note clamp when arpeggio is active: FT2's
+            // arpeggio period lookup walks a 0..95 note range
+            // (`period2NotePeriod` in ft2_replayer.c), so any base note
+            // whose perturbed index would land at 96 or above is snapped
+            // back to 95. Without this, the arpeggio on very high notes
+            // can compute a negative index and return a nonsense period.
             let mut note = note;
             if note.ceil() >= 95.0 {
                 note = 95.0;

@@ -28,8 +28,8 @@ So the last call to the pattern will be the winner.
 | **SampleOffset**             | TRUE    | TRUE   | TRUE    | TRUE   |
 | **Vibrato**                  | TRUE    | TRUE   | TRUE    | TRUE   |
 | **VibratoFine**              |         |        |         | TRUE   |
-| **VolumeSlide0**             |         | TRUE   | GLOBAL  | TRUE   | 0 EA EB v6 v7
-| **VolumeSlideN**             |         | TRUE   | GLOBAL  | TRUE   | N 5 6 A v8 v9
+| **VolumeSlide0**             |         | TRUE   | GLOBAL  | TRUE   | 0 EA EB v8 v9
+| **VolumeSlideN**             |         | TRUE   | GLOBAL  | TRUE   | N 5 6 A v6 v7
 | **FxVolume Tone Portamento** |         | TRUE   |         | FX MEM |
 | **FxVolume Vibrato Depth**   |         | TRUE   |         | FX MEM |
 |                              |         |        |         |        |
