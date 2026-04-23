@@ -118,15 +118,22 @@ impl ItEffect {
     // Dx0 Volume slide up
     // DFx Fine volume slide down
     // DxF Fine volume slide up
+    //
+    // ITTECH.TXT defines the test order as "Dx0, D0x, DxF, DFx"
+    // (IT_MUSIC.ASM enforces the same order). For ambiguous values
+    // where both nibbles are `F` (DFF / NFF / WFF), this ordering
+    // resolves to the fine-slide-UP reading — so (f, 0xF) must be
+    // tested before (0xF, f) in the Rust match, not after, or DFF
+    // silently flips to a fine-slide-DOWN.
     fn it_volume_slide(fx: u8) -> Option<TrackImportEffect> {
         let nibble_high = (fx & 0xF0) >> 4;
         let nibble_low = fx & 0x0F;
 
         match (nibble_high, nibble_low) {
-            (0, f) => Some(TrackImportEffect::VolumeSlideN(-(f as f32) / 64.0)),
             (f, 0) => Some(TrackImportEffect::VolumeSlideN(f as f32 / 64.0)),
-            (0xF, f) => Some(TrackImportEffect::VolumeSlide0(-(f as f32) / 64.0)),
+            (0, f) => Some(TrackImportEffect::VolumeSlideN(-(f as f32) / 64.0)),
             (f, 0xF) => Some(TrackImportEffect::VolumeSlide0(f as f32 / 64.0)),
+            (0xF, f) => Some(TrackImportEffect::VolumeSlide0(-(f as f32) / 64.0)),
             _ => None,
         }
     }
@@ -191,7 +198,7 @@ impl ItEffect {
             // Effect Vibrato (Hxy)
             0x08 => {
                 let param = current.effect_parameter;
-                let speed = ((param & 0xF0) >> 4) as f32 / 256.0;
+                let speed = ((param & 0xF0) >> 4) as f32 / 64.0;
                 let depth = (param & 0x0F) as f32 * 4.0 / 16.0;
                 Some(vec![TrackImportEffect::Vibrato(speed, depth)])
             }
@@ -254,23 +261,25 @@ impl ItEffect {
             // Nx0 Channel volume slide up
             // NFx Fine channel volume slide down
             // NxF Fine channel volume slide up
+            //
+            // Same test-order as Dxy (see `it_volume_slide`).
             0x0E => {
                 let fx = current.effect_parameter;
                 let nibble_high = (fx & 0xF0) >> 4;
                 let nibble_low = fx & 0x0F;
 
                 match (nibble_high, nibble_low) {
+                    (f, 0) => Some(vec![TrackImportEffect::ChannelVolumeSlideN(
+                        f as f32 / 64.0,
+                    )]),
                     (0, low) => Some(vec![TrackImportEffect::ChannelVolumeSlideN(
                         -(low as f32) / 64.0,
                     )]),
-                    (high, 0) => Some(vec![TrackImportEffect::ChannelVolumeSlideN(
-                        high as f32 / 64.0,
+                    (f, 0xF) => Some(vec![TrackImportEffect::ChannelVolumeSlide0(
+                        f as f32 / 64.0,
                     )]),
                     (0xF, low) => Some(vec![TrackImportEffect::ChannelVolumeSlide0(
                         -(low as f32) / 64.0,
-                    )]),
-                    (high, 0xF) => Some(vec![TrackImportEffect::ChannelVolumeSlide0(
-                        high as f32 / 64.0,
                     )]),
                     _ => None,
                 }
@@ -282,24 +291,26 @@ impl ItEffect {
             )]),
 
             // Effect Panning Slide (Pxx)
-            // P0x Pan slide down (left)
-            // Px0 Pan slide up (right)
-            // PFx Fine pan slide down (left)
-            // PxF Fine pan slide up (right)
+            // P0x Pan slide left (subtract from panning)
+            // Px0 Pan slide right (add to panning)
+            // PFx Fine pan slide left
+            // PxF Fine pan slide right
+            //
+            // Same test-order constraint as Dxy (see `it_volume_slide`):
+            // (f, 0xF) is placed before (0xF, f) so PFF resolves to
+            // fine-right, not fine-left. Also the upper nibble is
+            // shifted down before matching, otherwise a literal `0xF`
+            // would never equal the unshifted upper half (0xF0).
             0x10 => {
-                let param = current.effect_parameter;
-                let upper_nibble = param & 0xF0;
-                let lower_nibble = param & 0x0F;
+                let fx = current.effect_parameter;
+                let nibble_high = (fx & 0xF0) >> 4;
+                let nibble_low = fx & 0x0F;
 
-                match (upper_nibble, lower_nibble) {
-                    (f, 0) => Some(vec![TrackImportEffect::PanningSlideN(
-                        (f >> 4) as f32 / 16.0,
-                    )]), // Slide up (right)
-                    (0, f) => Some(vec![TrackImportEffect::PanningSlideN(-(f as f32) / 16.0)]), // Slide down (left)
-                    (f, 0xF) => Some(vec![TrackImportEffect::PanningSlide0(
-                        (f >> 4) as f32 / 16.0,
-                    )]), // Slide up (right)
-                    (0xF, f) => Some(vec![TrackImportEffect::PanningSlide0(-(f as f32) / 16.0)]), // Slide down (left)
+                match (nibble_high, nibble_low) {
+                    (f, 0) => Some(vec![TrackImportEffect::PanningSlideN(f as f32 / 16.0)]),
+                    (0, f) => Some(vec![TrackImportEffect::PanningSlideN(-(f as f32) / 16.0)]),
+                    (f, 0xF) => Some(vec![TrackImportEffect::PanningSlide0(f as f32 / 16.0)]),
+                    (0xF, f) => Some(vec![TrackImportEffect::PanningSlide0(-(f as f32) / 16.0)]),
                     _ => None,
                 }
             }
@@ -400,7 +411,7 @@ impl ItEffect {
                             _ => None,
                         }
                     }
-                    0x8 => Some(vec![TrackImportEffect::Panning((param as f32) / 16.0)]),
+                    0x8 => Some(vec![TrackImportEffect::Panning((param as f32) / 15.0)]),
                     0x9 => Some(vec![TrackImportEffect::InstrumentSurround(param == 1)]),
                     0xA => Some(vec![TrackImportEffect::InstrumentSampleOffsetAddHigh(
                         param as usize * 65536,
@@ -412,16 +423,23 @@ impl ItEffect {
             }
 
             // Effect Fine Vibrato (Uxy)
+            //
+            // ITTECH: Uxy speed = 4*x (same as Hxy), depth = y (4x
+            // finer than Hxy's depth = y*4). Same speed-unit reasoning
+            // as Hxy — 4x/256-entry-table = x/64 per tick, not x/256.
             0x15 => {
                 let param = current.effect_parameter;
-                let speed = ((param & 0xF0) >> 4) as f32 / 256.0;
-                let depth = (param & 0x0F) as f32 * 1.0 / 16.0;
+                let speed = ((param & 0xF0) >> 4) as f32 / 64.0;
+                let depth = (param & 0x0F) as f32 / 16.0;
                 Some(vec![TrackImportEffect::Vibrato(speed, depth)])
             }
 
             // Effect Set panning position (Xxx)
+            // Full 8-bit range 0..=255 maps to [0.0, 1.0]; divide by
+            // 255, not 256, otherwise 0xFF (full right) renders as
+            // 0.9961 and true full-right becomes unreachable.
             0x18 => Some(vec![TrackImportEffect::Panning(
-                (current.effect_parameter as f32) / 256.0,
+                (current.effect_parameter as f32) / 255.0,
             )]),
 
             // Effect Panbrello (Yxy)
@@ -507,28 +525,31 @@ impl ItEffect {
             // Wx0 Global volume slide up
             // WFx Fine global volume slide down
             // WxF Fine global volume slide up
+            //
+            // Same test-order as Dxy (see `it_volume_slide`): test
+            // (f, 0xF) before (0xF, f) so WFF resolves to fine-up.
             0x17 => {
-                let param = current.effect_parameter;
-                let upper_nibble = param & 0xF0;
-                let lower_nibble = param & 0x0F;
+                let fx = current.effect_parameter;
+                let nibble_high = (fx & 0xF0) >> 4;
+                let nibble_low = fx & 0x0F;
 
-                match (upper_nibble, lower_nibble) {
+                match (nibble_high, nibble_low) {
+                    (f, 0) => Some(GlobalEffect::VolumeSlide {
+                        speed: f as f32 / 64.0,
+                        fine: false,
+                    }),
                     (0, f) => Some(GlobalEffect::VolumeSlide {
                         speed: -(f as f32) / 64.0,
                         fine: false,
-                    }), // Slide down
-                    (f, 0) => Some(GlobalEffect::VolumeSlide {
-                        speed: (f >> 4) as f32 / 64.0,
-                        fine: false,
-                    }), // Slide up
+                    }),
+                    (f, 0xF) => Some(GlobalEffect::VolumeSlide {
+                        speed: f as f32 / 64.0,
+                        fine: true,
+                    }),
                     (0xF, f) => Some(GlobalEffect::VolumeSlide {
                         speed: -(f as f32) / 64.0,
                         fine: true,
-                    }), // Fine Slide down
-                    (f, 0xF) => Some(GlobalEffect::VolumeSlide {
-                        speed: (f >> 4) as f32 / 64.0,
-                        fine: true,
-                    }), // Fine Slide up
+                    }),
                     _ => None,
                 }
             }
@@ -582,9 +603,15 @@ impl ItEffect {
             // Volume Slide Down (d0x)
             0x3 => return Some(TrackImportEffect::VolumeSlideN(-(param as f32) / 16.0)),
             // Portamento Down (e0x)
-            0x4 => return Some(TrackImportEffect::PortamentoDown(-(param as f32) / 16.0)),
+            // The rest of the crate's sign convention is:
+            //   PortamentoDown receives positive speed (period grows).
+            //   PortamentoUp   receives negative speed (period shrinks).
+            // The main-column Exx / Fxx arms above already follow this;
+            // the vol-column pair had them reversed, which made a
+            // vol-column e0x bend UP and f0x bend DOWN.
+            0x4 => return Some(TrackImportEffect::PortamentoDown((param as f32) / 16.0)),
             // Portamento Up (f0x)
-            0x5 => return Some(TrackImportEffect::PortamentoUp(param as f32 / 16.0)),
+            0x5 => return Some(TrackImportEffect::PortamentoUp(-(param as f32) / 16.0)),
             // Tone Portamento (g0x)
             0x6 => {
                 let param = match param {

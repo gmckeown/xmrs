@@ -5,6 +5,7 @@ use bincode::error::DecodeError;
 use serde::Deserialize;
 
 use crate::import::patternslot::PatternSlot;
+use crate::pitch::Pitch;
 
 /// Structure representing a pattern in a musical tracker format.
 /// Note: The entire `Pattern` struct is limited to a maximum size of 0xFFFF (64 kilobytes).
@@ -71,6 +72,20 @@ impl ItPattern {
         }
         let mut result = vec![vec![PatternSlot::default(); 64]; self.row_count as usize];
         let mut last_mask_vars = [0u8; 64];
+        // Per-channel last-READ values. ITTECH specifies that the
+        // "use last <field> for channel" mask bits (0x10 note, 0x20
+        // instrument, 0x40 volume, 0x80 effect) consult the last
+        // value the channel actually RECEIVED FROM THE FILE — not
+        // the last populated value in any particular row. Populating
+        // from the previous row's slot (as a naive implementation
+        // might) breaks the chain the first time the channel is
+        // absent from a row, because that row's slot stays at
+        // PatternSlot::default().
+        let mut last_note = [Pitch::None; 64];
+        let mut last_instrument: [Option<usize>; 64] = [None; 64];
+        let mut last_volume = [0u8; 64];
+        let mut last_effect_type = [0u8; 64];
+        let mut last_effect_parameter = [0u8; 64];
         let mut data_iter = self.packed_data.iter();
 
         for row in 0..self.row_count as usize {
@@ -81,13 +96,14 @@ impl ItPattern {
 
             while channel_mask > 0 {
                 let channel = (channel_mask - 1) & 63;
+                let ch = channel as usize;
 
                 let mask_variable = if channel_mask & 0x80 != 0 {
                     let var = *data_iter.next().ok_or(DecodeError::LimitExceeded)?;
-                    last_mask_vars[channel as usize] = var;
+                    last_mask_vars[ch] = var;
                     var
                 } else {
-                    last_mask_vars[channel as usize]
+                    last_mask_vars[ch]
                 };
 
                 let mut slot = PatternSlot::default();
@@ -99,39 +115,49 @@ impl ItPattern {
                     if n > 119 && n < 253 {
                         n = 253; // None
                     }
-                    slot.note = n.try_into().map_err(|_| {
+                    let note = n.try_into().map_err(|_| {
                         DecodeError::OtherString("Failed to convert note".to_string())
                     })?;
-                } else if mask_variable & 0x10 != 0 && row > 0 {
-                    slot.note = result[row - 1][channel as usize].note;
+                    slot.note = note;
+                    last_note[ch] = note;
+                } else if mask_variable & 0x10 != 0 {
+                    slot.note = last_note[ch];
                 }
 
                 if mask_variable & 0x02 != 0 {
                     let instr = *data_iter.next().ok_or(DecodeError::LimitExceeded)?;
-                    slot.instrument = if instr != 0 {
+                    let instr_idx = if instr != 0 {
                         Some(instr as usize - 1)
                     } else {
                         None
                     };
-                } else if mask_variable & 0x20 != 0 && row > 0 {
-                    slot.instrument = result[row - 1][channel as usize].instrument;
+                    slot.instrument = instr_idx;
+                    last_instrument[ch] = instr_idx;
+                } else if mask_variable & 0x20 != 0 {
+                    slot.instrument = last_instrument[ch];
                 }
 
                 if mask_variable & 0x04 != 0 {
-                    slot.volume = *data_iter.next().ok_or(DecodeError::LimitExceeded)?;
-                } else if mask_variable & 0x40 != 0 && row > 0 {
-                    slot.volume = result[row - 1][channel as usize].volume;
+                    let vol = *data_iter.next().ok_or(DecodeError::LimitExceeded)?;
+                    slot.volume = vol;
+                    last_volume[ch] = vol;
+                } else if mask_variable & 0x40 != 0 {
+                    slot.volume = last_volume[ch];
                 }
 
                 if mask_variable & 0x08 != 0 {
-                    slot.effect_type = *data_iter.next().ok_or(DecodeError::LimitExceeded)?;
-                    slot.effect_parameter = *data_iter.next().ok_or(DecodeError::LimitExceeded)?;
-                } else if mask_variable & 0x80 != 0 && row > 0 {
-                    slot.effect_type = result[row - 1][channel as usize].effect_type;
-                    slot.effect_parameter = result[row - 1][channel as usize].effect_parameter;
+                    let et = *data_iter.next().ok_or(DecodeError::LimitExceeded)?;
+                    let ep = *data_iter.next().ok_or(DecodeError::LimitExceeded)?;
+                    slot.effect_type = et;
+                    slot.effect_parameter = ep;
+                    last_effect_type[ch] = et;
+                    last_effect_parameter[ch] = ep;
+                } else if mask_variable & 0x80 != 0 {
+                    slot.effect_type = last_effect_type[ch];
+                    slot.effect_parameter = last_effect_parameter[ch];
                 }
 
-                result[row][channel as usize] = slot;
+                result[row][ch] = slot;
 
                 channel_mask = match data_iter.next() {
                     Some(&mask) => mask,
