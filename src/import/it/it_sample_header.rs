@@ -610,11 +610,33 @@ impl ItSampleHeader {
             _ => Waveform::TranslatedSine,
         };
 
+        // IT `vibrato_sweep` is a depth-increment RATE (how fast to
+        // ramp up per tick). xmrs's `Vibrato.sweep` is a phase
+        // THRESHOLD — phase must cross it to reach full depth. These
+        // are inverse conventions: high IT sweep = fast ramp; high
+        // xmrs sweep = slow ramp.
+        //
+        // Converting: IT ramps from 0 to max in `64 / vibrato_sweep`
+        // ticks (approximately). To ramp over the same duration in
+        // xmrs, the threshold must equal `speed * ticks_to_full` —
+        // which simplifies to `vibrato_speed / vibrato_sweep` after
+        // both are normalised by `/64`.
+        //
+        // `vibrato_sweep = 0` means "instant full depth" per IT2.14
+        // (and is what `StateAutoVibrato::tick` already short-
+        // circuits on `sweep <= 0`). Map to 0 explicitly to avoid
+        // the division by zero.
+        let xmrs_sweep = if self.vibrato_sweep == 0 {
+            0.0
+        } else {
+            self.vibrato_speed as f32 / self.vibrato_sweep as f32
+        };
+
         Vibrato {
             waveform: wf,
             speed: self.vibrato_speed as f32 / 64.0,
             depth: self.vibrato_depth as f32 / 64.0,
-            sweep: self.vibrato_sweep as f32 / 64.0,
+            sweep: xmrs_sweep,
         }
     }
 }
