@@ -45,6 +45,26 @@ pub struct Envelope {
 }
 
 impl Envelope {
+    /// Returns `true` when this envelope has a sane, playable shape:
+    /// at least 2 points (a single point is degenerate — FT2/IT ignore it),
+    /// no more than 12 for XM compatibility, and every declared sustain /
+    /// loop index in range.
+    ///
+    /// Used by importers as a sanity check before handing an envelope to
+    /// the replayer. A parsed envelope that returns `false` here should
+    /// be replaced by `Envelope::default()` (which leaves `enabled = false`
+    /// and ignores the envelope at runtime).
+    pub fn is_valid(&self) -> bool {
+        self.point.len() >= 2
+            && self.point.len() <= 12
+            && self.sustain_start_point < self.point.len()
+            && self.sustain_end_point < self.point.len()
+            && self.loop_start_point < self.point.len()
+            && self.loop_end_point < self.point.len()
+            && self.loop_start_point <= self.loop_end_point
+            && self.sustain_start_point <= self.sustain_end_point
+    }
+
     pub fn loop_in_sustain(&self, frame: usize) -> usize {
         if self.sustain_enabled
             && self.sustain_end_point < self.point.len()

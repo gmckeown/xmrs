@@ -361,14 +361,9 @@ impl XmInstrument {
         Some(e)
     }
 
-    fn is_envelope_nok(e: &Envelope) -> bool {
-        e.point.len() > 12
-            || e.sustain_start_point >= e.point.len()
-            || e.loop_start_point >= e.point.len()
-            || e.loop_end_point >= e.point.len()
-            || e.loop_start_point > e.loop_end_point
-            || e.sustain_start_point > e.sustain_end_point
-    }
+    // Sanity check is delegated to `Envelope::is_valid` on the loaded
+    // envelope — see `to_instrument`. Any envelope that fails it is
+    // replaced by `Envelope::default()` (which silently disables it).
 
     pub fn to_instrument(&self) -> Instrument {
         let it: InstrumentType = match &self.instr {
@@ -428,11 +423,17 @@ impl XmInstrument {
                     pe.loop_end_point = xmi.panning_loop_end_point as usize;
                 }
 
-                // cleanup bad envelope
-                if Self::is_envelope_nok(&id.volume_envelope) {
+                // cleanup bad envelope — a single-point or zero-point
+                // envelope flagged "enabled" is the documented root cause
+                // of the 0.10 "all sound panned to one side" regression.
+                // `Envelope::is_valid()` rejects any degenerate case
+                // (< 2 points, > 12 points, or out-of-range sustain/loop
+                // indices) and we fall back to `Envelope::default()`
+                // (enabled = false) in that case.
+                if !id.volume_envelope.is_valid() {
                     id.volume_envelope = Envelope::default();
                 }
-                if Self::is_envelope_nok(&id.pan_envelope) {
+                if !id.pan_envelope.is_valid() {
                     id.pan_envelope = Envelope::default();
                 }
 

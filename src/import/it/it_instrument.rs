@@ -104,20 +104,74 @@ pub struct ItEnvelopePre2 {
 }
 
 impl ItEnvelopePre2 {
-    pub fn to_envelope(&self) -> Vec<EnvelopePoint> {
-        let mut points = Vec::new();
-
-        for (tick, magnitude) in self.node_points.iter() {
-            if *tick == 0 && *magnitude == 0 && !points.is_empty() {
+    /// Return the envelope points in chronological (by-frame) order,
+    /// plus a remap table that rewrites file-order indices (loop_start
+    /// etc.) into the new sorted order.
+    fn to_envelope_points(&self) -> (Vec<EnvelopePoint>, [u8; 25]) {
+        // Collect authored nodes up to the `(0, 0)` sentinel.
+        let mut indexed: Vec<(usize, EnvelopePoint)> = Vec::new();
+        for (orig_idx, (tick, magnitude)) in self.node_points.iter().enumerate() {
+            if *tick == 0 && *magnitude == 0 && !indexed.is_empty() {
                 break;
             }
-            points.push(EnvelopePoint {
-                frame: *tick as usize,
-                value: (*magnitude as f32) / 64.0,
-            });
+            indexed.push((
+                orig_idx,
+                EnvelopePoint {
+                    frame: *tick as usize,
+                    value: (*magnitude as f32) / 64.0,
+                },
+            ));
         }
-        points.sort_by_key(|a| a.frame);
-        points
+        indexed.sort_by_key(|(_, p)| p.frame);
+
+        let mut remap = [0u8; 25];
+        let points = indexed
+            .into_iter()
+            .enumerate()
+            .map(|(new_idx, (orig_idx, point))| {
+                remap[orig_idx] = new_idx as u8;
+                point
+            })
+            .collect();
+        (points, remap)
+    }
+
+    /// Legacy accessor kept for any caller outside the crate.
+    pub fn to_envelope(&self) -> Vec<EnvelopePoint> {
+        self.to_envelope_points().0
+    }
+
+    fn remap_index(remap: &[u8; 25], raw: u8) -> usize {
+        let idx = raw as usize;
+        if idx < 25 {
+            remap[idx] as usize
+        } else {
+            0
+        }
+    }
+
+    /// Build the volume envelope, given the parent instrument's flags
+    /// and node indices (which live on the header, not on the envelope
+    /// payload in the pre-2.0 format).
+    pub fn to_envelope_struct(
+        &self,
+        flags: u8,
+        loop_start: u8,
+        loop_end: u8,
+        sustain_start: u8,
+        sustain_end: u8,
+    ) -> Envelope {
+        let (points, remap) = self.to_envelope_points();
+        Envelope {
+            enabled: flags & 0b0000_0001 != 0,
+            sustain_enabled: flags & 0b0000_0100 != 0,
+            sustain_start_point: Self::remap_index(&remap, sustain_start),
+            sustain_end_point: Self::remap_index(&remap, sustain_end),
+            loop_enabled: flags & 0b0000_0010 != 0,
+            loop_start_point: Self::remap_index(&remap, loop_start),
+            loop_end_point: Self::remap_index(&remap, loop_end),
+            point: points,
+        }
     }
 }
 
@@ -256,30 +310,128 @@ pub struct ItEnvelopePost2 {
 }
 
 impl ItEnvelopePost2 {
-    pub fn to_envelope(&self) -> Vec<EnvelopePoint> {
-        let mut points = Vec::new();
+    /// Convert raw nodes assuming **unsigned** magnitudes in 0..=64
+    /// (volume / filter envelopes).
+    ///
+    /// Also returns the re-mapping table that rewrites loop/sustain
+    /// node indices from file order to sorted order — IT stores nodes
+    /// in authored order but points must be chronological for
+    /// interpolation, so we sort by frame. Any index into the raw
+    /// node array (`loop_start`, etc.) must go through this remap to
+    /// stay pointing at the same logical node after the sort.
+    fn to_envelope_points_unsigned(&self) -> (Vec<EnvelopePoint>, [u8; 25]) {
         let count = (self.node_count as usize).min(25);
+        let mut indexed: Vec<(usize, EnvelopePoint)> = self.node_points[..count]
+            .iter()
+            .enumerate()
+            .map(|(orig_idx, (value, tick))| {
+                (
+                    orig_idx,
+                    EnvelopePoint {
+                        frame: *tick as usize,
+                        value: (*value as f32) / 64.0,
+                    },
+                )
+            })
+            .collect();
+        indexed.sort_by_key(|(_, p)| p.frame);
 
-        for (value, tick) in self.node_points[..count].iter() {
-            points.push(EnvelopePoint {
-                frame: *tick as usize,
-                value: (*value as f32) / 64.0,
-            });
-        }
-        points.sort_by_key(|a| a.frame);
-        points
+        let mut remap = [0u8; 25];
+        let points = indexed
+            .into_iter()
+            .enumerate()
+            .map(|(new_idx, (orig_idx, point))| {
+                remap[orig_idx] = new_idx as u8;
+                point
+            })
+            .collect();
+        (points, remap)
     }
 
+    /// Convert raw nodes assuming **signed** magnitudes in -32..=32
+    /// (panning / pitch envelopes — see the IT file format docs on
+    /// `ItEnvelopePost2::node_points` for the signed interpretation).
+    ///
+    /// The magnitude byte is re-interpreted as `i8` and normalised to
+    /// the 0..=1 convention used by `Envelope`: 0.0 = fully left /
+    /// pitched-down by one octave, 0.5 = centre / no pitch change,
+    /// 1.0 = fully right / pitched-up by one octave.
+    fn to_envelope_points_signed(&self) -> (Vec<EnvelopePoint>, [u8; 25]) {
+        let count = (self.node_count as usize).min(25);
+        let mut indexed: Vec<(usize, EnvelopePoint)> = self.node_points[..count]
+            .iter()
+            .enumerate()
+            .map(|(orig_idx, (value, tick))| {
+                let signed = *value as i8; // -32..=32 in the format
+                let normalised = (signed as f32 + 32.0) / 64.0; // → 0.0..=1.0
+                (
+                    orig_idx,
+                    EnvelopePoint {
+                        frame: *tick as usize,
+                        value: normalised,
+                    },
+                )
+            })
+            .collect();
+        indexed.sort_by_key(|(_, p)| p.frame);
+
+        let mut remap = [0u8; 25];
+        let points = indexed
+            .into_iter()
+            .enumerate()
+            .map(|(new_idx, (orig_idx, point))| {
+                remap[orig_idx] = new_idx as u8;
+                point
+            })
+            .collect();
+        (points, remap)
+    }
+
+    /// Legacy unsigned conversion, kept for any callers outside the
+    /// crate that relied on the original `to_envelope()` API. New code
+    /// should use `to_envelope_struct` / `to_envelope_struct_signed`.
+    pub fn to_envelope(&self) -> Vec<EnvelopePoint> {
+        self.to_envelope_points_unsigned().0
+    }
+
+    fn remap_index(remap: &[u8; 25], raw: u8) -> usize {
+        let idx = raw as usize;
+        if idx < 25 {
+            remap[idx] as usize
+        } else {
+            0
+        }
+    }
+
+    /// Build an envelope using the **unsigned** magnitude interpretation.
+    /// Use for volume and filter-cutoff envelopes.
     pub fn to_envelope_struct(&self) -> Envelope {
+        let (points, remap) = self.to_envelope_points_unsigned();
         Envelope {
             enabled: self.flags & 0b0000_0001 != 0,
-            point: self.to_envelope(),
             sustain_enabled: self.flags & 0b0000_0100 != 0,
-            sustain_start_point: self.sustain_loop_start as usize,
-            sustain_end_point: self.sustain_loop_end as usize,
+            sustain_start_point: Self::remap_index(&remap, self.sustain_loop_start),
+            sustain_end_point: Self::remap_index(&remap, self.sustain_loop_end),
             loop_enabled: self.flags & 0b0000_0010 != 0,
-            loop_start_point: self.loop_start as usize,
-            loop_end_point: self.loop_end as usize,
+            loop_start_point: Self::remap_index(&remap, self.loop_start),
+            loop_end_point: Self::remap_index(&remap, self.loop_end),
+            point: points,
+        }
+    }
+
+    /// Build an envelope using the **signed** magnitude interpretation.
+    /// Use for panning and pitch envelopes.
+    pub fn to_envelope_struct_signed(&self) -> Envelope {
+        let (points, remap) = self.to_envelope_points_signed();
+        Envelope {
+            enabled: self.flags & 0b0000_0001 != 0,
+            sustain_enabled: self.flags & 0b0000_0100 != 0,
+            sustain_start_point: Self::remap_index(&remap, self.sustain_loop_start),
+            sustain_end_point: Self::remap_index(&remap, self.sustain_loop_end),
+            loop_enabled: self.flags & 0b0000_0010 != 0,
+            loop_start_point: Self::remap_index(&remap, self.loop_start),
+            loop_end_point: Self::remap_index(&remap, self.loop_end),
+            point: points,
         }
     }
 }
@@ -410,16 +562,18 @@ impl ItInstrument {
                     }
                 }
 
-                instr.volume_envelope = Envelope {
-                    enabled: source.instr.flags & 0b0000_0001 != 0,
-                    point: source.volume_envelope.to_envelope(),
-                    sustain_enabled: source.instr.flags & 0b0000_0100 != 0,
-                    sustain_start_point: source.instr.sustain_loop_start as usize,
-                    sustain_end_point: source.instr.sustain_loop_end as usize,
-                    loop_enabled: source.instr.flags & 0b0000_0010 != 0,
-                    loop_start_point: source.instr.loop_start as usize,
-                    loop_end_point: source.instr.loop_end as usize,
-                };
+                instr.volume_envelope = source.volume_envelope.to_envelope_struct(
+                    source.instr.flags,
+                    source.instr.loop_start,
+                    source.instr.loop_end,
+                    source.instr.sustain_loop_start,
+                    source.instr.sustain_loop_end,
+                );
+                // Guard against degenerate envelopes (0 or 1 point, out-of-
+                // range loop/sustain indices): fall back to disabled.
+                if !instr.volume_envelope.is_valid() {
+                    instr.volume_envelope = Envelope::default();
+                }
 
                 instr.volume_fadeout = (source.instr.fadeout as f32 / 64.0) / 512.0;
 
@@ -447,10 +601,22 @@ impl ItInstrument {
                 }
 
                 instr.volume_envelope = source.volume_envelope.to_envelope_struct();
-                instr.pan_envelope = source.panning_envelope.to_envelope_struct();
-                instr.pitch_envelope = source.pitch_envelope.to_envelope_struct();
+                instr.pan_envelope = source.panning_envelope.to_envelope_struct_signed();
+                instr.pitch_envelope = source.pitch_envelope.to_envelope_struct_signed();
                 instr.pitch_envelope_as_low_pass_filter =
                     source.pitch_envelope.flags & 0b1000_0000 != 0;
+
+                // Guard against degenerate envelopes (0 or 1 point, out-of-
+                // range loop/sustain indices).
+                if !instr.volume_envelope.is_valid() {
+                    instr.volume_envelope = Envelope::default();
+                }
+                if !instr.pan_envelope.is_valid() {
+                    instr.pan_envelope = Envelope::default();
+                }
+                if !instr.pitch_envelope.is_valid() {
+                    instr.pitch_envelope = Envelope::default();
+                }
 
                 let nna = match source.instr.nna {
                     1 => NewNoteAction::Continue,
