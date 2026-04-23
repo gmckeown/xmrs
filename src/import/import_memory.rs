@@ -119,6 +119,19 @@ pub struct S3mImportFlags {
     pub oldstvib: bool,
 }
 
+/// IT master flags resolved at import time, threaded through the
+/// memory resolver so IT-specific quirks that affect effect memory
+/// can be honoured during pattern unpack.
+#[derive(Default, Copy, Clone, Debug)]
+pub struct ItImportFlags {
+    /// IT header flag bit 5: "Link Gxx's memory with Exx/Fxx". When
+    /// ON, Gxx (tone portamento) and the pitch slides Exx/Fxx share
+    /// a single "last slide value" register per channel — writing
+    /// any of them updates the shared slot, and reading a zero
+    /// param on any of them falls back to that shared slot.
+    pub link_gxx_ef_memory: bool,
+}
+
 /// For compatibility between formats and to compensate for special case difficulties with memory management, a best effort analysis is performed during import to associate the exact value with each effect.
 // Horrible hack to store values...use from left to right. First usable type wins.
 pub struct ImportMemory {
@@ -129,6 +142,10 @@ pub struct ImportMemory {
     /// leave it at its default (all-zero). Configured by the S3M
     /// importer before calling [`Self::unpack_patterns`].
     pub s3m_flags: S3mImportFlags,
+    /// IT-specific masterflags resolved at import time. Only read
+    /// when `mem` is `MemoryType::It`. Configured by the IT
+    /// importer before calling [`Self::unpack_patterns`].
+    pub it_flags: ItImportFlags,
 }
 
 impl Default for ImportMemory {
@@ -137,6 +154,7 @@ impl Default for ImportMemory {
             global: [(0.0, 0.0, 0, 0); ARRAY_SIZE],
             channel: [[(0.0, 0.0, 0, 0); ARRAY_SIZE]; 64],
             s3m_flags: S3mImportFlags::default(),
+            it_flags: ItImportFlags::default(),
         }
     }
 }
@@ -220,7 +238,23 @@ impl ImportMemory {
                         MemoryType::Mod => {
                             // No memory use
                         }
-                        MemoryType::Xm | MemoryType::It => {
+                        MemoryType::Xm => {
+                            if *a == 0.0 {
+                                *a = self.channel[index][PORTAMENTO_UP].0
+                            } else {
+                                self.channel[index][PORTAMENTO_UP].0 = *a;
+                            }
+                        }
+                        MemoryType::It => {
+                            // When the IT "link Gxx with E/F" flag
+                            // is set, E/F and G share the slot; we
+                            // read/write PORTAMENTO_UP unconditionally
+                            // for that case (see TonePortamento arm).
+                            // The same slot is used whether the flag
+                            // is set or not on the E/F side, because
+                            // E and F already share it in IT without
+                            // the flag — the flag only extends that
+                            // sharing to G.
                             if *a == 0.0 {
                                 *a = self.channel[index][PORTAMENTO_UP].0
                             } else {
@@ -242,11 +276,23 @@ impl ImportMemory {
                         MemoryType::Mod => {
                             // No memory use
                         }
-                        MemoryType::Xm | MemoryType::It => {
+                        MemoryType::Xm => {
                             if *a == 0.0 {
                                 *a = self.channel[index][PORTAMENTO_DOWN].0
                             } else {
                                 self.channel[index][PORTAMENTO_DOWN].0 = *a;
+                            }
+                        }
+                        MemoryType::It => {
+                            // IT E and F already share memory (see
+                            // ITTECH "Exx / Fxx share memory"). Both
+                            // read/write PORTAMENTO_UP so the slot
+                            // is shared between them — and with G
+                            // when the link flag is on.
+                            if *a == 0.0 {
+                                *a = self.channel[index][PORTAMENTO_UP].0
+                            } else {
+                                self.channel[index][PORTAMENTO_UP].0 = *a;
                             }
                         }
                         MemoryType::S3m => {
@@ -380,11 +426,35 @@ impl ImportMemory {
                 }
 
                 TrackImportEffect::TonePortamento(a) => match mem {
-                    MemoryType::Mod | MemoryType::Xm | MemoryType::It | MemoryType::S3m => {
+                    MemoryType::Mod | MemoryType::Xm | MemoryType::S3m => {
                         if *a == 0.0 {
                             *a = self.channel[index][TONE_PORTAMENTO].0
                         } else {
                             self.channel[index][TONE_PORTAMENTO].0 = *a;
+                        }
+                    }
+                    MemoryType::It => {
+                        if self.it_flags.link_gxx_ef_memory {
+                            // IT header flag bit 5 ON: Gxx shares
+                            // its memory slot with Exx / Fxx. Writing
+                            // any of the three updates the shared
+                            // register (reused here via
+                            // `PORTAMENTO_UP`); reading a zero-param
+                            // on any of them reads from that same
+                            // slot. The canonical ITTECH semantics.
+                            if *a == 0.0 {
+                                *a = self.channel[index][PORTAMENTO_UP].0
+                            } else {
+                                self.channel[index][PORTAMENTO_UP].0 = *a;
+                            }
+                        } else {
+                            // Standard IT: Gxx has its own register,
+                            // separate from Exx / Fxx.
+                            if *a == 0.0 {
+                                *a = self.channel[index][TONE_PORTAMENTO].0
+                            } else {
+                                self.channel[index][TONE_PORTAMENTO].0 = *a;
+                            }
                         }
                     }
                 },

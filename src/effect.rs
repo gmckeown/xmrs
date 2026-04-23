@@ -233,11 +233,24 @@ pub enum TrackEffect {
     },
 }
 
+/// MIDI-macro effect variant. IT's macro system has two user-
+/// visible dispatch axes and a per-channel selector register; the
+/// three variants below capture them distinctly.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum MidiMacroType {
-    // None: use the last index
-    Parametric(Option<usize>),
-    Fixed(usize),
+    /// `SFx` — set the channel's active parametric-macro slot to
+    /// `idx` (0..15). Does not invoke the macro; the next `Zxx`
+    /// with `xx < 0x80` on this channel will use it.
+    SelectParametric(usize),
+    /// `Zxx` with `xx < 0x80` — invoke the channel's currently
+    /// selected parametric macro, substituting the byte `z` (0x7A)
+    /// in the macro string with the `xx` parameter.
+    Parametric(u8),
+    /// `Zxx` with `xx >= 0x80` — invoke fixed macro at `idx =
+    /// xx - 0x80`. The `z` byte (if present in the macro string)
+    /// is substituted with the literal `xx` parameter, matching
+    /// OpenMPT's interpretation.
+    Fixed { idx: usize, z: u8 },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

@@ -492,9 +492,9 @@ impl ItEffect {
                         tempo: true,
                     }),
                     // SFx Sets the current channel's active parametered macro.
-                    0xF => Some(GlobalEffect::MidiMacro(MidiMacroType::Parametric(Some(
+                    0xF => Some(GlobalEffect::MidiMacro(MidiMacroType::SelectParametric(
                         param as usize,
-                    )))),
+                    ))),
                     _ => None,
                 }
             }
@@ -516,8 +516,11 @@ impl ItEffect {
             }
 
             // Effect Set Global Volume (Vxx)
+            // Per ITTECH GV ranges 0–128 (not 0–64 like the MOD/XM/S3M
+            // families). Clamping to 64 would cap every IT module at
+            // half global volume.
             0x16 => Some(GlobalEffect::Volume(
-                (current.effect_parameter.min(64) as f32) / 64.0,
+                (current.effect_parameter.min(128) as f32) / 128.0,
             )),
 
             // Effect Global Volume Slide (Wxy)
@@ -528,6 +531,9 @@ impl ItEffect {
             //
             // Same test-order as Dxy (see `it_volume_slide`): test
             // (f, 0xF) before (0xF, f) so WFF resolves to fine-up.
+            //
+            // Scale is /128 (not /64 as in Dxy) because IT global
+            // volume is 0–128, per ITTECH.
             0x17 => {
                 let fx = current.effect_parameter;
                 let nibble_high = (fx & 0xF0) >> 4;
@@ -535,19 +541,19 @@ impl ItEffect {
 
                 match (nibble_high, nibble_low) {
                     (f, 0) => Some(GlobalEffect::VolumeSlide {
-                        speed: f as f32 / 64.0,
+                        speed: f as f32 / 128.0,
                         fine: false,
                     }),
                     (0, f) => Some(GlobalEffect::VolumeSlide {
-                        speed: -(f as f32) / 64.0,
+                        speed: -(f as f32) / 128.0,
                         fine: false,
                     }),
                     (f, 0xF) => Some(GlobalEffect::VolumeSlide {
-                        speed: f as f32 / 64.0,
+                        speed: f as f32 / 128.0,
                         fine: true,
                     }),
                     (0xF, f) => Some(GlobalEffect::VolumeSlide {
-                        speed: -(f as f32) / 64.0,
+                        speed: -(f as f32) / 128.0,
                         fine: true,
                     }),
                     _ => None,
@@ -555,14 +561,18 @@ impl ItEffect {
             }
 
             // Effect Midi macro (Zxx)
+            // Per ITTECH: `xx < 0x80` invokes the channel's
+            // currently-selected parametric macro with `z` = xx;
+            // `xx >= 0x80` invokes fixed macro `xx - 0x80`.
             0x1A => {
                 let param = current.effect_parameter;
                 if param & 0x80 == 0 {
-                    Some(GlobalEffect::MidiMacro(MidiMacroType::Parametric(None)))
+                    Some(GlobalEffect::MidiMacro(MidiMacroType::Parametric(param)))
                 } else {
-                    Some(GlobalEffect::MidiMacro(MidiMacroType::Fixed(
-                        param as usize - 0x80,
-                    )))
+                    Some(GlobalEffect::MidiMacro(MidiMacroType::Fixed {
+                        idx: (param - 0x80) as usize,
+                        z: param,
+                    }))
                 }
             }
 

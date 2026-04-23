@@ -96,6 +96,9 @@ impl XmModule {
             pattern_names: vec![],
             channel_names: vec![],
             instrument: vec![],
+            // XM has no MIDI-macro concept — the feature is
+            // IT-specific.
+            midi_macros: None,
         };
 
         let patterns: Vec<Vec<Vec<PatternSlot>>> =

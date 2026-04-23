@@ -573,11 +573,24 @@ impl ItSampleHeader {
             .sustain_loop_end
             .saturating_sub(self.sustain_loop_beginning);
 
+        // IT carries two independent sample-volume knobs: `global_volume`
+        // (GvL, a fixed sample-level scale) and `default_volume` (Vol,
+        // the note volume applied when the pattern cell has no vol-
+        // column override). xmrs's `Sample` has a single `volume`
+        // field, so we fold them multiplicatively:
+        //   Sample.volume = (GvL / 64) * (Vol / 64)
+        // At GvL=Vol=64 this is 1.0 (identity); any attenuation on
+        // either side carries through. Previously only GvL was read,
+        // so any sample authored with Vol < 64 was silently boosted
+        // back up to the sample's GvL.
+        let combined_volume =
+            (self.global_volume as f32 / 64.0) * (self.default_volume as f32 / 64.0);
+
         Sample {
             name,
             relative_pitch,
             finetune,
-            volume: self.global_volume as f32 / 64.0,
+            volume: combined_volume.clamp(0.0, 1.0),
             panning,
             loop_start: self.loop_beginning,
             loop_length: llength,

@@ -190,6 +190,28 @@ pub struct PlaybackQuirks {
     /// `atreon` both live on the channel struct, never reset
     /// at row load).
     pub tremor_state_persists: bool,
+
+    // --- IT "old effects" (flags bit 4) ---
+    /// IT modules carry a file-level "Old Effects" bit (ITTECH,
+    /// Flags bit 4). When ON, several effects revert to their
+    /// ST3-ish behaviour:
+    ///   * Hxy/Uxy vibrato depth is doubled.
+    ///   * Hxy/Uxy vibrato updates only on non-row ticks (like
+    ///     FT2) instead of every tick.
+    ///   * Ixy/Tremor `on_time` / `off_time` are effectively `+1`.
+    ///   * Oxx past sample end plays from the END of the sample
+    ///     instead of being ignored.
+    /// IT importer sets this from the header flag; non-IT formats
+    /// leave it `false`. The replayer consults it on every
+    /// tick-zero effect-resolution step.
+    pub it_old_effects: bool,
+
+    /// IT flag bit 5: link Gxx (tone portamento) memory with Exx/Fxx
+    /// (pitch slides) memory. When ON, the three effects share a
+    /// single "last slide value" register per channel; also, `Gxx`
+    /// when a new note is present retriggers the envelopes.
+    /// IT importer sets this from the header.
+    pub it_link_gxx_memory: bool,
 }
 
 /// SoundTracker Module with Steroid
@@ -217,6 +239,35 @@ pub struct Module {
     pub pattern_names: Vec<String>,
     pub channel_names: Vec<String>,
     pub instrument: Vec<Instrument>,
+    /// Optional MIDI-macro table. Populated by the IT importer when
+    /// the source file carries an embedded-macros flag; `None` for
+    /// non-IT formats and for IT files without macros. Consumed by
+    /// the replayer's MIDI-macro interpreter (per-channel filter
+    /// automation, MIDI-out, etc.).
+    pub midi_macros: Option<MidiMacros>,
+}
+
+/// A module's MIDI macro table. IT-specific in practice but the
+/// type lives on `Module` so the replayer doesn't need to know
+/// which format the macros came from.
+///
+/// Each macro is a 32-byte sequence of hex values. The byte `b'z'`
+/// (0x7A) is a placeholder that the replayer substitutes with the
+/// current `Zxx` parameter at interpretation time — that's how IT's
+/// typical "F0 F0 00 z" macro (set filter cutoff to `z`) works.
+///
+/// Tables follow ITTECH layout:
+/// * `global`      — 9 entries (global MIDI setup: port init, note
+///                   on/off mapping, etc.)
+/// * `parametric`  — 16 entries, selected per-channel via `SF0..SFF`
+///                   and invoked by `Zxx` with `xx < 0x80`
+/// * `fixed`       — 128 entries, addressed absolutely via `Zxx`
+///                   with `xx >= 0x80` (index = `xx - 0x80`)
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct MidiMacros {
+    pub global: Vec<Vec<u8>>,
+    pub parametric: Vec<Vec<u8>>,
+    pub fixed: Vec<Vec<u8>>,
 }
 
 impl Default for Module {
@@ -235,6 +286,7 @@ impl Default for Module {
             pattern_names: vec![],
             channel_names: vec![],
             instrument: vec![],
+            midi_macros: None,
         }
     }
 }

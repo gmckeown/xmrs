@@ -8,7 +8,7 @@
 /// ```
 ///
 pub use crate::{
-    effect::{GlobalEffect, NoteRetrigOperator, TrackEffect},
+    effect::{GlobalEffect, MidiMacroType, NoteRetrigOperator, TrackEffect},
     envelope::{Envelope, EnvelopePoint},
     instr_default::{DuplicateCheckAction, DuplicateCheckType, InstrDefault, NewNoteAction},
     instr_ekn::InstrEkn,
@@ -17,7 +17,7 @@ pub use crate::{
     instr_robsid::InstrRobSid,
     instr_sid::InstrSid,
     instrument::{Instrument, InstrumentType},
-    module::{Module, ModuleFormat, Pattern, PlaybackQuirks, Row, MAX_NUM_ROWS},
+    module::{MidiMacros, Module, ModuleFormat, Pattern, PlaybackQuirks, Row, MAX_NUM_ROWS},
     period_helper::{FrequencyType, PeriodHelper},
     pitch::Pitch,
     sample::{LoopType, Sample, SampleDataType},

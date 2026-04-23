@@ -280,6 +280,102 @@ impl ItModule {
         Ok(it)
     }
 
+    /// Materialise the IT header's startup state (initial global
+    /// volume, initial channel pan, initial channel volume) as
+    /// pattern-row-0 effects on the first-played pattern. Mirrors
+    /// the approach `S3mModule::inject_header_defaults` uses —
+    /// keeping these as effect-column injections means the player
+    /// needs no extra "initial state" API; the sequencer simply
+    /// plays row 0 and those effects fire like any other.
+    ///
+    /// Global volume and mix volume are folded together: IT's mix
+    /// volume is a master pre-mix gain applied to every sounding
+    /// voice, conceptually independent of `Vxx` animation. xmrs has
+    /// one global_volume knob, so we combine them multiplicatively
+    /// at boot: `combined = GV * MV / 128`, scaled into the Vxx
+    /// parameter's 0..128 range. A `Vxx 80` is the identity (GV=MV=
+    /// 128 → combined = 128).
+    fn inject_header_defaults(&self, patterns: &mut [Vec<Vec<PatternSlot>>]) {
+        let first_pat = match self
+            .orders
+            .iter()
+            .find(|&&p| p < 200) // skip end/skip markers
+        {
+            Some(&p) => p as usize,
+            None => return,
+        };
+        let row = match patterns.get_mut(first_pat).and_then(|p| p.first_mut()) {
+            Some(r) if !r.is_empty() => r,
+            _ => return,
+        };
+
+        // --- Global * mix volume as Vxx on the first free slot. ---
+        let gv = self.header.global_volume as u32; // 0..128
+        let mv = self.header.mix_volume as u32; // 0..128
+        let combined: u32 = (gv * mv) / 128; // 0..128
+                                             // Only inject when the combined value is non-default (≠ 128)
+                                             // — if the module already plays at full headroom there's
+                                             // nothing to bias.
+        if combined != 128 {
+            if let Some(slot) = row
+                .iter_mut()
+                .find(|s| s.effect_type == 0 && s.effect_parameter == 0)
+            {
+                slot.effect_type = 0x16; // Vxx
+                slot.effect_parameter = combined.min(128) as u8;
+            }
+        }
+
+        // --- Initial channel pan (Xxx) per channel. ---
+        // IT stores `initial_channel_pan[ch]` as 0..64 (left..right),
+        // 100 = surround, +128 = disabled channel. Xxx takes a
+        // 0..255 parameter (full 8-bit range, post-fix). Scale 0..64
+        // → 0..252 (multiply by 4, round-friendly on 0..64 inputs
+        // and still cleanly reaches both extremes). Only inject for
+        // channels whose pan differs from the default center (32).
+        for (ch, &pan_raw) in self.header.initial_channel_pan.iter().enumerate() {
+            if ch >= row.len() {
+                break;
+            }
+            // Disabled channel (+128) — skip (player-side "muted"
+            // handling is separate). Surround (100) — also skip; we
+            // don't have a surround injection path yet and a plain
+            // Xxx here would mis-render as far-right.
+            if pan_raw & 0x80 != 0 || pan_raw == 100 {
+                continue;
+            }
+            let pan = pan_raw & 0x7F;
+            if pan == 32 {
+                continue; // center default
+            }
+            let slot = &mut row[ch];
+            if slot.effect_type == 0 && slot.effect_parameter == 0 {
+                slot.effect_type = 0x18; // Xxx — Set Panning
+                                         // 0..64 → 0..255 (x * 4 clamped; 64 maps to 255).
+                let p = (pan as u32 * 255 / 64).min(255) as u8;
+                slot.effect_parameter = p;
+            }
+        }
+
+        // --- Initial channel volume (Mxx) per channel. ---
+        // IT stores `initial_channel_volume[ch]` as 0..64; the Mxx
+        // effect takes 0..64 directly.
+        for (ch, &vol) in self.header.initial_channel_volume.iter().enumerate() {
+            if ch >= row.len() {
+                break;
+            }
+            let vol = vol.min(64);
+            if vol == 64 {
+                continue; // full-volume default
+            }
+            let slot = &mut row[ch];
+            if slot.effect_type == 0 && slot.effect_parameter == 0 {
+                slot.effect_type = 0x0D; // Mxx — Set Channel Volume
+                slot.effect_parameter = vol;
+            }
+        }
+    }
+
     pub fn to_module(&self) -> Module {
         let it_type = if self.header.is_ompt() { "MP" } else { "IT" };
         let mut module = Module {
@@ -294,11 +390,18 @@ impl ItModule {
                 self.message
             ),
             format: ModuleFormat::It,
-            // IT's canonical semantics (notably: note-off fades via
-            // `volume_fadeout` rather than cutting, unlike XM) all
-            // fall out of the default `PlaybackQuirks` — no FT2 or
-            // ST3 quirks are enabled for an IT source.
-            quirks: PlaybackQuirks::default(),
+            // IT quirks. ITTECH specifies:
+            // - `tremor_state_persists`: Ixy counter is shared
+            //   across rows (ST3 semantics — consecutive Ixy rows
+            //   form a continuous on/off cycle rather than
+            //   retriggering the phase per row).
+            // The two header-driven flags ride alongside.
+            quirks: PlaybackQuirks {
+                tremor_state_persists: true,
+                it_old_effects: self.header.is_old_effects(),
+                it_link_gxx_memory: self.header.is_g_linked_with_e_f(),
+                ..PlaybackQuirks::default()
+            },
             frequency_type: if self.header.is_linear_slides() {
                 FrequencyType::LinearFrequencies
             } else {
@@ -312,14 +415,28 @@ impl ItModule {
             pattern_names: self.pattern_names.clone(),
             channel_names: self.channel_names.clone(),
             instrument: vec![],
+            // MIDI macros: propagate the IT-file table through to
+            // the module so the replayer's macro interpreter can
+            // reach it at `Zxx` time. `None` when the IT file's
+            // header didn't flag macros as embedded.
+            midi_macros: self.midi_macros.as_ref().map(|m| m.to_public()),
         };
 
         let mut im = ImportMemory::default();
+        // IT-specific import-time flags. The link-Gxx-with-E/F flag
+        // must be set BEFORE unpack so the memory-resolution path
+        // sees it. See `ImportMemory::it_flags`.
+        im.it_flags.link_gxx_ef_memory = self.header.is_g_linked_with_e_f();
+        // Inject header defaults (global*mix volume, per-channel pan
+        // and vol) into row 0 of the first-played pattern BEFORE
+        // unpack, so they pass through the normal IT effect parser.
+        let mut patterns_for_unpack = self.patterns.clone();
+        self.inject_header_defaults(&mut patterns_for_unpack);
         module.pattern = im.unpack_patterns(
             module.frequency_type,
             MemoryType::It,
             &module.pattern_order,
-            &self.patterns,
+            &patterns_for_unpack,
         );
 
         // Prepare Samples
