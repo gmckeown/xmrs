@@ -573,24 +573,30 @@ impl ItSampleHeader {
             .sustain_loop_end
             .saturating_sub(self.sustain_loop_beginning);
 
-        // IT carries two independent sample-volume knobs: `global_volume`
-        // (GvL, a fixed sample-level scale) and `default_volume` (Vol,
-        // the note volume applied when the pattern cell has no vol-
-        // column override). xmrs's `Sample` has a single `volume`
-        // field, so we fold them multiplicatively:
-        //   Sample.volume = (GvL / 64) * (Vol / 64)
-        // At GvL=Vol=64 this is 1.0 (identity); any attenuation on
-        // either side carries through. Previously only GvL was read,
-        // so any sample authored with Vol < 64 was silently boosted
-        // back up to the sample's GvL.
-        let combined_volume =
-            (self.global_volume as f32 / 64.0) * (self.default_volume as f32 / 64.0);
+        // IT splits the sample's level into two registers:
+        //   * GvL (`global_volume`, 0..64): always applies — a static
+        //     scale baked into the sample's playback level.
+        //   * Vol (`default_volume`, 0..64): the default NOTE volume,
+        //     used only when the pattern cell has no volume-column
+        //     override.
+        // xmrs's `Sample` has a single `volume` field. Putting GvL
+        // alone here is the correct call: it's the always-applies
+        // scalar. A pattern cell's `Vxx` column, when present,
+        // overrides the note's starting volume but must NOT clobber
+        // GvL — so they live in different layers. Vol (the default
+        // note volume) is not applied in this importer today; modules
+        // that rely on per-sample default-volume tuning for silent-
+        // cell notes will ignore it. Fixing this properly needs a
+        // `default_note_volume` field on xmrs's Sample or an
+        // instrument-trigger hook in the player; neither is worth
+        // the breaking change today.
+        let gvl_only = self.global_volume as f32 / 64.0;
 
         Sample {
             name,
             relative_pitch,
             finetune,
-            volume: combined_volume.clamp(0.0, 1.0),
+            volume: gvl_only.clamp(0.0, 1.0),
             panning,
             loop_start: self.loop_beginning,
             loop_length: llength,

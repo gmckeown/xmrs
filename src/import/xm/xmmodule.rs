@@ -99,6 +99,8 @@ impl XmModule {
             // XM has no MIDI-macro concept — the feature is
             // IT-specific.
             midi_macros: None,
+            // XM has no mix-volume concept either; 1.0 = identity.
+            mix_volume: 1.0,
         };
 
         let patterns: Vec<Vec<Vec<PatternSlot>>> =

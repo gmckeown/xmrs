@@ -245,6 +245,18 @@ pub struct Module {
     /// the replayer's MIDI-macro interpreter (per-channel filter
     /// automation, MIDI-out, etc.).
     pub midi_macros: Option<MidiMacros>,
+    /// Song-level mix volume scalar (0..1). IT-specific: each IT
+    /// file carries a "mix volume" register (0..128, default 48)
+    /// which is a constant mixer-level headroom applied on top of
+    /// the Vxx-animated global volume. It is NOT part of the Vxx
+    /// effect chain — authors set it once to reserve dynamic range
+    /// for resonant-filter peaks and multi-voice summing.
+    ///
+    /// Non-IT formats leave this at `1.0` (identity). The player
+    /// reads it once at construction and applies it as a final
+    /// constant multiplier separate from both `global_volume` and
+    /// user-facing `amplification`.
+    pub mix_volume: f32,
 }
 
 /// A module's MIDI macro table. IT-specific in practice but the
@@ -287,6 +299,7 @@ impl Default for Module {
             channel_names: vec![],
             instrument: vec![],
             midi_macros: None,
+            mix_volume: 1.0,
         }
     }
 }

@@ -288,13 +288,12 @@ impl ItModule {
     /// needs no extra "initial state" API; the sequencer simply
     /// plays row 0 and those effects fire like any other.
     ///
-    /// Global volume and mix volume are folded together: IT's mix
-    /// volume is a master pre-mix gain applied to every sounding
-    /// voice, conceptually independent of `Vxx` animation. xmrs has
-    /// one global_volume knob, so we combine them multiplicatively
-    /// at boot: `combined = GV * MV / 128`, scaled into the Vxx
-    /// parameter's 0..128 range. A `Vxx 80` is the identity (GV=MV=
-    /// 128 → combined = 128).
+    /// Only GV (the Vxx-animated global volume register) is
+    /// injected. MV (mix volume) is a separate constant handled via
+    /// `Module::mix_volume` on the final-mix path — combining the
+    /// two into a single `Vxx` injection was wrong because a later
+    /// `Vxx` effect in the pattern would overwrite both instead of
+    /// just animating GV.
     fn inject_header_defaults(&self, patterns: &mut [Vec<Vec<PatternSlot>>]) {
         let first_pat = match self
             .orders
@@ -309,20 +308,19 @@ impl ItModule {
             _ => return,
         };
 
-        // --- Global * mix volume as Vxx on the first free slot. ---
-        let gv = self.header.global_volume as u32; // 0..128
-        let mv = self.header.mix_volume as u32; // 0..128
-        let combined: u32 = (gv * mv) / 128; // 0..128
-                                             // Only inject when the combined value is non-default (≠ 128)
-                                             // — if the module already plays at full headroom there's
-                                             // nothing to bias.
-        if combined != 128 {
+        // --- Global volume as Vxx. ---
+        // IT's GV is 0..128. The Vxx effect parameter is also 0..128
+        // on IT (see `it_effect.rs` — `0x16` handler clamps to 128).
+        // Only inject when GV is non-default (≠ 128) — if the module
+        // plays at full GV there's nothing to bias.
+        let gv = self.header.global_volume.min(128);
+        if gv != 128 {
             if let Some(slot) = row
                 .iter_mut()
                 .find(|s| s.effect_type == 0 && s.effect_parameter == 0)
             {
                 slot.effect_type = 0x16; // Vxx
-                slot.effect_parameter = combined.min(128) as u8;
+                slot.effect_parameter = gv;
             }
         }
 
@@ -420,6 +418,11 @@ impl ItModule {
             // reach it at `Zxx` time. `None` when the IT file's
             // header didn't flag macros as embedded.
             midi_macros: self.midi_macros.as_ref().map(|m| m.to_public()),
+            // Mix volume: IT-specific constant (0..128 in the file,
+            // normalised to 0..1 here). Applied as a final-mix
+            // multiplier by the player, separate from the Vxx-
+            // animated global volume.
+            mix_volume: (self.header.mix_volume.min(128) as f32) / 128.0,
         };
 
         let mut im = ImportMemory::default();

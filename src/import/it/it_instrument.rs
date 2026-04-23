@@ -575,7 +575,17 @@ impl ItInstrument {
                     instr.volume_envelope = Envelope::default();
                 }
 
-                instr.volume_fadeout = (source.instr.fadeout as f32 / 64.0) / 512.0;
+                // IT fadeout: Schism / OpenMPT run a 16-bit counter
+                // that starts at 65536 and decrements by the
+                // `fadeout` value every tick. Time to fully fade =
+                // 65536 / fadeout ticks. The player's
+                // `volume_fadeout` register starts at 1.0 and is
+                // decremented by `instr.volume_fadeout` per tick, so
+                // the matching scale is `fadeout / 65536`. The
+                // previous `/32768` formula faded notes twice as
+                // fast as reference implementations — audible on any
+                // IT module with NNA=Fade or a sustained tail.
+                instr.volume_fadeout = source.instr.fadeout as f32 / 65536.0;
 
                 let nna = match source.instr.nna {
                     1 => NewNoteAction::Continue,
@@ -638,7 +648,8 @@ impl ItInstrument {
                     _ => DuplicateCheckType::Off(nna),
                 };
 
-                instr.volume_fadeout = (source.instr.fadeout as f32 / 64.0) / 512.0;
+                // See note on fadeout scale at the earlier site.
+                instr.volume_fadeout = source.instr.fadeout as f32 / 65536.0;
                 instr.pitch_pan_center = source
                     .instr
                     .pitch_pan_center
