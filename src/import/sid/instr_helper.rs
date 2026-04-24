@@ -39,6 +39,9 @@ impl InstrHelper {
             relative_pitch: 0,
             finetune: 0.0,
             volume: 1.0,
+            // Synthesized SID waveforms don't carry a meaningful
+            // default-note-volume — always triggers at full.
+            default_note_volume: 1.0,
             panning: 0.5,
             loop_flag,
             loop_start: 0,

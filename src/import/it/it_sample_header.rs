@@ -591,12 +591,17 @@ impl ItSampleHeader {
         // instrument-trigger hook in the player; neither is worth
         // the breaking change today.
         let gvl_only = self.global_volume as f32 / 64.0;
+        // Default note volume (Vol): 0..64 → 0..1. Applied on top of
+        // `volume` (GvL) at note-trigger time unless a V-column
+        // override replaces it.
+        let default_note_vol = (self.default_volume.min(64) as f32) / 64.0;
 
         Sample {
             name,
             relative_pitch,
             finetune,
             volume: gvl_only.clamp(0.0, 1.0),
+            default_note_volume: default_note_vol.clamp(0.0, 1.0),
             panning,
             loop_start: self.loop_beginning,
             loop_length: llength,

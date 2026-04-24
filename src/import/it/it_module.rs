@@ -331,26 +331,54 @@ impl ItModule {
         // → 0..252 (multiply by 4, round-friendly on 0..64 inputs
         // and still cleanly reaches both extremes). Only inject for
         // channels whose pan differs from the default center (32).
+        //
+        // `pan_separation` (header field, 0..128) scales each
+        // channel's distance from centre: 128 = full separation
+        // (identity), 0 = everything collapses to mono. Applied at
+        // injection time so that static pans respect the author's
+        // chosen stereo width. Dynamic pan effects (Pxx, panning
+        // envelope) bypass this scaling — acceptable because most
+        // IT files use pan_separation as a one-time mix-width knob.
+        let pan_sep = self.header.pan_separation.min(128) as i32;
         for (ch, &pan_raw) in self.header.initial_channel_pan.iter().enumerate() {
             if ch >= row.len() {
                 break;
             }
-            // Disabled channel (+128) — skip (player-side "muted"
-            // handling is separate). Surround (100) — also skip; we
-            // don't have a surround injection path yet and a plain
-            // Xxx here would mis-render as far-right.
-            if pan_raw & 0x80 != 0 || pan_raw == 100 {
+            // Disabled channel (+128) — skip entirely. Player-side
+            // "muted" handling is a different axis and the module
+            // loader doesn't touch it.
+            if pan_raw & 0x80 != 0 {
                 continue;
             }
-            let pan = pan_raw & 0x7F;
+            // Surround sentinel (100): the channel should start in
+            // IT's pseudo-stereo "surround" mode (right channel
+            // phase-inverted at mix time). The player implements
+            // this as an S91 effect on the channel. We don't mess
+            // with Xxx here — S91 is orthogonal to pan and the
+            // channel will be re-panned by any later Xxx / Pxx.
+            if pan_raw == 100 {
+                let slot = &mut row[ch];
+                if slot.effect_type == 0 && slot.effect_parameter == 0 {
+                    slot.effect_type = 0x13; // Sxx (special)
+                    slot.effect_parameter = 0x91; // S91 = surround on
+                }
+                continue;
+            }
+            let pan = (pan_raw & 0x7F) as i32;
+            // Scale distance from centre by pan_separation / 128,
+            // then re-centre. With pan_sep == 128 this is a no-op;
+            // with pan_sep == 0 every channel collapses to 32
+            // (centre) and we skip the injection entirely below.
+            let pan = 32 + ((pan - 32) * pan_sep / 128);
+            let pan = pan.clamp(0, 64) as u32;
             if pan == 32 {
-                continue; // center default
+                continue; // center default (or collapsed to centre)
             }
             let slot = &mut row[ch];
             if slot.effect_type == 0 && slot.effect_parameter == 0 {
                 slot.effect_type = 0x18; // Xxx — Set Panning
                                          // 0..64 → 0..255 (x * 4 clamped; 64 maps to 255).
-                let p = (pan as u32 * 255 / 64).min(255) as u8;
+                let p = (pan * 255 / 64).min(255) as u8;
                 slot.effect_parameter = p;
             }
         }

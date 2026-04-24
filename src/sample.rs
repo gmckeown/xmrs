@@ -51,8 +51,21 @@ pub struct Sample {
     pub relative_pitch: i8,
     /// [-1..1]
     pub finetune: f32,
-    /// [0..1] linear value
+    /// [0..1] linear value — ALWAYS-applied sample scale (IT's GvL,
+    /// 0..64 normalised). Independent of the note-column volume.
     pub volume: f32,
+    /// [0..1] linear value — starting note volume used when a
+    /// pattern cell triggers this sample without a volume-column
+    /// override. IT calls this "Vol" (default note volume, 0..64
+    /// normalised); MOD / XM / S3M have no equivalent and leave it
+    /// at `1.0` (full).
+    ///
+    /// Layered on top of `volume` at note-trigger time:
+    ///   voice_start = sample.volume * sample.default_note_volume
+    /// while a V-column override replaces `default_note_volume` at
+    /// trigger time, letting `volume` (GvL in IT terminology) keep
+    /// scaling the sample regardless.
+    pub default_note_volume: f32,
     /// [0..1] <=> [left..right]
     pub panning: f32,
 
@@ -261,6 +274,7 @@ mod tests {
             relative_pitch: 0,
             finetune: 0.0,
             volume: 1.0,
+            default_note_volume: 1.0,
             panning: 0.5,
             loop_flag,
             loop_start,

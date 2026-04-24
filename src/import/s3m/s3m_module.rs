@@ -723,6 +723,8 @@ impl S3mModule {
                         relative_pitch: rn.0,
                         finetune: rn.1,
                         volume: pcm.volume as f32 / 64.0,
+                        // S3M has no per-sample default note volume.
+                        default_note_volume: 1.0,
                         panning: 0.5,
                         loop_flag: if pcm.is_loop() {
                             LoopType::Forward

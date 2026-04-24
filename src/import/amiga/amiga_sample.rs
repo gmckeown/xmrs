@@ -72,6 +72,9 @@ impl AmigaSample {
             relative_pitch: 0,
             finetune: f,
             volume: self.volume as f32 / 64.0,
+            // MOD has no concept of a per-sample default note
+            // volume — the sample always triggers at full.
+            default_note_volume: 1.0,
             panning: 0.5,
             loop_flag: flag,
             loop_start: ro as u32,

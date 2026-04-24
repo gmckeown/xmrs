@@ -134,6 +134,9 @@ impl XmSample {
             relative_pitch: self.header.relative_pitch,
             finetune: (self.header.finetune as f32 / 127.0).clamp(-1.0, 1.0),
             volume: self.header.volume as f32 / 64.0,
+            // XM has no separate per-sample default note volume —
+            // the sample's own `volume` scale is the only gain knob.
+            default_note_volume: 1.0,
             panning: self.header.panning as f32 / 255.0,
             loop_flag: match self.header.flags & 0b0000_0011 {
                 1 => LoopType::Forward,

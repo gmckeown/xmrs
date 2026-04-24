@@ -315,12 +315,17 @@ impl ItEffect {
                 }
             }
 
-            // Effect Retrigger Note (Qxy) -> Retriggers a note after y ticks with volume modifier x
+            // Effect Retrigger Note (Qxy) -> Retriggers a note after
+            // y ticks with volume modifier x. IT inherits Qxy from
+            // S3M (not FT2/XM Rxy), so the nibble-6 multiplier is
+            // `vol * 10/16` (= 5/8), not FT2's `11/16`. Route
+            // through the `NoteRetrigExtendedS3m` variant so the
+            // volume-modifier table gets the S3M constants.
             0x11 => {
                 let param = current.effect_parameter;
                 let vol = param >> 4;
                 let speed = param & 0x0F;
-                Some(vec![TrackImportEffect::NoteRetrigExtended(
+                Some(vec![TrackImportEffect::NoteRetrigExtendedS3m(
                     speed as usize,
                     vol as usize,
                 )])
@@ -456,10 +461,19 @@ impl ItEffect {
 
     pub fn parse_global_it_effect(current: &PatternSlot) -> Option<GlobalEffect> {
         match current.effect_type {
-            // Effect Set Song Speed (Axx)
+            // Effect Set Song Speed (Axx).
+            // Per ITTECH, A00 is ignored (no change). Return None
+            // so the effect column stays empty — otherwise the
+            // sequencer would assign tempo = 0, which either stalls
+            // the song or causes an infinite tick loop depending on
+            // the tick-advance path.
             0x01 => {
                 let speed = current.effect_parameter as usize;
-                Some(GlobalEffect::Speed(speed))
+                if speed == 0 {
+                    None
+                } else {
+                    Some(GlobalEffect::Speed(speed))
+                }
             }
             // Effect Jump to Order (Bxx)
             0x02 => Some(GlobalEffect::PositionJump(
@@ -500,12 +514,17 @@ impl ItEffect {
             }
 
             // Effect Set Tempo (Txx)
-            // Txx Set tempo to xx
-            // T0x Tempo slide down
-            // T1x Tempo slide up
+            // T0x = tempo slide down by x
+            // T1x = tempo slide up by x
+            // Txx (xx >= 0x20) = set tempo to xx
             0x14 => {
                 let param = current.effect_parameter;
-                let upper_nibble = param & 0xF0;
+                // Use `>> 4` so `upper_nibble` is the actual nibble
+                // value 0..F, not the byte with its low nibble
+                // cleared. With the previous `& 0xF0`, the match
+                // arm `(1, f)` for T1x was dead — `upper_nibble` was
+                // `0x10`, never `1`.
+                let upper_nibble = param >> 4;
                 let lower_nibble = param & 0x0F;
 
                 match (upper_nibble, lower_nibble) {
