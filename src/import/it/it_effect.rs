@@ -600,9 +600,27 @@ impl ItEffect {
     }
 
     fn parse_it_volume(freq_type: FrequencyType, slot: &PatternSlot) -> Option<TrackImportEffect> {
-        // Set Volume (vxx)
+        // No vol-column command on this row — bail out before any
+        // emit. The IT pattern unpacker writes NO_VOL_COL (0xFF) on
+        // every cell that lacked vol-col bits in the channel mask;
+        // 0xFF is also outside every legal IT vol-col byte (max
+        // valid is 212), so this guard doubles as malformed-input
+        // protection. Without it, every empty cell would emit a
+        // vol-col event and clobber the per-note volume register.
+        if slot.volume > 212 {
+            return None;
+        }
+
+        // Set per-note Volume (vxx) — IT VOLFX_VOLUME, raw 0..64.
+        // Targets the same register a fresh trigger writes when it
+        // loads `sample.default_note_volume`. NOT the channel-level
+        // M-volume; that one is set exclusively by Mxx (effect 0x0D).
+        // The previous mapping to ChannelVolume turned every vNN
+        // into a sticky channel-volume override — and combined with
+        // the missing NO_VOL_COL sentinel, it silenced every cell
+        // without an explicit vol-col.
         if slot.volume <= 64 {
-            return Some(TrackImportEffect::ChannelVolume(slot.volume as f32 / 64.0));
+            return Some(TrackImportEffect::Volume(slot.volume as f32 / 64.0, 0));
         }
 
         // Set Panning (pxx)
@@ -624,23 +642,35 @@ impl ItEffect {
 
         match fx {
             // Fine Volume Slide Up (a0x)
-            0x0 => return Some(TrackImportEffect::VolumeSlide0(param as f32 / 16.0)),
+            //
+            // Schism applies `chan->volume += param * 4` on a 0..256
+            // volume scale — i.e. `param/64` in the 0..1 normalised
+            // scale this importer uses. The vol-column nibble (Ax)
+            // shares this scale with the effect-column DxF; both
+            // must produce identical per-tick deltas. The previous
+            // `/16` was 4× too aggressive on every Ax/Bx/Cx/Dx cell.
+            0x0 => return Some(TrackImportEffect::VolumeSlide0(param as f32 / 64.0)),
             // Fine Volume Slide Down (b0x)
-            0x1 => return Some(TrackImportEffect::VolumeSlide0(-(param as f32) / 16.0)),
+            0x1 => return Some(TrackImportEffect::VolumeSlide0(-(param as f32) / 64.0)),
             // Volume Slide Up (c0x)
-            0x2 => return Some(TrackImportEffect::VolumeSlideN(param as f32 / 16.0)),
+            0x2 => return Some(TrackImportEffect::VolumeSlideN(param as f32 / 64.0)),
             // Volume Slide Down (d0x)
-            0x3 => return Some(TrackImportEffect::VolumeSlideN(-(param as f32) / 16.0)),
+            0x3 => return Some(TrackImportEffect::VolumeSlideN(-(param as f32) / 64.0)),
             // Portamento Down (e0x)
+            //
+            // Schism's vol-col porta sets `mem_pitchslide = 4 * vol`
+            // and then `fx_reg_portamento_down` slides by
+            // `mem_pitchslide * 4` per tick — net 16 * vol per tick
+            // in linear-period units. The same scale convention as
+            // the effect-column Exx/Fxx arms further up. Previous
+            // `/16` was 256× too weak.
+            //
             // The rest of the crate's sign convention is:
             //   PortamentoDown receives positive speed (period grows).
             //   PortamentoUp   receives negative speed (period shrinks).
-            // The main-column Exx / Fxx arms above already follow this;
-            // the vol-column pair had them reversed, which made a
-            // vol-column e0x bend UP and f0x bend DOWN.
-            0x4 => return Some(TrackImportEffect::PortamentoDown((param as f32) / 16.0)),
+            0x4 => return Some(TrackImportEffect::PortamentoDown(16.0 * param as f32)),
             // Portamento Up (f0x)
-            0x5 => return Some(TrackImportEffect::PortamentoUp(-(param as f32) / 16.0)),
+            0x5 => return Some(TrackImportEffect::PortamentoUp(-16.0 * param as f32)),
             // Tone Portamento (g0x)
             0x6 => {
                 let param = match param {
