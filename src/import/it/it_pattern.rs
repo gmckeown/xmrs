@@ -130,10 +130,35 @@ impl ItPattern {
 
                 if mask_variable & 0x01 != 0 {
                     let mut n = *data_iter.next().ok_or(DecodeError::LimitExceeded)?;
-                    // Valid note values: 0-119 (C-0 to B-9), 253 (None), 254 (Cut), 255 (Off)
-                    // Values 120-252 are out of range (possibly OpenMPT extensions or corrupted data)
+                    // Note bytes the IT pattern stream actually
+                    // emits:
+                    //   0..=119  → C-0 to B-9
+                    //   254      → ^^^  (Note Cut)
+                    //   255      → ===  (Note Off)
+                    //
+                    // 253 ("none") is rarely written: the cell
+                    // typically uses the channel-mask bit to say
+                    // "no note here" rather than emitting an
+                    // explicit byte. Everything in 120..=253 is
+                    // out-of-spec for the IT file format proper.
+                    //
+                    // Schism handles unexpected bytes by folding
+                    // them into its internal `NOTE_FADE` state
+                    // (`fmt/it.c:284`: "Impulse Tracker handles
+                    // all unknown notes as fade internally"). We
+                    // do the same here, mapping every byte in
+                    // 120..=252 to `Pitch::Fade`. The previous
+                    // code mapped them to `None`, which silently
+                    // dropped notes some IT-like files emit
+                    // (typically OpenMPT extensions or mildly
+                    // corrupted streams).
+                    //
+                    // The numeric values 252/253/254/255 used
+                    // below are xmrs-internal discriminants of
+                    // the `Pitch` enum, NOT IT file-format codes;
+                    // see `pitch.rs` for the rationale.
                     if n > 119 && n < 253 {
-                        n = 253; // None
+                        n = Pitch::Fade as u8;
                     }
                     let note = n.try_into().map_err(|_| {
                         DecodeError::OtherString("Failed to convert note".to_string())

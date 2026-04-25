@@ -556,9 +556,18 @@ impl ItInstrument {
                     source.instr.dos_filename.clone()
                 };
 
-                for (note, sample) in source.instr.note_sample_keyboard_table.iter() {
-                    if *note < 120 && *sample != 0 {
-                        instr.sample_for_pitch[*note as usize] = Some(*sample as usize - 1);
+                // See comment on the Post2 branch below for the
+                // rationale: input note is the array index, the
+                // tuple is `(output_note, sample)`, and the previous
+                // iter-without-enumerate dropped the input axis.
+                for (input_note, (output_note, sample)) in
+                    source.instr.note_sample_keyboard_table.iter().enumerate()
+                {
+                    if input_note < 120 && *sample != 0 {
+                        instr.sample_for_pitch[input_note] = Some(*sample as usize - 1);
+                        if (*output_note as usize) != input_note && *output_note < 120 {
+                            instr.note_for_pitch[input_note] = Some(*output_note);
+                        }
                     }
                 }
 
@@ -604,9 +613,29 @@ impl ItInstrument {
                     source.instr.dos_filename.clone()
                 };
 
-                for (note, sample) in source.instr.note_sample_keyboard_table.iter() {
-                    if *note < 120 && *sample != 0 {
-                        instr.sample_for_pitch[*note as usize] = Some(*sample as usize - 1);
+                // IT keyboard table: the array is indexed by *input
+                // note* (the key the user presses, 0..119) and each
+                // entry is `(output_note, sample)` where `output_note`
+                // is the absolute pitch the sample will be played at
+                // and `sample` is the 1-based sample index. The
+                // previous code iterated without `enumerate()`, which
+                // both lost the input-note index (using the output
+                // note as table index instead) and dropped the
+                // transposition information entirely. Drum-kit
+                // instruments rely on this remap to make several
+                // input keys trigger the same sample at different
+                // pitches, or different samples at the same pitch.
+                for (input_note, (output_note, sample)) in
+                    source.instr.note_sample_keyboard_table.iter().enumerate()
+                {
+                    if input_note < 120 && *sample != 0 {
+                        instr.sample_for_pitch[input_note] = Some(*sample as usize - 1);
+                        // Skip the identity case so XM/MOD/S3M-style
+                        // instruments stored as IT keep `None` and
+                        // hit the fast path in the player.
+                        if (*output_note as usize) != input_note && *output_note < 120 {
+                            instr.note_for_pitch[input_note] = Some(*output_note);
+                        }
                     }
                 }
 

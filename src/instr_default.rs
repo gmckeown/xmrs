@@ -127,8 +127,40 @@ pub struct InstrDefault {
     pub midi_mute_computer: bool,
 
     // == Sample
+    /// Per-input-note sample selection: `sample_for_pitch[input_note]
+    /// = Some(sample_index)` when this instrument's keyboard table
+    /// directs `input_note` to a specific sample.
+    ///
+    /// IT-format instruments accompany this with a sibling
+    /// `note_for_pitch` table: the IT keyboard layout pairs each
+    /// input note with `(output_note, sample)`. The `output_note`
+    /// half is the note actually played (i.e. the transposition the
+    /// drum-kit author wired in); the `sample` half lands here.
+    /// Other formats (XM/MOD/S3M/Amiga) leave `note_for_pitch` at
+    /// `None` and the playback note is the input note itself.
     #[serde(with = "BigArray")]
     pub sample_for_pitch: [Option<usize>; 120],
+
+    /// Per-input-note transposition map: `note_for_pitch[input_note]
+    /// = Some(output_note)` when this instrument's keyboard table
+    /// remaps `input_note` to a different pitch — IT drum-kit
+    /// instruments use this to make several keys trigger the same
+    /// underlying sample at different pitches, or different samples
+    /// at the same pitch (sample-mapped percussion).
+    ///
+    /// `None` means "play this input note at its own pitch" — the
+    /// identity remap. XM/MOD/S3M leave the entire array at `None`
+    /// since those formats don't have a per-note transposition
+    /// concept; for them the field is inert.
+    ///
+    /// The output note is stored as a raw `u8` (the same scale as
+    /// `Pitch::value()`) rather than a `Pitch`, so the importer
+    /// doesn't need to materialise a `Pitch` per entry. The
+    /// player's `played_pitch_for` helper handles the `Pitch`
+    /// conversion lazily on lookup.
+    #[serde(with = "BigArray")]
+    pub note_for_pitch: [Option<u8>; 120],
+
     pub sample: Vec<Option<Sample>>,
 }
 
@@ -161,6 +193,7 @@ impl Default for InstrDefault {
             midi_mute_computer: false,
 
             sample_for_pitch: [None; 120],
+            note_for_pitch: [None; 120],
             sample: vec![],
         }
     }
