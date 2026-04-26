@@ -5,15 +5,7 @@ use serde::{Deserialize, Serialize};
 
 /// 10 octaves with notes
 #[derive(
-    Serialize,
-    Deserialize,
-    TryFromPrimitive,
-    IntoPrimitive,
-    Copy,
-    Clone,
-    Eq,
-    Hash,
-    PartialEq,
+    Serialize, Deserialize, TryFromPrimitive, IntoPrimitive, Copy, Clone, Eq, Hash, PartialEq,
 )]
 #[repr(u8)]
 pub enum Pitch {

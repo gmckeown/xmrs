@@ -525,14 +525,14 @@ impl ImportMemory {
                                 + self.channel[index][SAMPLE_OFFSET_ADD_HIGH].2;
                         } else {
                             self.channel[index][SAMPLE_OFFSET].2 = *a;
-                            // bug 5: the persistent high-offset
-                            // register (set by the most recent SAx)
-                            // must be OR'd into every Oxx, not only
-                            // the memory-recall branch. Schism does
-                            // the equivalent in `csf_process_effects`:
+                            // The persistent high-offset register
+                            // (set by the most recent SAx) must be
+                            // OR'd into every Oxx, not only the
+                            // memory-recall branch. Schism does the
+                            // equivalent in `csf_process_effects`:
                             // `mem_offset = (mem_offset & ~0xff00) |
-                            // (param << 8);` — the upper 4 bits set
-                            // by SAx survive the OR.
+                            // (param << 8);` — the upper 4 bits
+                            // set by SAx survive the OR.
                             *a += self.channel[index][SAMPLE_OFFSET_ADD_HIGH].2;
                         }
                     }
@@ -802,9 +802,14 @@ impl ImportMemory {
                 for (index_ch, ch_s) in row_s.iter().enumerate() {
                     let ch_d = &mut row_d[index_ch];
 
-                    // no use of GlobalEffects::PositionJump and GlobalEffects::PatternBreak
-                    // due to implementation complexity and risk of infinite loop
-                    // maybe one day someone will have the motivation if a bug too important appears
+                    // GlobalEffects::PositionJump and
+                    // GlobalEffects::PatternBreak are intentionally
+                    // skipped here — implementing them inside the
+                    // memory-merge pass risks unbounded recursion
+                    // when a pattern jumps back into itself. If a
+                    // module surfaces that genuinely needs them, a
+                    // fixed-point iteration with a depth bound can
+                    // be added.
 
                     ch_d.effects = TrackImportEffect::to_track_effects(&ch_s.effects);
                 }

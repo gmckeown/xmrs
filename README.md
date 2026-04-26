@@ -27,33 +27,47 @@ xmrs exposes one editor-friendly data model, regardless of what was
 loaded:
 
 ```text
-Module ─┬─ Instrument ─┬─ InstrDefault ─┬─ Sample (with loop & sustain-loop)
-        │              │                ├─ Envelope (volume / panning / pitch)
-        │              │                ├─ Vibrato
-        │              │                └─ InstrMidi
+Module ─┬─ Instrument ─┬─ InstrDefault ─┬─ VoiceSetup     (envelopes, vibrato, filter, panning)
+        │              │                ├─ InstrumentBehavior  (NNA, DCT, DCA)
+        │              │                ├─ Keyboard       (per-input-note sample + transposition)
+        │              │                ├─ InstrMidi
+        │              │                └─ Sample         (loop & sustain-loop)
         │              ├─ InstrEkn       (Euclidean-rhythm instrument)
         │              ├─ InstrMidi      (MIDI instrument)
         │              ├─ InstrOpl       (Yamaha OPL)
         │              ├─ InstrSid       (MOS6581 SID voice)
         │              └─ InstrRobSid ── InstrSid  (Rob Hubbard-style)
-        └─ Pattern ─ Row ─ TrackUnit ─┬─ TrackEffect
+        └─ Pattern ─ Row ─ TrackUnit ─┬─ CellNote      (Empty, Play(Pitch), KeyOff, NoteCut, NoteFade)
+                                      ├─ TrackEffect
                                       └─ GlobalEffect
 ```
 
-Two companion fields on `Module` describe where the data came from and
-how it should play back:
+`InstrDefault` is split into three orthogonal sub-types so each
+concern lives in one place: [`VoiceSetup`] (how the voice sounds
+once triggered), [`InstrumentBehavior`] (what happens when the same
+instrument retriggers), [`Keyboard`] (per-input-note sample / pitch
+remap, used by IT drum kits).
 
-- **`ModuleFormat`** — purely metadata (`Xm`, `S3m`, `It`, `Mod`,
-  `Unknown`). Useful for the UI and for export.
-- **`PlaybackQuirks`** — orthogonal switches for each historical replay
-  quirk (FT2 pitch-slide overflow, S3M period clamp, arpeggio LUT,
-  pattern-loop resume, tremor state, …). Importers populate them to
-  match the source format; modules authored from scratch default to a
-  clean, quirk-free playback.
+Per-module playback semantics are bundled into a single
+[`CompatibilityProfile`] field on `Module`:
 
-This separation lets an editor compose any subset of historical
-behaviours without having to lie about which tracker the module "came
-from".
+- **`format`** — source-format tag (`Xm`, `S3m`, `It`, `Mod`,
+  `Unknown`). Informational only — no playback decision reads it.
+- **`quirks`** — the orthogonal switches each historical tracker
+  flips: FT2 pitch-slide overflow, S3M period clamp, arpeggio LUT,
+  pattern-loop resume, tremor state, IT vibrato tick-zero, pan
+  reset policy, and so on.
+
+Named constructors materialise the canonical configurations:
+`CompatibilityProfile::ft2()`, `it214()`, `it215()`, `st3()`,
+`pt()`, `modern()` (the editor-friendly default — all quirks off).
+Importers pick the right constructor for the source file and
+overlay any header-driven flags on top.
+
+`Module` also carries a [`Vec<ChannelDefault>`] for per-channel
+initial state (panning, channel volume, mute, surround). S3M's
+`channel_settings` and IT's `initial_channel_pan` /
+`initial_channel_volume` populate it; XM/MOD leave it empty.
 
 ## Loading a file
 

@@ -565,8 +565,8 @@ impl ItInstrument {
                     if *sample != 0 {
                         instr.keyboard.sample_for_pitch[input] = Some(*sample as usize - 1);
                     }
-                    // bug 6: drum-kit transposition. See the Post2
-                    // arm below for the full rationale.
+                    // Drum-kit transposition: see the Post2 arm
+                    // below for the rationale. Same logic.
                     if *output_note < 120 && *output_note as usize != input {
                         instr.keyboard.note_for_pitch[input] = Some(*output_note);
                     }
@@ -623,17 +623,17 @@ impl ItInstrument {
                     if *sample != 0 {
                         instr.keyboard.sample_for_pitch[input] = Some(*sample as usize - 1);
                     }
-                    // bug 6: drum-kit transposition. The IT keyboard
+                    // Drum-kit transposition: the IT keyboard
                     // table entry at index `input` is `(output_note,
-                    // sample)`, meaning "when key `input` fires, play
-                    // `sample` transposed to pitch `output_note`".
-                    // The `output_note` half was previously dropped;
-                    // we capture it here so the player's
-                    // `played_pitch_for` helper can apply the
-                    // transposition at trigger time. `output_note`
-                    // values >= 120 are reserved (keyoff/cut/none/
-                    // fade) and never represent a real pitch — skip
-                    // them so we keep the identity meaning of `None`.
+                    // sample)`, meaning "when key `input` fires,
+                    // play `sample` transposed to pitch
+                    // `output_note`". We capture `output_note` here
+                    // so the player's `played_pitch_for` helper
+                    // can apply the transposition at trigger time.
+                    // `output_note` values >= 120 are reserved
+                    // (keyoff/cut/none/fade) and never represent a
+                    // real pitch — skip them so we keep the
+                    // identity meaning of `None`.
                     if *output_note < 120 && *output_note as usize != input {
                         instr.keyboard.note_for_pitch[input] = Some(*output_note);
                     }
@@ -691,7 +691,8 @@ impl ItInstrument {
                 } else {
                     0.5
                 };
-                instr.voice.random_volume_variation = source.instr.random_volume_variation as f32 / 100.0;
+                instr.voice.random_volume_variation =
+                    source.instr.random_volume_variation as f32 / 100.0;
                 instr.voice.random_pan_variation = source.instr.random_pan_variation as f32 / 100.0;
 
                 instr.voice.initial_filter_cutoff = source.instr.initial_filter_cutoff;

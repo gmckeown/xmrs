@@ -39,6 +39,10 @@ extern crate alloc;
      feature `libm` or feature `micromath`."
 );
 
+/// A typical Note
+pub mod cell_note;
+/// Compatibility profile (named bundles of format + playback quirks).
+pub mod compatibility_profile;
 /// All effects
 pub mod effect;
 /// Envelope with Steroid
@@ -65,10 +69,6 @@ pub mod keyboard;
 pub mod module;
 /// Period Helper
 pub mod period_helper;
-/// A typical Note
-pub mod cell_note;
-/// Compatibility profile (named bundles of format + playback quirks).
-pub mod compatibility_profile;
 
 pub mod pitch;
 /// Sample with Steroid

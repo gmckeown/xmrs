@@ -313,6 +313,13 @@ impl ItModule {
         // on IT (see `it_effect.rs` — `0x16` handler clamps to 128).
         // Only inject when GV is non-default (≠ 128) — if the module
         // plays at full GV there's nothing to bias.
+        //
+        // Per-channel pan / channel volume / mute / surround used to
+        // ride this same path (Xxx / Mxx / S91 on row 0), but they
+        // now live on [`Module::channel_defaults`] — see
+        // [`Self::header_channel_defaults`]. That's the cleaner
+        // header-side data path that doesn't depend on row 0
+        // having a free slot.
         let gv = self.header.global_volume.min(128);
         if gv != 128 {
             if let Some(slot) = row
@@ -323,83 +330,66 @@ impl ItModule {
                 slot.effect_parameter = gv;
             }
         }
+    }
 
-        // --- Initial channel pan (Xxx) per channel. ---
-        // IT stores `initial_channel_pan[ch]` as 0..64 (left..right),
-        // 100 = surround, +128 = disabled channel. Xxx takes a
-        // 0..255 parameter (full 8-bit range, post-fix). Scale 0..64
-        // → 0..252 (multiply by 4, round-friendly on 0..64 inputs
-        // and still cleanly reaches both extremes). Only inject for
-        // channels whose pan differs from the default center (32).
-        //
-        // `pan_separation` (header field, 0..128) scales each
-        // channel's distance from centre: 128 = full separation
-        // (identity), 0 = everything collapses to mono. Applied at
-        // injection time so that static pans respect the author's
-        // chosen stereo width. Dynamic pan effects (Pxx, panning
-        // envelope) bypass this scaling — acceptable because most
-        // IT files use pan_separation as a one-time mix-width knob.
+    /// Build the per-channel default state from IT's header bytes.
+    /// Returns one entry per channel slot in
+    /// `initial_channel_pan` / `initial_channel_volume`. Matches
+    /// what schism's `fmt/it.c` initialises on its `voices` array
+    /// at song load.
+    ///
+    /// The pan byte encodes four states:
+    /// - bit 0x80 set → channel disabled (muted)
+    /// - byte == 100 → IT surround sentinel (S91 mode)
+    /// - 0..64 → regular pan (0 = full left, 64 = full right)
+    /// - other values → ignored (default to centre)
+    ///
+    /// The author's `pan_separation` (header field, 0..128) scales
+    /// each channel's distance from centre at import time:
+    /// 128 = full separation (identity), 0 = everything collapses
+    /// to mono. Dynamic pan effects (Pxx, panning envelope) bypass
+    /// this scaling at runtime — acceptable because most IT files
+    /// use `pan_separation` as a one-time mix-width knob.
+    fn header_channel_defaults(&self) -> Vec<ChannelDefault> {
         let pan_sep = self.header.pan_separation.min(128) as i32;
-        for (ch, &pan_raw) in self.header.initial_channel_pan.iter().enumerate() {
-            if ch >= row.len() {
-                break;
-            }
-            // Disabled channel (+128) — skip entirely. Player-side
-            // "muted" handling is a different axis and the module
-            // loader doesn't touch it.
-            if pan_raw & 0x80 != 0 {
-                continue;
-            }
-            // Surround sentinel (100): the channel should start in
-            // IT's pseudo-stereo "surround" mode (right channel
-            // phase-inverted at mix time). The player implements
-            // this as an S91 effect on the channel. We don't mess
-            // with Xxx here — S91 is orthogonal to pan and the
-            // channel will be re-panned by any later Xxx / Pxx.
-            if pan_raw == 100 {
-                let slot = &mut row[ch];
-                if slot.effect_type == 0 && slot.effect_parameter == 0 {
-                    slot.effect_type = 0x13; // Sxx (special)
-                    slot.effect_parameter = 0x91; // S91 = surround on
-                }
-                continue;
-            }
-            let pan = (pan_raw & 0x7F) as i32;
-            // Scale distance from centre by pan_separation / 128,
-            // then re-centre. With pan_sep == 128 this is a no-op;
-            // with pan_sep == 0 every channel collapses to 32
-            // (centre) and we skip the injection entirely below.
-            let pan = 32 + ((pan - 32) * pan_sep / 128);
-            let pan = pan.clamp(0, 64) as u32;
-            if pan == 32 {
-                continue; // center default (or collapsed to centre)
-            }
-            let slot = &mut row[ch];
-            if slot.effect_type == 0 && slot.effect_parameter == 0 {
-                slot.effect_type = 0x18; // Xxx — Set Panning
-                                         // 0..64 → 0..255 (x * 4 clamped; 64 maps to 255).
-                let p = (pan * 255 / 64).min(255) as u8;
-                slot.effect_parameter = p;
-            }
-        }
+        self.header
+            .initial_channel_pan
+            .iter()
+            .zip(self.header.initial_channel_volume.iter())
+            .map(|(&pan_raw, &vol_raw)| {
+                let mut entry = ChannelDefault::default();
 
-        // --- Initial channel volume (Mxx) per channel. ---
-        // IT stores `initial_channel_volume[ch]` as 0..64; the Mxx
-        // effect takes 0..64 directly.
-        for (ch, &vol) in self.header.initial_channel_volume.iter().enumerate() {
-            if ch >= row.len() {
-                break;
-            }
-            let vol = vol.min(64);
-            if vol == 64 {
-                continue; // full-volume default
-            }
-            let slot = &mut row[ch];
-            if slot.effect_type == 0 && slot.effect_parameter == 0 {
-                slot.effect_type = 0x0D; // Mxx — Set Channel Volume
-                slot.effect_parameter = vol;
-            }
-        }
+                // --- Volume ---
+                // IT stores 0..64; we normalise to 0..1. Full volume
+                // (64) is the default, so leave `None` to keep the
+                // player at its 1.0 default.
+                let vol = vol_raw.min(64);
+                if vol != 64 {
+                    entry.volume = Some(vol as f32 / 64.0);
+                }
+
+                // --- Pan / mute / surround ---
+                if pan_raw & 0x80 != 0 {
+                    // Disabled channel.
+                    entry.muted = true;
+                } else if pan_raw == 100 {
+                    // Surround sentinel.
+                    entry.surround = true;
+                } else {
+                    let pan = (pan_raw & 0x7F) as i32;
+                    // Apply pan_separation: scale distance from
+                    // centre 32 by pan_sep/128, then re-centre.
+                    let pan = 32 + ((pan - 32) * pan_sep / 128);
+                    let pan = pan.clamp(0, 64) as u32;
+                    if pan != 32 {
+                        // Map 0..64 → 0..1.
+                        entry.panning = Some(pan as f32 / 64.0);
+                    }
+                }
+
+                entry
+            })
+            .collect()
     }
 
     pub fn to_module(&self) -> Module {
@@ -436,6 +426,12 @@ impl ItModule {
             pattern: vec![],
             pattern_names: self.pattern_names.clone(),
             channel_names: self.channel_names.clone(),
+            // Per-channel pan / volume / mute / surround defaults
+            // built from the IT header. Replaces the previous
+            // approach of injecting Xxx/Mxx/S91 effects in row 0
+            // of the first-played pattern, which was fragile when
+            // row 0 already carried explicit effects.
+            channel_defaults: self.header_channel_defaults(),
             instrument: vec![],
             // MIDI macros: propagate the IT-file table through to
             // the module so the replayer's macro interpreter can
@@ -489,7 +485,8 @@ impl ItModule {
                 let mut instrument = i.prepare_instrument();
                 if let InstrumentType::Default(instrdef) = &mut instrument.instr_type {
                     // Find first referenced sample and use its vibrato
-                    let first_sample_idx = instrdef.keyboard.sample_for_pitch.iter().find_map(|s| *s);
+                    let first_sample_idx =
+                        instrdef.keyboard.sample_for_pitch.iter().find_map(|s| *s);
                     if let Some(si) = first_sample_idx {
                         if si < vibratos.len() {
                             instrdef.voice.vibrato = vibratos[si];

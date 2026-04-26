@@ -21,7 +21,10 @@ pub use crate::{
     instrument::{Instrument, InstrumentType},
     instrument_behavior::InstrumentBehavior,
     keyboard::Keyboard,
-    module::{MidiMacros, Module, ModuleFormat, Pattern, PlaybackQuirks, Row, MAX_NUM_ROWS},
+    module::{
+        ChannelDefault, MidiMacros, Module, ModuleFormat, PanResetPolicy, Pattern, PlaybackQuirks,
+        Row, MAX_NUM_ROWS,
+    },
     period_helper::{FrequencyType, PeriodHelper},
     pitch::Pitch,
     sample::{LoopType, Sample, SampleDataType},

@@ -212,6 +212,86 @@ pub struct PlaybackQuirks {
     /// when a new note is present retriggers the envelopes.
     /// IT importer sets this from the header.
     pub it_link_gxx_memory: bool,
+
+    /// What to do with the channel's pan when a note retriggers.
+    /// Each tracker generation made a different choice; see
+    /// [`PanResetPolicy`] for the three options. Set by the
+    /// importer to match the source tracker.
+    pub pan_reset_policy: PanResetPolicy,
+
+    /// IT 2.14+ in non-old-effects mode advances the vibrato LFO
+    /// every tick, including tick 0 of a row. XM/MOD/S3M (and IT
+    /// with old-effects on) only tick on non-row ticks. Read in
+    /// conjunction with [`Self::it_old_effects`]: when the latter
+    /// is on, this flag is meaningless because the IT old-effects
+    /// path takes precedence. IT-only — set by `it214()` /
+    /// `it215()`; off elsewhere.
+    pub it_vibrato_ticks_at_row_zero: bool,
+}
+
+/// Per-format policy for the channel's pan when a note retriggers.
+///
+/// The three trackers we model made three different choices:
+///
+/// - **XM/MOD** (`Always`): the channel pan is reset to the sample's
+///   `default_pan` on every retrigger. Pxx slides and pan envelopes
+///   are wiped clean each note.
+/// - **IT** (`OnInstrumentChange`): the pan resets only when the
+///   cell carries an instrument-column change. Pure note retriggers
+///   (ghost notes) inherit the channel's current pan, so in-flight
+///   Pxx slides and pan envelopes survive.
+/// - **S3M** (`Never`): the pan is pure channel state. Note
+///   retriggers leave it alone — the channel's pan was set by the
+///   header's `channel_settings` byte at song start, and only
+///   `Xxx`/`Pxx` effects ever touch it. Schism's
+///   `effects.c:249-253` only writes the instrument's pan when the
+///   sample/instrument carries an explicit `CHN_PANNING` flag, which
+///   in our model corresponds to never resetting from a plain note
+///   retrigger.
+#[derive(Default, Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
+pub enum PanResetPolicy {
+    /// Reset on every retrigger. XM/MOD/PT default.
+    #[default]
+    Always,
+    /// Reset only when the cell has an instrument column. IT default.
+    OnInstrumentChange,
+    /// Never reset on retrigger. S3M default.
+    Never,
+}
+
+/// Initial state of one channel, applied at song start before any
+/// pattern row plays. Used by formats whose header carries
+/// per-channel hints — IT (`initial_channel_pan` / `initial_channel
+/// _volume`) and S3M (`channel_settings`). All fields default to
+/// "no override": `None` for the optional ones, `false` for the
+/// flags. The player applies each property only when the
+/// corresponding field is set.
+#[derive(Default, Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
+pub struct ChannelDefault {
+    /// Initial pan in `[0..1]` (left..right). `None` keeps the
+    /// channel at its centre default.
+    pub panning: Option<f32>,
+
+    /// Initial channel volume in `[0..1]`. `None` keeps the
+    /// channel at full volume (1.0). Mirrors IT's `Mxx` register
+    /// state at song start (header byte
+    /// `initial_channel_volume[ch]`, 0..64 normalised here).
+    pub volume: Option<f32>,
+
+    /// Channel starts muted. S3M's `channel_settings & 0x80` and
+    /// IT's `initial_channel_pan & 0x80` both set this. The player
+    /// suppresses output for the channel until something un-mutes
+    /// it (typically nothing in practice — disabled channels stay
+    /// silent for the whole song).
+    pub muted: bool,
+
+    /// Channel starts in IT's "surround" mode (S91): the right
+    /// output is phase-inverted at mix time, producing a
+    /// pseudo-stereo effect on regular speaker pairs. Set when
+    /// the IT header's `initial_channel_pan[ch]` byte equals 100
+    /// (IT's surround sentinel). Toggled at runtime by S90/S91
+    /// effects.
+    pub surround: bool,
 }
 
 /// SoundTracker Module with Steroid
@@ -238,6 +318,18 @@ pub struct Module {
     pub pattern: Vec<Pattern>,
     pub pattern_names: Vec<String>,
     pub channel_names: Vec<String>,
+    /// Per-channel initial state, applied at song start before any
+    /// pattern row plays. Each entry bundles every property a
+    /// format's header can pre-set on a channel: panning, channel
+    /// volume, mute, surround. Empty means "use defaults for every
+    /// channel" (centre pan, full volume, unmuted, no surround).
+    ///
+    /// Populated by formats whose header carries per-channel hints
+    /// — currently S3M (`channel_settings`) and IT (initial channel
+    /// pan/volume + surround sentinel). XM/MOD leave it empty:
+    /// those formats centre every channel at song start, and any
+    /// per-channel state that follows is encoded in the patterns.
+    pub channel_defaults: Vec<ChannelDefault>,
     pub instrument: Vec<Instrument>,
     /// Optional MIDI-macro table. Populated by the IT importer when
     /// the source file carries an embedded-macros flag; `None` for
@@ -296,6 +388,7 @@ impl Default for Module {
             pattern: vec![],
             pattern_names: vec![],
             channel_names: vec![],
+            channel_defaults: vec![],
             instrument: vec![],
             midi_macros: None,
             mix_volume: 1.0,

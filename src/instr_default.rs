@@ -29,9 +29,7 @@ use alloc::vec::Vec;
 // users that imported them from `instr_default` keep compiling.
 // The canonical location is `instrument_behavior`; these are just
 // convenience aliases.
-pub use crate::instrument_behavior::{
-    DuplicateCheckAction, DuplicateCheckType, NewNoteAction,
-};
+pub use crate::instrument_behavior::{DuplicateCheckAction, DuplicateCheckType, NewNoteAction};
 
 #[derive(Default, Serialize, Deserialize, Debug, Clone)]
 pub struct InstrDefault {

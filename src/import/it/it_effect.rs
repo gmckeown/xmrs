@@ -600,23 +600,22 @@ impl ItEffect {
     }
 
     fn parse_it_volume(freq_type: FrequencyType, slot: &PatternSlot) -> Option<TrackImportEffect> {
-        // bug 1: empty cells must NOT emit a vol-col event. The IT
-        // pattern unpacker writes `NO_VOL_COL` (0xFF) on every cell
-        // missing both vol-col bits. 0xFF is also outside every legal
-        // IT vol-col byte, so this guard doubles as malformed-input
+        // Empty cells must NOT emit a vol-col event. The IT pattern
+        // unpacker writes `NO_VOL_COL` (0xFF) on every cell missing
+        // both vol-col bits. 0xFF is also outside every legal IT
+        // vol-col byte, so this guard doubles as malformed-input
         // protection.
         if slot.volume > 212 {
             return None;
         }
 
-        // bug 2: vol-col 0..64 sets the *per-note* volume (schism's
+        // vol-col 0..64 sets the *per-note* volume (schism's
         // VOLFX_VOLUME → chan->volume), not the channel-level Mxx
-        // register. The xmrs player already routes
-        // `TrackImportEffect::Volume` to `self.volume`, which is the
-        // right sink. Routing this to `ChannelVolume` (the previous
-        // mapping) made every vNN clobber the channel-volume
-        // register; combined with bug 1 it then reset that register
-        // to zero on every empty cell, silencing the channel.
+        // register. The xmrs player routes
+        // `TrackImportEffect::Volume` to `self.volume`, which is
+        // the right sink — routing this to `ChannelVolume` (Mxx)
+        // would let every vNN clobber the channel-volume register
+        // and silence the channel on empty cells.
         if slot.volume <= 64 {
             return Some(TrackImportEffect::Volume(slot.volume as f32 / 64.0, 0));
         }
@@ -639,22 +638,21 @@ impl ItEffect {
         let param = temp % 10;
 
         match fx {
-            // bug 3: vol-col vol-slides scale by /64, not /16.
-            // Schism's `fx_volume_up`/`fx_volume_down` apply
-            // `param * 4` to a 0..256 chan->volume — i.e. param/64
-            // in the 0..1 normalised scale this importer uses. The
-            // same as the effect-column Dxy. Previous /16 factor was
-            // 4× too aggressive on every Ax/Bx/Cx/Dx vol-col cell.
+            // vol-col vol-slides scale by /64, not /16. Schism's
+            // `fx_volume_up`/`fx_volume_down` apply `param * 4` to
+            // a 0..256 chan->volume — i.e. param/64 in the 0..1
+            // normalised scale this importer uses. Same as the
+            // effect-column Dxy.
             0x0 => return Some(TrackImportEffect::VolumeSlide0(param as f32 / 64.0)), // Ax
             0x1 => return Some(TrackImportEffect::VolumeSlide0(-(param as f32) / 64.0)), // Bx
-            0x2 => return Some(TrackImportEffect::VolumeSlideN(param as f32 / 64.0)),  // Cx
+            0x2 => return Some(TrackImportEffect::VolumeSlideN(param as f32 / 64.0)), // Cx
             0x3 => return Some(TrackImportEffect::VolumeSlideN(-(param as f32) / 64.0)), // Dx
 
-            // bug 4: vol-col porta scales by 16*param, not param/16.
-            // Schism stores `mem_pitchslide = 4 * vol` then slides by
-            // `mem_pitchslide * 4` per tick → 16 * vol per tick in
-            // linear-period units (which is xmrs's `Portamento`
-            // input). Previous /16 factor was 256× too weak.
+            // vol-col porta scales by 16*param, not param/16.
+            // Schism stores `mem_pitchslide = 4 * vol` then slides
+            // by `mem_pitchslide * 4` per tick → 16 * vol per tick
+            // in linear-period units (which is xmrs's `Portamento`
+            // input).
             0x4 => return Some(TrackImportEffect::PortamentoDown(16.0 * param as f32)), // Ex
             0x5 => return Some(TrackImportEffect::PortamentoUp(-16.0 * param as f32)),  // Fx
             // Tone Portamento (g0x)

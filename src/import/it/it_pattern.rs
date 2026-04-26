@@ -17,7 +17,6 @@ use crate::import::patternslot::PatternSlot;
 /// and the parser cannot tell them apart.
 pub(crate) const NO_VOL_COL: u8 = 0xFF;
 
-
 /// Structure representing a pattern in a musical tracker format.
 /// Note: The entire `Pattern` struct is limited to a maximum size of 0xFFFF (64 kilobytes).
 #[derive(Deserialize, Debug, Default)]
@@ -81,10 +80,10 @@ impl ItPattern {
         if self.row_count <= 0 {
             return Ok(vec![]);
         }
-        // bug 1: every cell that doesn't carry an explicit vol-col
-        // (channel mask bits 0x04 + 0x40 both clear) must be tagged
-        // with `NO_VOL_COL` rather than 0 — IT vol-column 0 is itself
-        // a valid command (per-note volume = 0).
+        // Every cell that doesn't carry an explicit vol-col
+        // (channel mask bits 0x04 + 0x40 both clear) must be
+        // tagged with `NO_VOL_COL` rather than 0 — IT vol-column 0
+        // is itself a valid command (per-note volume = 0).
         let no_vol_default = PatternSlot {
             volume: NO_VOL_COL,
             ..PatternSlot::default()

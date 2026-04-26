@@ -576,18 +576,23 @@ impl S3mModule {
         Some((channel, slot, &packed_data[k..]))
     }
 
-    /// Inject S3M header defaults (channel panning from `channel_settings`,
-    /// global volume) as effects on row 0 of the first pattern that playback
-    /// will start with. This avoids renumbering patterns/positions — which
-    /// would break any `goto(position, …)` call made by the player.
+    /// Inject S3M header defaults (global volume) as effects on
+    /// row 0 of the first pattern that playback will start with.
+    /// This avoids renumbering patterns/positions — which would
+    /// break any `goto(position, …)` call made by the player.
     ///
-    /// Panning is written as `Xxx` (effect 24) on the affected PCM channel.
-    /// Global volume is written as `Vxx` (effect 22) on any channel that
-    /// hasn't already been used on row 0. If every slot on that row already
-    /// carries an effect, the default is silently dropped — better to lose
-    /// a default than overwrite explicit user data. Mirrors real tracker
-    /// behaviour: state is established at song-start; a `goto` mid-song
-    /// forfeits that state, which is correct.
+    /// Global volume is written as `Vxx` (effect 22) on any channel
+    /// that hasn't already been used on row 0. If every slot on
+    /// that row already carries an effect, the default is silently
+    /// dropped — better to lose a default than overwrite explicit
+    /// user data. Mirrors real tracker behaviour: state is
+    /// established at song-start; a `goto` mid-song forfeits that
+    /// state, which is correct.
+    ///
+    /// Per-channel panning used to ride the same path
+    /// (`Xxx` on row 0), but it now lives on
+    /// [`Module::channel_defaults`] — a clean header-side
+    /// data path that doesn't depend on row 0 having a free slot.
     fn inject_header_defaults(&self, patterns: &mut [Vec<Vec<PatternSlot>>]) {
         let first_pat = match self.positions.first() {
             Some(&p) => p as usize,
@@ -597,23 +602,6 @@ impl S3mModule {
             Some(r) if !r.is_empty() => r,
             _ => return,
         };
-
-        // Default panning from `channel_settings` — PCM channels only.
-        for (ch, &s) in self.header.channel_settings.iter().enumerate() {
-            if ch >= row.len() {
-                break;
-            }
-            // Skip disabled, Adlib, or fully-unused entries.
-            if s & 0x80 != 0 || s & 0x10 != 0 || s == 0xFF {
-                continue;
-            }
-            // Only inject into slots that have no explicit effect yet.
-            // 0x40 / 0xC0 in /256 ≈ soft-L / soft-R (ST3 convention).
-            if row[ch].effect_type == 0 && row[ch].effect_parameter == 0 {
-                row[ch].effect_type = 24; // Xxx — Set panning
-                row[ch].effect_parameter = if s & 0x08 != 0 { 0xC0 } else { 0x40 };
-            }
-        }
 
         // Global volume (Vxx = effect 22). Any channel can carry a global
         // effect; pick the first free slot.
@@ -627,6 +615,48 @@ impl S3mModule {
                 slot.effect_parameter = gv;
             }
         }
+    }
+
+    /// Build the per-channel default state from S3M's
+    /// `channel_settings` block. Returns a vector aligned on the
+    /// channel slots declared by the file. Each entry's pan and
+    /// mute flag come straight from the channel byte.
+    ///
+    /// Mapping mirrors schism's `fmt/s3m.c:208-213`:
+    /// - bit 0x80 → channel disabled (muted)
+    /// - bit 0x10 → Adlib (no PCM pan; left at default)
+    /// - bit 0x08 set → R-side default (~0.78)
+    /// - bit 0x08 clear → L-side default (~0.22)
+    fn header_channel_defaults(&self) -> Vec<ChannelDefault> {
+        self.header
+            .channel_settings
+            .iter()
+            .map(|&s| {
+                if s == 0xFF {
+                    // Unused channel slot — leave fully default.
+                    ChannelDefault::default()
+                } else if s & 0x80 != 0 {
+                    // Disabled channel.
+                    ChannelDefault {
+                        muted: true,
+                        ..ChannelDefault::default()
+                    }
+                } else if s & 0x10 != 0 {
+                    // Adlib — no PCM pan.
+                    ChannelDefault::default()
+                } else if s & 0x08 != 0 {
+                    ChannelDefault {
+                        panning: Some(0xC0 as f32 / 256.0), // soft right
+                        ..ChannelDefault::default()
+                    }
+                } else {
+                    ChannelDefault {
+                        panning: Some(0x40 as f32 / 256.0), // soft left
+                        ..ChannelDefault::default()
+                    }
+                }
+            })
+            .collect()
     }
 
     pub fn to_module(&self) -> Module {
@@ -698,6 +728,8 @@ impl S3mModule {
         // were materialised.
         let mut patterns_for_unpack = self.patterns.clone();
         self.inject_header_defaults(&mut patterns_for_unpack);
+
+        module.channel_defaults = self.header_channel_defaults();
 
         module.pattern_order = orders_helper::parse_orders(&self.positions);
 

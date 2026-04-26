@@ -37,7 +37,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::module::{ModuleFormat, PlaybackQuirks};
+use crate::module::{ModuleFormat, PanResetPolicy, PlaybackQuirks};
 
 /// Bundles a module's source format with the playback quirks that
 /// reproduce that format's authoring tracker. Use the named
@@ -82,6 +82,7 @@ impl CompatibilityProfile {
                 k00_eats_note: true,
                 volcol_b_advances_vibrato: true,
                 e60_leaks_to_next_pattern: true,
+                pan_reset_policy: PanResetPolicy::Always,
                 ..PlaybackQuirks::default()
             },
         }
@@ -98,6 +99,8 @@ impl CompatibilityProfile {
             format: ModuleFormat::It,
             quirks: PlaybackQuirks {
                 tremor_state_persists: true,
+                pan_reset_policy: PanResetPolicy::OnInstrumentChange,
+                it_vibrato_ticks_at_row_zero: true,
                 ..PlaybackQuirks::default()
             },
         }
@@ -124,6 +127,7 @@ impl CompatibilityProfile {
                 allow_zero_period: true,
                 pattern_loop_resumes: true,
                 tremor_state_persists: true,
+                pan_reset_policy: PanResetPolicy::Never,
                 ..PlaybackQuirks::default()
             },
         }

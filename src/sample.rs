@@ -349,8 +349,10 @@ mod tests {
 
     #[test]
     fn seek_no_loop_past_end_is_none() {
-        // Key case: this was the "string never stops" bug. Past-end on a
-        // non-looping sample must report None, not clamp to len-1.
+        // Past-end on a non-looping sample must report None, not
+        // clamp to len-1 — letting it clamp would trap the playback
+        // position on the last frame and the voice would never
+        // self-terminate.
         let s = make_sample(10, LoopType::No, 0, 0);
         assert_eq!(s.seek(0, false), Some(0));
         assert_eq!(s.seek(9, false), Some(9));

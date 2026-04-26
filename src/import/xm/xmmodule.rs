@@ -87,6 +87,9 @@ impl XmModule {
             pattern: vec![],
             pattern_names: vec![],
             channel_names: vec![],
+            // XM has no per-channel defaults in its header — every
+            // channel starts centred and unmuted.
+            channel_defaults: vec![],
             instrument: vec![],
             // XM has no MIDI-macro concept — the feature is
             // IT-specific.
