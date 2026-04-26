@@ -33,6 +33,7 @@ fn main() -> Result<(), EncodeError> {
     let _ = SidModule::get_sid_sanxion_song_1();
     let _ = SidModule::get_sid_sanxion_song_2();
     let _ = SidModule::get_sid_spellbound();
+    let _ = SidModule::get_sid_thrust();
 
     Ok(())
 }
