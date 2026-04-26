@@ -99,8 +99,14 @@ impl XmModule {
             // XM has no MIDI-macro concept — the feature is
             // IT-specific.
             midi_macros: None,
-            // XM has no mix-volume concept either; 1.0 = identity.
-            mix_volume: 1.0,
+            // XM has no mix-volume byte in its header. Schism
+            // (`fmt/xm.c:885`) hard-codes `mixing_volume = 48` for
+            // every imported XM, which normalised gives 48/128 =
+            // 0.375. We mirror that so the player's mixer chain
+            // applies the same headroom for XM as for IT — the same
+            // engine-side `MIXING_ATTENUATION` shift expects this
+            // pre-attenuation as input.
+            mix_volume: 48.0 / 128.0,
         };
 
         let patterns: Vec<Vec<Vec<PatternSlot>>> =

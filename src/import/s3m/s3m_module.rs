@@ -663,6 +663,17 @@ impl S3mModule {
         module.name = self.header.title.clone();
         module.comment = "XmRs reader".to_string();
         module.format = ModuleFormat::S3m;
+        // S3M's master-volume byte is encoded with bit 7 = stereo
+        // flag and bits 6..0 = mixing volume in 0..127 range. Schism
+        // (`fmt/s3m.c:166`) reads the same byte and stores it as
+        // `mixing_volume`. We mirror that: strip bit 7 and normalise
+        // by 128 to land in the same [0..1] domain the IT importer
+        // uses, so the player's mix chain treats S3M and IT
+        // uniformly. (We deliberately skip schism's optional ST3-era
+        // rescaling at `fmt/s3m.c:233` — it only applies to a
+        // legacy variant and would silently change levels for
+        // mainstream S3Ms.)
+        module.mix_volume = ((self.header.master_volume & 0x7F) as f32) / 128.0;
         // Canonical ST3 replay quirks. Editor-authored modules that
         // leave `quirks` at default get MOD-like clean playback; the
         // S3M importer opts in to the four knobs that define ST3's

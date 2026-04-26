@@ -556,18 +556,19 @@ impl ItInstrument {
                     source.instr.dos_filename.clone()
                 };
 
-                // See comment on the Post2 branch below for the
-                // rationale: input note is the array index, the
-                // tuple is `(output_note, sample)`, and the previous
-                // iter-without-enumerate dropped the input axis.
-                for (input_note, (output_note, sample)) in
+                for (input, (output_note, sample)) in
                     source.instr.note_sample_keyboard_table.iter().enumerate()
                 {
-                    if input_note < 120 && *sample != 0 {
-                        instr.sample_for_pitch[input_note] = Some(*sample as usize - 1);
-                        if (*output_note as usize) != input_note && *output_note < 120 {
-                            instr.note_for_pitch[input_note] = Some(*output_note);
-                        }
+                    if input >= 120 {
+                        break;
+                    }
+                    if *sample != 0 {
+                        instr.sample_for_pitch[input] = Some(*sample as usize - 1);
+                    }
+                    // drum-kit transposition. See the Post2
+                    // arm below for the full rationale.
+                    if *output_note < 120 && *output_note as usize != input {
+                        instr.note_for_pitch[input] = Some(*output_note);
                     }
                 }
 
@@ -613,29 +614,28 @@ impl ItInstrument {
                     source.instr.dos_filename.clone()
                 };
 
-                // IT keyboard table: the array is indexed by *input
-                // note* (the key the user presses, 0..119) and each
-                // entry is `(output_note, sample)` where `output_note`
-                // is the absolute pitch the sample will be played at
-                // and `sample` is the 1-based sample index. The
-                // previous code iterated without `enumerate()`, which
-                // both lost the input-note index (using the output
-                // note as table index instead) and dropped the
-                // transposition information entirely. Drum-kit
-                // instruments rely on this remap to make several
-                // input keys trigger the same sample at different
-                // pitches, or different samples at the same pitch.
-                for (input_note, (output_note, sample)) in
+                for (input, (output_note, sample)) in
                     source.instr.note_sample_keyboard_table.iter().enumerate()
                 {
-                    if input_note < 120 && *sample != 0 {
-                        instr.sample_for_pitch[input_note] = Some(*sample as usize - 1);
-                        // Skip the identity case so XM/MOD/S3M-style
-                        // instruments stored as IT keep `None` and
-                        // hit the fast path in the player.
-                        if (*output_note as usize) != input_note && *output_note < 120 {
-                            instr.note_for_pitch[input_note] = Some(*output_note);
-                        }
+                    if input >= 120 {
+                        break;
+                    }
+                    if *sample != 0 {
+                        instr.sample_for_pitch[input] = Some(*sample as usize - 1);
+                    }
+                    // drum-kit transposition. The IT keyboard
+                    // table entry at index `input` is `(output_note,
+                    // sample)`, meaning "when key `input` fires, play
+                    // `sample` transposed to pitch `output_note`".
+                    // The `output_note` half was previously dropped;
+                    // we capture it here so the player's
+                    // `played_pitch_for` helper can apply the
+                    // transposition at trigger time. `output_note`
+                    // values >= 120 are reserved (keyoff/cut/none/
+                    // fade) and never represent a real pitch — skip
+                    // them so we keep the identity meaning of `None`.
+                    if *output_note < 120 && *output_note as usize != input {
+                        instr.note_for_pitch[input] = Some(*output_note);
                     }
                 }
 

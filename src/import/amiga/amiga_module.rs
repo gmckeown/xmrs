@@ -159,6 +159,12 @@ impl AmigaModule {
         module.comment = "XmRs reader".to_string();
         module.format = ModuleFormat::Mod;
         module.frequency_type = FrequencyType::AmigaFrequencies;
+        // MOD has no mix-volume byte. Schism initialises the mixer
+        // chain at `mixing_volume = 48` (`csndfile.c:55`,
+        // `fmt/xm.c:885`) — same default as XM. We mirror that so
+        // every format feeds the player's mixer with the same
+        // pre-attenuated level.
+        module.mix_volume = 48.0 / 128.0;
         module.default_tempo = 6;
         module.default_bpm = 125;
         module.pattern_order = vec![self.positions[..usize::from(self.song_length)]

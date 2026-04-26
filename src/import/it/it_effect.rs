@@ -641,14 +641,13 @@ impl ItEffect {
         let param = temp % 10;
 
         match fx {
-            // Fine Volume Slide Up (a0x)
-            //
             // Schism applies `chan->volume += param * 4` on a 0..256
             // volume scale — i.e. `param/64` in the 0..1 normalised
             // scale this importer uses. The vol-column nibble (Ax)
             // shares this scale with the effect-column DxF; both
             // must produce identical per-tick deltas. The previous
             // `/16` was 4× too aggressive on every Ax/Bx/Cx/Dx cell.
+            // Fine Volume Slide Up (a0x)
             0x0 => return Some(TrackImportEffect::VolumeSlide0(param as f32 / 64.0)),
             // Fine Volume Slide Down (b0x)
             0x1 => return Some(TrackImportEffect::VolumeSlide0(-(param as f32) / 64.0)),
@@ -656,8 +655,7 @@ impl ItEffect {
             0x2 => return Some(TrackImportEffect::VolumeSlideN(param as f32 / 64.0)),
             // Volume Slide Down (d0x)
             0x3 => return Some(TrackImportEffect::VolumeSlideN(-(param as f32) / 64.0)),
-            // Portamento Down (e0x)
-            //
+
             // Schism's vol-col porta sets `mem_pitchslide = 4 * vol`
             // and then `fx_reg_portamento_down` slides by
             // `mem_pitchslide * 4` per tick — net 16 * vol per tick
@@ -668,6 +666,8 @@ impl ItEffect {
             // The rest of the crate's sign convention is:
             //   PortamentoDown receives positive speed (period grows).
             //   PortamentoUp   receives negative speed (period shrinks).
+
+            // Portamento Down (e0x)
             0x4 => return Some(TrackImportEffect::PortamentoDown(16.0 * param as f32)),
             // Portamento Up (f0x)
             0x5 => return Some(TrackImportEffect::PortamentoUp(-16.0 * param as f32)),
