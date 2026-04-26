@@ -411,6 +411,42 @@ impl XmInstrument {
                     ve.loop_enabled = xmi.volume_flag & 0b0100 != 0;
                     ve.loop_start_point = xmi.volume_loop_start_point as usize;
                     ve.loop_end_point = xmi.volume_loop_end_point as usize;
+
+                    // Schism's `fmt/xm.c:703-712` trick — applied here
+                    // for parity. FT2 starts the volume fadeout in
+                    // parallel with the envelope's release section
+                    // (key-off opens both the gate and the fade
+                    // simultaneously). The replayer's rule for "fade
+                    // immediately on key-off" is
+                    //   `env.loop_enabled && volume_fadeout > 0`,
+                    // which mirrors schism's `if penv->fadeout &&
+                    // (penv->flags & ENV_VOLLOOP)` in
+                    // `effects.c:166`. To opt XM into that branch,
+                    // schism collapses any missing-or-degenerate loop
+                    // to a one-point loop at the last node, then
+                    // forces ENV_VOLLOOP on. We do the same: the
+                    // synthetic loop holds the envelope at its tail
+                    // (no audible difference vs. an envelope without
+                    // a loop) and lets the player engage fadeout at
+                    // key-off, the way FT2 does.
+                    if ve.enabled && !ve.point.is_empty() {
+                        let last = ve.point.len() - 1;
+                        if !ve.loop_enabled || ve.loop_start_point == ve.loop_end_point {
+                            ve.loop_start_point = last;
+                            ve.loop_end_point = last;
+                        }
+                        ve.loop_enabled = true;
+                        // Sustain may have come in disabled: schism
+                        // pins it to the last node too so the
+                        // sustain-vs-release branch in
+                        // `_process_envelope` always has valid
+                        // indices to read.
+                        if !ve.sustain_enabled {
+                            ve.sustain_start_point = last;
+                            ve.sustain_end_point = last;
+                        }
+                        ve.sustain_enabled = true;
+                    }
                 }
 
                 // copy panning envelope data
