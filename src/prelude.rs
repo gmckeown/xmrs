@@ -9,6 +9,7 @@
 ///
 pub use crate::{
     cell_note::CellNote,
+    compatibility_profile::CompatibilityProfile,
     effect::{GlobalEffect, MidiMacroType, NoteRetrigOperator, TrackEffect},
     envelope::{Envelope, EnvelopePoint},
     instr_default::{DuplicateCheckAction, DuplicateCheckType, InstrDefault, NewNoteAction},
@@ -18,11 +19,14 @@ pub use crate::{
     instr_robsid::InstrRobSid,
     instr_sid::InstrSid,
     instrument::{Instrument, InstrumentType},
+    instrument_behavior::InstrumentBehavior,
+    keyboard::Keyboard,
     module::{MidiMacros, Module, ModuleFormat, Pattern, PlaybackQuirks, Row, MAX_NUM_ROWS},
     period_helper::{FrequencyType, PeriodHelper},
     pitch::Pitch,
     sample::{LoopType, Sample, SampleDataType},
     track_unit::TrackUnit,
     vibrato::Vibrato,
+    voice_setup::VoiceSetup,
     waveform::Waveform,
 };

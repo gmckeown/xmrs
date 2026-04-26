@@ -563,16 +563,16 @@ impl ItInstrument {
                         break;
                     }
                     if *sample != 0 {
-                        instr.sample_for_pitch[input] = Some(*sample as usize - 1);
+                        instr.keyboard.sample_for_pitch[input] = Some(*sample as usize - 1);
                     }
-                    // drum-kit transposition. See the Post2
+                    // bug 6: drum-kit transposition. See the Post2
                     // arm below for the full rationale.
                     if *output_note < 120 && *output_note as usize != input {
-                        instr.note_for_pitch[input] = Some(*output_note);
+                        instr.keyboard.note_for_pitch[input] = Some(*output_note);
                     }
                 }
 
-                instr.volume_envelope = source.volume_envelope.to_envelope_struct(
+                instr.voice.volume_envelope = source.volume_envelope.to_envelope_struct(
                     source.instr.flags,
                     source.instr.loop_start,
                     source.instr.loop_end,
@@ -581,8 +581,8 @@ impl ItInstrument {
                 );
                 // Guard against degenerate envelopes (0 or 1 point, out-of-
                 // range loop/sustain indices): fall back to disabled.
-                if !instr.volume_envelope.is_valid() {
-                    instr.volume_envelope = Envelope::default();
+                if !instr.voice.volume_envelope.is_valid() {
+                    instr.voice.volume_envelope = Envelope::default();
                 }
 
                 // IT fadeout: Schism / OpenMPT run a 16-bit counter
@@ -590,12 +590,12 @@ impl ItInstrument {
                 // `fadeout` value every tick. Time to fully fade =
                 // 65536 / fadeout ticks. The player's
                 // `volume_fadeout` register starts at 1.0 and is
-                // decremented by `instr.volume_fadeout` per tick, so
+                // decremented by `instr.voice.volume_fadeout` per tick, so
                 // the matching scale is `fadeout / 65536`. The
                 // previous `/32768` formula faded notes twice as
                 // fast as reference implementations — audible on any
                 // IT module with NNA=Fade or a sustained tail.
-                instr.volume_fadeout = source.instr.fadeout as f32 / 65536.0;
+                instr.voice.volume_fadeout = source.instr.fadeout as f32 / 65536.0;
 
                 let nna = match source.instr.nna {
                     1 => NewNoteAction::Continue,
@@ -604,7 +604,7 @@ impl ItInstrument {
                     _ => NewNoteAction::NoteCut,
                 };
 
-                instr.duplicate_check = DuplicateCheckType::Off(nna);
+                instr.behavior.duplicate_check = DuplicateCheckType::Off(nna);
                 muted = source.instr.dnc == 0;
             }
             ItInstrument::Post2(source) => {
@@ -621,9 +621,9 @@ impl ItInstrument {
                         break;
                     }
                     if *sample != 0 {
-                        instr.sample_for_pitch[input] = Some(*sample as usize - 1);
+                        instr.keyboard.sample_for_pitch[input] = Some(*sample as usize - 1);
                     }
-                    // drum-kit transposition. The IT keyboard
+                    // bug 6: drum-kit transposition. The IT keyboard
                     // table entry at index `input` is `(output_note,
                     // sample)`, meaning "when key `input` fires, play
                     // `sample` transposed to pitch `output_note`".
@@ -635,26 +635,26 @@ impl ItInstrument {
                     // fade) and never represent a real pitch — skip
                     // them so we keep the identity meaning of `None`.
                     if *output_note < 120 && *output_note as usize != input {
-                        instr.note_for_pitch[input] = Some(*output_note);
+                        instr.keyboard.note_for_pitch[input] = Some(*output_note);
                     }
                 }
 
-                instr.volume_envelope = source.volume_envelope.to_envelope_struct();
-                instr.pan_envelope = source.panning_envelope.to_envelope_struct_signed();
-                instr.pitch_envelope = source.pitch_envelope.to_envelope_struct_signed();
-                instr.pitch_envelope_as_low_pass_filter =
+                instr.voice.volume_envelope = source.volume_envelope.to_envelope_struct();
+                instr.voice.pan_envelope = source.panning_envelope.to_envelope_struct_signed();
+                instr.voice.pitch_envelope = source.pitch_envelope.to_envelope_struct_signed();
+                instr.voice.pitch_envelope_as_low_pass_filter =
                     source.pitch_envelope.flags & 0b1000_0000 != 0;
 
                 // Guard against degenerate envelopes (0 or 1 point, out-of-
                 // range loop/sustain indices).
-                if !instr.volume_envelope.is_valid() {
-                    instr.volume_envelope = Envelope::default();
+                if !instr.voice.volume_envelope.is_valid() {
+                    instr.voice.volume_envelope = Envelope::default();
                 }
-                if !instr.pan_envelope.is_valid() {
-                    instr.pan_envelope = Envelope::default();
+                if !instr.voice.pan_envelope.is_valid() {
+                    instr.voice.pan_envelope = Envelope::default();
                 }
-                if !instr.pitch_envelope.is_valid() {
-                    instr.pitch_envelope = Envelope::default();
+                if !instr.voice.pitch_envelope.is_valid() {
+                    instr.voice.pitch_envelope = Envelope::default();
                 }
 
                 let nna = match source.instr.nna {
@@ -670,7 +670,7 @@ impl ItInstrument {
                     _ => DuplicateCheckAction::NoteCut(nna),
                 };
 
-                instr.duplicate_check = match source.instr.duplicate_check_type {
+                instr.behavior.duplicate_check = match source.instr.duplicate_check_type {
                     1 => DuplicateCheckType::Note(dca),
                     2 => DuplicateCheckType::Sample(dca),
                     3 => DuplicateCheckType::Instrument(dca),
@@ -678,24 +678,24 @@ impl ItInstrument {
                 };
 
                 // See note on fadeout scale at the earlier site.
-                instr.volume_fadeout = source.instr.fadeout as f32 / 65536.0;
-                instr.pitch_pan_center = source
+                instr.voice.volume_fadeout = source.instr.fadeout as f32 / 65536.0;
+                instr.voice.pitch_pan_center = source
                     .instr
                     .pitch_pan_center
                     .try_into()
                     .unwrap_or(Pitch::C4);
-                instr.pitch_pan_separation = source.instr.pitch_pan_separation as f32 / 32.0;
-                instr.global_volume = source.instr.global_volume as f32 / 128.0;
-                instr.default_pan = if source.instr.default_pan & 0b1000_0000 == 0 {
+                instr.voice.pitch_pan_separation = source.instr.pitch_pan_separation as f32 / 32.0;
+                instr.voice.volume = source.instr.global_volume as f32 / 128.0;
+                instr.voice.default_pan = if source.instr.default_pan & 0b1000_0000 == 0 {
                     source.instr.default_pan as f32 / 64.0
                 } else {
                     0.5
                 };
-                instr.random_volume_variation = source.instr.random_volume_variation as f32 / 100.0;
-                instr.random_pan_variation = source.instr.random_pan_variation as f32 / 100.0;
+                instr.voice.random_volume_variation = source.instr.random_volume_variation as f32 / 100.0;
+                instr.voice.random_pan_variation = source.instr.random_pan_variation as f32 / 100.0;
 
-                instr.initial_filter_cutoff = source.instr.initial_filter_cutoff;
-                instr.initial_filter_resonance = source.instr.initial_filter_resonance;
+                instr.voice.initial_filter_cutoff = source.instr.initial_filter_cutoff;
+                instr.voice.initial_filter_resonance = source.instr.initial_filter_resonance;
 
                 instr.midi = InstrMidi {
                     muted: true,

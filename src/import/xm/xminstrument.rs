@@ -124,52 +124,52 @@ impl XmInstrDefault {
         match &i.instr_type {
             InstrumentType::Default(id) => {
                 for i in 0..96 {
-                    xmid.sample_for_pitchs[i] = match id.sample_for_pitch[i] {
+                    xmid.sample_for_pitchs[i] = match id.keyboard.sample_for_pitch[i] {
                         Some(sample) => sample as u8,
                         None => 0,
                     };
                 }
-                xmid.volume_envelope = Self::from_envelope(&id.volume_envelope);
-                xmid.number_of_volume_points = id.volume_envelope.point.len() as u8;
-                xmid.volume_sustain_point = id.volume_envelope.sustain_start_point as u8;
-                xmid.volume_loop_start_point = id.volume_envelope.loop_start_point as u8;
-                xmid.volume_loop_end_point = id.volume_envelope.loop_end_point as u8;
-                if id.volume_envelope.enabled {
+                xmid.volume_envelope = Self::from_envelope(&id.voice.volume_envelope);
+                xmid.number_of_volume_points = id.voice.volume_envelope.point.len() as u8;
+                xmid.volume_sustain_point = id.voice.volume_envelope.sustain_start_point as u8;
+                xmid.volume_loop_start_point = id.voice.volume_envelope.loop_start_point as u8;
+                xmid.volume_loop_end_point = id.voice.volume_envelope.loop_end_point as u8;
+                if id.voice.volume_envelope.enabled {
                     xmid.volume_flag |= 0b0001;
                 }
-                if id.volume_envelope.sustain_enabled {
+                if id.voice.volume_envelope.sustain_enabled {
                     xmid.volume_flag |= 0b0010;
                 }
-                if id.volume_envelope.loop_enabled {
+                if id.voice.volume_envelope.loop_enabled {
                     xmid.volume_flag |= 0b0100;
                 }
 
-                xmid.panning_envelope = Self::from_envelope(&id.pan_envelope);
-                xmid.number_of_panning_points = id.pan_envelope.point.len() as u8;
-                xmid.panning_sustain_point = id.pan_envelope.sustain_start_point as u8;
-                xmid.panning_loop_start_point = id.pan_envelope.loop_start_point as u8;
-                xmid.panning_loop_end_point = id.pan_envelope.loop_end_point as u8;
-                if id.pan_envelope.enabled {
+                xmid.panning_envelope = Self::from_envelope(&id.voice.pan_envelope);
+                xmid.number_of_panning_points = id.voice.pan_envelope.point.len() as u8;
+                xmid.panning_sustain_point = id.voice.pan_envelope.sustain_start_point as u8;
+                xmid.panning_loop_start_point = id.voice.pan_envelope.loop_start_point as u8;
+                xmid.panning_loop_end_point = id.voice.pan_envelope.loop_end_point as u8;
+                if id.voice.pan_envelope.enabled {
                     xmid.panning_flag |= 0b0001;
                 }
-                if id.pan_envelope.sustain_enabled {
+                if id.voice.pan_envelope.sustain_enabled {
                     xmid.panning_flag |= 0b0010;
                 }
-                if id.pan_envelope.loop_enabled {
+                if id.voice.pan_envelope.loop_enabled {
                     xmid.panning_flag |= 0b0100;
                 }
 
-                xmid.vibrato_type = match id.vibrato.waveform {
+                xmid.vibrato_type = match id.voice.vibrato.waveform {
                     Waveform::TranslatedSquare => 1,
                     Waveform::TranslatedRampUp => 2,
                     Waveform::TranslatedRampDown => 3,
                     _ => 0,
                 };
-                xmid.vibrato_sweep = (id.vibrato.sweep * 255.0) as u8;
-                xmid.vibrato_depth = (id.vibrato.depth * 15.0 * 2.0) as u8;
-                xmid.vibrato_rate = (id.vibrato.speed * 63.0 * 4.0) as u8;
+                xmid.vibrato_sweep = (id.voice.vibrato.sweep * 255.0) as u8;
+                xmid.vibrato_depth = (id.voice.vibrato.depth * 15.0 * 2.0) as u8;
+                xmid.vibrato_rate = (id.voice.vibrato.speed * 63.0 * 4.0) as u8;
 
-                xmid.volume_fadeout = (id.volume_fadeout * 4095.0 * 4.0 * 2.0 + 0.5) as u16;
+                xmid.volume_fadeout = (id.voice.volume_fadeout * 4095.0 * 4.0 * 2.0 + 0.5) as u16;
 
                 xmid.midi_on = if id.midi.muted { 0 } else { 1 };
                 xmid.midi_channel = id.midi.channel;
@@ -391,17 +391,17 @@ impl XmInstrument {
                     sample_for_pitch[i] = Some(val as usize);
                 }
                 let mut id = InstrDefault::default();
-                id.volume_envelope = Self::envelope_from_slice(&xmi.volume_envelope[0..num_vol_pt])
+                id.voice.volume_envelope = Self::envelope_from_slice(&xmi.volume_envelope[0..num_vol_pt])
                     .unwrap_or_default();
-                id.sample_for_pitch = sample_for_pitch;
-                id.pan_envelope = Self::envelope_from_slice(&xmi.panning_envelope[0..num_pan_pt])
+                id.keyboard.sample_for_pitch = sample_for_pitch;
+                id.voice.pan_envelope = Self::envelope_from_slice(&xmi.panning_envelope[0..num_pan_pt])
                     .unwrap_or_default();
-                id.volume_fadeout = xmi.volume_fadeout as f32 / 4095.0 / 4.0 / 2.0;
+                id.voice.volume_fadeout = xmi.volume_fadeout as f32 / 4095.0 / 4.0 / 2.0;
                 id.sample = sample;
 
                 // copy volume envelope data
                 {
-                    let ve = &mut id.volume_envelope;
+                    let ve = &mut id.voice.volume_envelope;
                     ve.enabled = xmi.volume_flag & 0b0001 != 0;
                     ve.sustain_enabled = xmi.volume_flag & 0b0010 != 0;
                     ve.sustain_start_point = xmi.volume_sustain_point as usize;
@@ -413,7 +413,7 @@ impl XmInstrument {
 
                 // copy panning envelope data
                 {
-                    let pe = &mut id.pan_envelope;
+                    let pe = &mut id.voice.pan_envelope;
                     pe.enabled = xmi.panning_flag & 0b0001 != 0;
                     pe.sustain_enabled = xmi.panning_flag & 0b0010 != 0;
                     pe.sustain_start_point = xmi.panning_sustain_point as usize;
@@ -430,26 +430,26 @@ impl XmInstrument {
                 // (< 2 points, > 12 points, or out-of-range sustain/loop
                 // indices) and we fall back to `Envelope::default()`
                 // (enabled = false) in that case.
-                if !id.volume_envelope.is_valid() {
-                    id.volume_envelope = Envelope::default();
+                if !id.voice.volume_envelope.is_valid() {
+                    id.voice.volume_envelope = Envelope::default();
                 }
-                if !id.pan_envelope.is_valid() {
-                    id.pan_envelope = Envelope::default();
+                if !id.voice.pan_envelope.is_valid() {
+                    id.voice.pan_envelope = Envelope::default();
                 }
 
                 // cleanup bad sample for notes
                 let sample_qty = id.sample.len();
-                for i in 0..id.sample_for_pitch.len() {
-                    if let Some(value) = id.sample_for_pitch[i] {
+                for i in 0..id.keyboard.sample_for_pitch.len() {
+                    if let Some(value) = id.keyboard.sample_for_pitch[i] {
                         if value >= sample_qty {
-                            id.sample_for_pitch[i] = None;
+                            id.keyboard.sample_for_pitch[i] = None;
                         }
                     }
                 }
 
                 // vibrato
                 {
-                    let v = &mut id.vibrato;
+                    let v = &mut id.voice.vibrato;
                     v.waveform = match xmi.vibrato_type & 3 {
                         1 => Waveform::TranslatedSquare,
                         2 => Waveform::TranslatedRampUp,

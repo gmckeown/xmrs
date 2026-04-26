@@ -5,16 +5,19 @@
 //! XMrs is a Safe SoundTracker Library
 //!
 //! ```text
-//! Module+--->Instrument+--->InstrDefault+--->Sample (Loop, Sustain Loop)
-//!       |              |                +--->Envelope (Pitch, Volume, Panning)
-//!       |              |                +--->Vibrato
+//! Module+--->Instrument+--->InstrDefault+--->VoiceSetup+--->Envelope (Volume, Panning, Pitch)
+//!       |              |                |              +--->Vibrato
+//!       |              |                +--->InstrumentBehavior (NNA, DCT, DCA)
+//!       |              |                +--->Keyboard (sample_for_pitch, note_for_pitch)
 //!       |              |                +--->InstrMidi
+//!       |              |                +--->Sample (Loop, Sustain Loop)
 //!       |              +--->InstrEkn (Euclidian Rythm Instrument)
 //!       |              +--->InstrMidi
 //!       |              +--->InstrOpl (Yamaha OPL)
 //!       |              +--->InstrSid (MOS6581 SID Voices)
 //!       |              +-+->InstrRobSid+--->InstrSid
-//!       +--->Pattern--->Row--->TrackUnit+--->TrackEffect
+//!       +--->Pattern--->Row--->TrackUnit+--->CellNote (Empty, Play(Pitch), KeyOff, NoteCut, NoteFade)
+//!                                       +--->TrackEffect
 //!                                       +--->GlobalEffect
 //! ```
 //!
@@ -36,8 +39,6 @@ extern crate alloc;
      feature `libm` or feature `micromath`."
 );
 
-/// A typical Note
-pub mod cell_note;
 /// All effects
 pub mod effect;
 /// Envelope with Steroid
@@ -56,10 +57,18 @@ pub mod instr_robsid;
 pub mod instr_sid;
 /// Instrument with Steroid
 pub mod instrument;
+/// New-Note Action / Duplicate Check rules for `InstrDefault`.
+pub mod instrument_behavior;
+/// IT-style keyboard remap: per-input-note sample + transposition.
+pub mod keyboard;
 /// SoundTracker Module with Steroid
 pub mod module;
 /// Period Helper
 pub mod period_helper;
+/// A typical Note
+pub mod cell_note;
+/// Compatibility profile (named bundles of format + playback quirks).
+pub mod compatibility_profile;
 
 pub mod pitch;
 /// Sample with Steroid
@@ -68,6 +77,8 @@ pub mod sample;
 pub mod track_unit;
 /// Vibrato with Steroid
 pub mod vibrato;
+/// Voice-shaping parameters (envelopes, vibrato, filter, panning).
+pub mod voice_setup;
 /// All Waveform type
 pub mod waveform;
 /// A simple way for random values

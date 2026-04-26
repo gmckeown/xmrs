@@ -415,18 +415,14 @@ impl ItModule {
                 self.header.compatible_with_tracker & 0x00FF,
                 self.message
             ),
-            format: ModuleFormat::It,
-            // IT quirks. ITTECH specifies:
-            // - `tremor_state_persists`: Ixy counter is shared
-            //   across rows (ST3 semantics — consecutive Ixy rows
-            //   form a continuous on/off cycle rather than
-            //   retriggering the phase per row).
-            // The two header-driven flags ride alongside.
-            quirks: PlaybackQuirks {
-                tremor_state_persists: true,
-                it_old_effects: self.header.is_old_effects(),
-                it_link_gxx_memory: self.header.is_g_linked_with_e_f(),
-                ..PlaybackQuirks::default()
+            // IT quirks. Start from the IT 2.14 baseline (tremor
+            // state persists across rows — ST3 semantics) and
+            // overlay the two header-driven flags on top.
+            profile: {
+                let mut p = CompatibilityProfile::it214();
+                p.quirks.it_old_effects = self.header.is_old_effects();
+                p.quirks.it_link_gxx_memory = self.header.is_g_linked_with_e_f();
+                p
             },
             frequency_type: if self.header.is_linear_slides() {
                 FrequencyType::LinearFrequencies
@@ -493,14 +489,14 @@ impl ItModule {
                 let mut instrument = i.prepare_instrument();
                 if let InstrumentType::Default(instrdef) = &mut instrument.instr_type {
                     // Find first referenced sample and use its vibrato
-                    let first_sample_idx = instrdef.sample_for_pitch.iter().find_map(|s| *s);
+                    let first_sample_idx = instrdef.keyboard.sample_for_pitch.iter().find_map(|s| *s);
                     if let Some(si) = first_sample_idx {
                         if si < vibratos.len() {
-                            instrdef.vibrato = vibratos[si];
+                            instrdef.voice.vibrato = vibratos[si];
                         }
                     }
 
-                    for i3 in instrdef.sample_for_pitch.into_iter().flatten() {
+                    for i3 in instrdef.keyboard.sample_for_pitch.into_iter().flatten() {
                         // I must add i3 sample to instrdef
                         if instrdef.sample.len() <= i3 {
                             instrdef.sample.resize_with(i3 + 1, || None);
@@ -516,7 +512,7 @@ impl ItModule {
             // Easy addition of samples with default Instrument
             for (index, s) in samples.iter().enumerate() {
                 let mut instrdef: InstrDefault = InstrDefault::default();
-                instrdef.vibrato = vibratos[index];
+                instrdef.voice.vibrato = vibratos[index];
                 instrdef.sample.push(Some(s.clone()));
                 instrdef.change_all_sample_for_pitch(0);
                 let instrument = Instrument {

@@ -525,22 +525,14 @@ impl ImportMemory {
                                 + self.channel[index][SAMPLE_OFFSET_ADD_HIGH].2;
                         } else {
                             self.channel[index][SAMPLE_OFFSET].2 = *a;
-                            // The persistent high-offset register
-                            // (set by the most recent SAx) must be
-                            // OR'd into every Oxx, not only into the
-                            // memory-recall branch above. Schism does
+                            // bug 5: the persistent high-offset
+                            // register (set by the most recent SAx)
+                            // must be OR'd into every Oxx, not only
+                            // the memory-recall branch. Schism does
                             // the equivalent in `csf_process_effects`:
-                            //   mem_offset = (mem_offset & ~0xff00)
-                            //              | (param << 8);
-                            // — the upper 4 bits set by SAx survive
-                            // every subsequent Oxx with a non-zero
-                            // param. Modules that chain Oxx beyond
-                            // 64 KB rely on this.
-                            //
-                            // For Mod/Xm/S3m, `SAMPLE_OFFSET_ADD_HIGH`
-                            // is never written (no SAx equivalent), so
-                            // the addend is always 0 and this branch
-                            // is a no-op for those formats.
+                            // `mem_offset = (mem_offset & ~0xff00) |
+                            // (param << 8);` — the upper 4 bits set
+                            // by SAx survive the OR.
                             *a += self.channel[index][SAMPLE_OFFSET_ADD_HIGH].2;
                         }
                     }

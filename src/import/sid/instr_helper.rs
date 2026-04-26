@@ -180,8 +180,8 @@ impl InstrHelper {
         };
 
         let mut instr = InstrDefault::default();
-        instr.volume_envelope = volume_envelope;
-        instr.sample_for_pitch = [Some(0); 120];
+        instr.voice.volume_envelope = volume_envelope;
+        instr.keyboard.sample_for_pitch = [Some(0); 120];
 
         let mut s: Sample = Self::sid_to_sample(sid);
         s.relative_pitch = 24;
@@ -218,8 +218,8 @@ impl InstrHelper {
         } else {
             let mut xi = Self::sid_to_xi(&irs.sid.voice[0]);
             if irs.fx[0].vibrato {
-                xi.vibrato.depth = irs.fx[0].vibrato_depth as f32 / 15.0;
-                xi.vibrato.speed = 1.0 / irs.fx[0].vibrato_div as f32;
+                xi.voice.vibrato.depth = irs.fx[0].vibrato_depth as f32 / 15.0;
+                xi.voice.vibrato.speed = 1.0 / irs.fx[0].vibrato_div as f32;
             }
             idst.instr_type = InstrumentType::Default(xi);
         }

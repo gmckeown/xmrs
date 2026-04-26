@@ -29,8 +29,9 @@ impl SidModule {
                 self.sid.copyright, self.sid.author, song_number
             );
             // SID conversion targets MOD-style memory / Amiga frequencies
-            // (see ImportMemory call below), so we tag the output as Mod.
-            module.format = ModuleFormat::Mod;
+            // (see ImportMemory call below), so we use the ProTracker
+            // profile.
+            module.profile = CompatibilityProfile::pt();
             module.default_tempo = 1 + self.sid.resetspd;
 
             let mut patterns = self.pattern_helper.get_patterns(song_number);

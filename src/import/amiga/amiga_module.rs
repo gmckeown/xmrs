@@ -145,7 +145,7 @@ impl AmigaModule {
         let mut idef = InstrDefault::default();
         idef.sample.push(Some(sample));
 
-        idef.sample_for_pitch = [Some(0); 120];
+        idef.keyboard.sample_for_pitch = [Some(0); 120];
 
         instr.instr_type = InstrumentType::Default(idef);
 
@@ -157,7 +157,7 @@ impl AmigaModule {
 
         module.name = self.title.clone();
         module.comment = "XmRs reader".to_string();
-        module.format = ModuleFormat::Mod;
+        module.profile = CompatibilityProfile::pt();
         module.frequency_type = FrequencyType::AmigaFrequencies;
         // MOD has no mix-volume byte. Schism initialises the mixer
         // chain at `mixing_volume = 48` (`csndfile.c:55`,

@@ -1,5 +1,5 @@
-use crate::cell_note::CellNote;
 pub use crate::import::patternslot::PatternSlot;
+use crate::cell_note::CellNote;
 use crate::pitch::Pitch;
 
 impl PatternSlot {

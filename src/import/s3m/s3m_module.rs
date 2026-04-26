@@ -665,7 +665,6 @@ impl S3mModule {
 
         module.name = self.header.title.clone();
         module.comment = "XmRs reader".to_string();
-        module.format = ModuleFormat::S3m;
         // S3M's master-volume byte is encoded with bit 7 = stereo
         // flag and bits 6..0 = mixing volume in 0..127 range. Schism
         // (`fmt/s3m.c:166`) reads the same byte and stores it as
@@ -677,23 +676,16 @@ impl S3mModule {
         // legacy variant and would silently change levels for
         // mainstream S3Ms.)
         module.mix_volume = ((self.header.master_volume & 0x7F) as f32) / 128.0;
-        // Canonical ST3 replay quirks. Editor-authored modules that
-        // leave `quirks` at default get MOD-like clean playback; the
-        // S3M importer opts in to the four knobs that define ST3's
-        // behaviour. Period-clamp varies per-file based on
-        // amigalimits; the other three are always on for ST3.
-        module.quirks = PlaybackQuirks {
-            period_clamp: if amigalimits {
+        // Canonical ST3 replay profile. The amigalimits masterflag
+        // is per-file, so we overlay it on top of the base profile.
+        module.profile = {
+            let mut p = CompatibilityProfile::st3();
+            if amigalimits {
                 // ST3 `aspd` range `[453, 3424]` → xmrs Amiga units
                 // `[113.25, 856]` (xmrs periods are 1/4 of ST3's).
-                Some((113.25, 856.0))
-            } else {
-                None
-            },
-            allow_zero_period: true,
-            pattern_loop_resumes: true,
-            tremor_state_persists: true,
-            ..PlaybackQuirks::default()
+                p.quirks.period_clamp = Some((113.25, 856.0));
+            }
+            p
         };
         module.frequency_type = FrequencyType::AmigaFrequencies;
         module.default_tempo = self.header.speed as usize;
@@ -756,7 +748,7 @@ impl S3mModule {
                     // Create InstrDefault
                     let mut instr_def = InstrDefault::default();
                     instr_def.sample.push(Some(sample));
-                    instr_def.sample_for_pitch = [Some(0); 120];
+                    instr_def.keyboard.sample_for_pitch = [Some(0); 120];
 
                     // Create Instrument
                     let mut instr = Instrument::default();

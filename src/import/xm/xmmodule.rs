@@ -9,10 +9,11 @@ use super::xmheader::{XmFlagType, XmHeader};
 use super::xminstrument::XmInstrument;
 use super::xmpattern::XmPattern;
 
+use crate::compatibility_profile::CompatibilityProfile;
 use crate::import::import_memory::{ImportMemory, MemoryType};
 use crate::import::orders_helper;
 use crate::import::patternslot::PatternSlot;
-use crate::module::{Module, ModuleFormat, PlaybackQuirks};
+use crate::module::Module;
 use crate::period_helper::FrequencyType;
 
 #[derive(Default, Serialize, Deserialize, Debug)]
@@ -69,21 +70,12 @@ impl XmModule {
                 self.header.version_number >> 8,
                 self.header.version_number & 0xFF
             ),
-            format: ModuleFormat::Xm,
             // FT2 canonical replay behaviour — every XM module is
             // authored against these, so the XM importer opts them
-            // all on. Editor-authored modules that leave `quirks` at
-            // default play without any of these historical edges.
-            quirks: PlaybackQuirks {
-                ft2_pitch_slide_overflow: true,
-                ft2_arpeggio_lut: true,
-                ft2_arpeggio_note_clamp: true,
-                keyoff_cuts_without_vol_env: true,
-                k00_eats_note: true,
-                volcol_b_advances_vibrato: true,
-                e60_leaks_to_next_pattern: true,
-                ..PlaybackQuirks::default()
-            },
+            // all on. Editor-authored modules that leave `profile`
+            // at default get clean playback without any of these
+            // historical edges.
+            profile: CompatibilityProfile::ft2(),
             frequency_type: match self.header.flags {
                 XmFlagType::XmAmigaFrequencies => FrequencyType::AmigaFrequencies,
                 XmFlagType::XmLinearFrequencies => FrequencyType::LinearFrequencies,

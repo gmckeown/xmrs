@@ -219,14 +219,14 @@ pub struct PlaybackQuirks {
 pub struct Module {
     pub name: String,
     pub comment: String,
-    /// Source-format metadata (see [`ModuleFormat`]). Not used for
-    /// runtime playback decisions — those come from [`Self::quirks`].
-    pub format: ModuleFormat,
-    /// Per-module playback behaviour switches. Importers populate
-    /// this to match the source format's canonical semantics;
-    /// editor-authored modules typically leave it at
-    /// [`PlaybackQuirks::default`] for clean, quirk-free playback.
-    pub quirks: PlaybackQuirks,
+    /// The format this module was authored in, plus the playback
+    /// quirks that match its authoring tracker. See
+    /// [`crate::compatibility_profile::CompatibilityProfile`] for
+    /// the named constructors importers use; editor-authored
+    /// modules typically leave this at
+    /// [`CompatibilityProfile::modern`] for clean, quirk-free
+    /// playback.
+    pub profile: crate::compatibility_profile::CompatibilityProfile,
     pub frequency_type: FrequencyType,
     /// Restart index in `pattern_order`
     pub restart_position: usize,
@@ -287,8 +287,7 @@ impl Default for Module {
         Module {
             name: "".to_string(),
             comment: "".to_string(),
-            format: ModuleFormat::Unknown,
-            quirks: PlaybackQuirks::default(),
+            profile: crate::compatibility_profile::CompatibilityProfile::default(),
             frequency_type: FrequencyType::LinearFrequencies,
             restart_position: 0,
             default_tempo: 6,
