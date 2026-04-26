@@ -1,11 +1,10 @@
-use alloc::string::ToString;
 use alloc::vec;
 use alloc::vec::Vec;
 use bincode::error::DecodeError;
 use serde::Deserialize;
 
+use crate::cell_note::CellNote;
 use crate::import::patternslot::PatternSlot;
-use crate::pitch::Pitch;
 
 /// Sentinel placed in `PatternSlot::volume` for cells whose IT
 /// channel-mask omits both bit 0x04 ("read vol-col byte") and 0x40
@@ -81,7 +80,7 @@ impl ItPattern {
         if self.row_count <= 0 {
             return Ok(vec![]);
         }
-        // every cell that doesn't carry an explicit vol-col
+        // Every cell that doesn't carry an explicit vol-col
         // (channel mask bits 0x04 + 0x40 both clear) must be tagged
         // with `NO_VOL_COL` rather than 0 — IT vol-column 0 is itself
         // a valid command (per-note volume = 0).
@@ -100,7 +99,7 @@ impl ItPattern {
         // might) breaks the chain the first time the channel is
         // absent from a row, because that row's slot stays at
         // PatternSlot::default().
-        let mut last_note = [Pitch::None; 64];
+        let mut last_note = [CellNote::Empty; 64];
         let mut last_instrument: [Option<usize>; 64] = [None; 64];
         let mut last_volume = [NO_VOL_COL; 64];
         let mut last_effect_type = [0u8; 64];
@@ -128,20 +127,13 @@ impl ItPattern {
                 let mut slot = no_vol_default.clone();
 
                 if mask_variable & 0x01 != 0 {
-                    let mut n = *data_iter.next().ok_or(DecodeError::LimitExceeded)?;
-                    // Valid note values: 0-119 (C-0 to B-9), 253 (None), 254 (Cut), 255 (Off).
-                    // Bug 7: schism (`fmt/it.c:284`) treats the
-                    // out-of-spec 120..=252 range as NOTE_FADE — IT
-                    // never encodes "fade" as an explicit byte but
-                    // OpenMPT/IT2.15 modules occasionally store it
-                    // there. We mirror that, mapping these bytes
-                    // to `Pitch::Fade` (discriminant 252).
-                    if n >= 120 && n <= 252 {
-                        n = Pitch::Fade as u8;
-                    }
-                    let note = n.try_into().map_err(|_| {
-                        DecodeError::OtherString("Failed to convert note".to_string())
-                    })?;
+                    // `CellNote::from_byte` handles every valid IT
+                    // note byte plus the OpenMPT-style 120..=252
+                    // bytes that schism treats as NOTE_FADE
+                    // (`fmt/it.c:284`). No need for a manual
+                    // try_into-then-map step.
+                    let n = *data_iter.next().ok_or(DecodeError::LimitExceeded)?;
+                    let note = CellNote::from_byte(n);
                     slot.note = note;
                     last_note[ch] = note;
                 } else if mask_variable & 0x10 != 0 {

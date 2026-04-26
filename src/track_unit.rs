@@ -1,6 +1,6 @@
 use crate::{
+    cell_note::CellNote,
     effect::{GlobalEffect, TrackEffect},
-    pitch::Pitch,
 };
 use core::fmt::*;
 use serde::{Deserialize, Serialize};
@@ -10,7 +10,7 @@ use alloc::vec::Vec;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct TrackUnit {
-    pub note: Pitch,
+    pub note: CellNote,
     pub velocity: f32,
     pub instrument: Option<usize>,
     pub effects: Vec<TrackEffect>,
@@ -20,7 +20,7 @@ pub struct TrackUnit {
 impl Default for TrackUnit {
     fn default() -> Self {
         Self {
-            note: Pitch::default(),
+            note: CellNote::default(),
             velocity: 1.0,
             instrument: None,
             effects: vec![],
@@ -60,16 +60,17 @@ impl TrackUnit {
             .effects
             .iter()
             .any(|effect| matches!(effect, TrackEffect::NoteOff { tick: _, past: _ }));
-        fx || self.note.is_keyoff()
+        fx || matches!(self.note, CellNote::KeyOff)
     }
 
     /// Returns true iff the slot carries a Kxx *effect* note-off.
     ///
     /// Unlike [`Self::has_note_off`], this does NOT match a note-column
-    /// `===` (`Pitch::Off`). It's intended for replayer paths that need
-    /// to apply FT2 Kxy-effect quirks without also misfiring on note-
-    /// column key-offs, which have different playback semantics in FT2
-    /// (see `ft2_replayer.c:keyOff()` vs. the `keyOffCmd` / K00 paths).
+    /// `===` (`CellNote::KeyOff`). It's intended for replayer paths
+    /// that need to apply FT2 Kxy-effect quirks without also misfiring
+    /// on note-column key-offs, which have different playback
+    /// semantics in FT2 (see `ft2_replayer.c:keyOff()` vs. the
+    /// `keyOffCmd` / K00 paths).
     pub fn has_note_off_effect(&self) -> bool {
         self.effects
             .iter()

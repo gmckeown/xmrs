@@ -1,6 +1,6 @@
 use super::track_import_effect::TrackImportEffect;
 use crate::prelude::TrackUnit;
-use crate::{effect::GlobalEffect, pitch::Pitch};
+use crate::{cell_note::CellNote, effect::GlobalEffect};
 use core::fmt::*;
 use serde::{Deserialize, Serialize};
 
@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct TrackImportUnit {
-    pub note: Pitch,
+    pub note: CellNote,
     pub velocity: f32,
     pub instrument: Option<usize>,
     pub effects: Vec<TrackImportEffect>,
@@ -19,7 +19,7 @@ pub struct TrackImportUnit {
 impl Default for TrackImportUnit {
     fn default() -> Self {
         Self {
-            note: Pitch::default(),
+            note: CellNote::default(),
             velocity: 1.0,
             instrument: None,
             effects: vec![],

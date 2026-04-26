@@ -124,7 +124,10 @@ impl PatternHelper {
                 } else {
                     n
                 };
-                current.note = note.try_into().unwrap_or(Pitch::None);
+                current.note = match Pitch::try_from(note) {
+                    Ok(p) => CellNote::Play(p),
+                    Err(_) => CellNote::Empty,
+                };
             }
 
             // Bit 7 of the note byte is unused in versions 10/15/20.
@@ -132,8 +135,8 @@ impl PatternHelper {
             // but no disassembly confirms this — left unimplemented.
 
             if release {
-                if current.note == Pitch::None {
-                    current.note = Pitch::Off;
+                if matches!(current.note, CellNote::Empty) {
+                    current.note = CellNote::KeyOff;
                 } else {
                     current.volume = 0x50; // set volume 64 (XM encoding)
                 }

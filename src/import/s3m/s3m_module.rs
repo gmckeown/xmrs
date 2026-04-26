@@ -517,14 +517,17 @@ impl S3mModule {
             if k < packed_data.len() {
                 let note = packed_data[k];
                 slot.note = match note {
-                    254 => Pitch::Off,
-                    255 => Pitch::None,
+                    254 => CellNote::KeyOff,
+                    255 => CellNote::Empty,
                     _ => {
                         let tmp_pitch = (note & 0xF) + (note >> 4) * 12;
                         if tmp_pitch > 96 {
-                            Pitch::None
+                            CellNote::Empty
                         } else {
-                            Pitch::try_from(tmp_pitch).unwrap_or(Pitch::None)
+                            match Pitch::try_from(tmp_pitch) {
+                                Ok(p) => CellNote::Play(p),
+                                Err(_) => CellNote::Empty,
+                            }
                         }
                     }
                 };

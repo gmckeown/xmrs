@@ -36,6 +36,8 @@ extern crate alloc;
      feature `libm` or feature `micromath`."
 );
 
+/// A typical Note
+pub mod cell_note;
 /// All effects
 pub mod effect;
 /// Envelope with Steroid
@@ -58,7 +60,7 @@ pub mod instrument;
 pub mod module;
 /// Period Helper
 pub mod period_helper;
-/// A typical Note
+
 pub mod pitch;
 /// Sample with Steroid
 pub mod sample;

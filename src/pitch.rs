@@ -5,16 +5,7 @@ use serde::{Deserialize, Serialize};
 
 /// 10 octaves with notes
 #[derive(
-    Default,
-    Serialize,
-    Deserialize,
-    TryFromPrimitive,
-    IntoPrimitive,
-    Copy,
-    Clone,
-    Eq,
-    Hash,
-    PartialEq,
+    Serialize, Deserialize, TryFromPrimitive, IntoPrimitive, Copy, Clone, Eq, Hash, PartialEq,
 )]
 #[repr(u8)]
 pub enum Pitch {
@@ -148,33 +139,6 @@ pub enum Pitch {
     A9 = 117,
     As9 = 118,
     B9 = 119,
-
-    #[default]
-    None = 253,
-    /// Cut Note
-    Cut = 254, // Like IT, not like S3M.
-    /// Stop note, or Fadout
-    Off = 255, // Like IT, not like XM (97)
-    /// Note Fade. Triggers the volume fadeout (the instrument's
-    /// `volume_fadeout` register decays towards zero) without
-    /// releasing the envelopes — they keep ticking from where they
-    /// were. Distinct from `Off`, which sends a key-off (releases
-    /// envelopes AND starts fadeout). Distinct from `Cut`, which
-    /// kills the voice instantly.
-    ///
-    /// The discriminant 252 is internal to xmrs — it has no
-    /// semantic link to any byte the IT file format encodes.
-    /// Like the discriminants of `None` (253), `Cut` (254) and
-    /// `Off` (255), it is just the next free slot in the u8
-    /// representation. The IT pattern stream does not encode
-    /// "fade" as a note byte at all; this variant exists because
-    /// schism's loader synthesises the concept internally
-    /// (`fmt/it.c:284`: "Impulse Tracker handles all unknown
-    /// notes as fade internally") and we mirror that behaviour
-    /// when decoding out-of-spec note bytes 120..=252 — see
-    /// `it_pattern.rs`. XM/MOD/S3M imports never produce this
-    /// variant.
-    Fade = 252,
 }
 
 impl Debug for Pitch {
@@ -310,41 +274,14 @@ impl Debug for Pitch {
             Pitch::A9 => "A-9",
             Pitch::As9 => "A#9",
             Pitch::B9 => "B-9",
-
-            Pitch::None => "---",
-            Pitch::Off => "===",
-            Pitch::Cut => "^^^",
-            Pitch::Fade => "~~~",
         };
         write!(f, "{}", text)
     }
 }
 
 impl Pitch {
-    #[inline(always)]
-    pub fn is_none(&self) -> bool {
-        *self == Self::None
-    }
-
-    #[inline(always)]
-    pub fn is_keyoff(&self) -> bool {
-        *self == Self::Off
-    }
-
-    /// IT-only fade trigger. Distinct from `is_keyoff`: a fade
-    /// starts the volume fadeout WITHOUT releasing the envelopes
-    /// (envelopes keep ticking from where they were). Key-off
-    /// releases the envelopes AND starts fadeout.
-    #[inline(always)]
-    pub fn is_fade(&self) -> bool {
-        *self == Self::Fade
-    }
-
-    #[inline(always)]
-    pub fn is_valid(&self) -> bool {
-        self.value() < 120
-    }
-
+    /// Raw u8 representation (0..120). Useful when indexing per-note
+    /// arrays such as `InstrDefault::sample_for_pitch`.
     #[inline(always)]
     pub fn value(&self) -> u8 {
         *self as u8

@@ -8,6 +8,7 @@
 /// ```
 ///
 pub use crate::{
+    cell_note::CellNote,
     effect::{GlobalEffect, MidiMacroType, NoteRetrigOperator, TrackEffect},
     envelope::{Envelope, EnvelopePoint},
     instr_default::{DuplicateCheckAction, DuplicateCheckType, InstrDefault, NewNoteAction},

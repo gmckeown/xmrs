@@ -1,4 +1,4 @@
-use crate::pitch::Pitch;
+use crate::cell_note::CellNote;
 use alloc::format;
 use alloc::string::ToString;
 use core::fmt::*;
@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize, Copy, Clone, Eq, Hash, PartialEq)]
 #[repr(C)]
 pub struct PatternSlot {
-    pub note: Pitch,
+    pub note: CellNote,
     pub instrument: Option<usize>,
     pub volume: u8,
     pub effect_type: u8,
@@ -18,7 +18,7 @@ pub struct PatternSlot {
 impl Default for PatternSlot {
     fn default() -> Self {
         PatternSlot {
-            note: Pitch::None,
+            note: CellNote::Empty,
             instrument: None,
             volume: 0,
             effect_type: 0,

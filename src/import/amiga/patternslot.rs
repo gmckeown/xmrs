@@ -1,3 +1,4 @@
+use crate::cell_note::CellNote;
 pub use crate::import::patternslot::PatternSlot;
 use crate::pitch::Pitch;
 
@@ -54,10 +55,13 @@ impl PatternSlot {
         // period may not match an Amiga table entry; default to 0 in that case.
         let nu8 = Self::amiga_pitch(period).unwrap_or_default();
 
-        let note: Pitch = if nu8 == 0 {
-            Pitch::None
+        let note: CellNote = if nu8 == 0 {
+            CellNote::Empty
         } else {
-            Pitch::try_from(nu8 - 1).unwrap_or(Pitch::None)
+            match Pitch::try_from(nu8 - 1) {
+                Ok(p) => CellNote::Play(p),
+                Err(_) => CellNote::Empty,
+            }
         };
 
         let instrument = if instrument == 0 {

@@ -1,4 +1,5 @@
 /// Original XM Pattern Slot
+use crate::cell_note::CellNote;
 use crate::import::patternslot::PatternSlot;
 use crate::pitch::Pitch;
 use bincode::error::DecodeError;
@@ -69,15 +70,17 @@ impl PatternSlot {
             PatternSlot {
                 note: {
                     if dst[0] == 97 {
-                        // Special case: we don't want to use 97, because we want more octaves...
-                        Pitch::Off
+                        // Special case: we don't want to use 97,
+                        // because we want more octaves...
+                        CellNote::KeyOff
                     } else if dst[0] == 0 {
-                        // Special case: we don't want to use 0, because we want full MIDI compatibility...
-                        Pitch::None
+                        // Special case: we don't want to use 0, so
+                        // pitches start at 1 in XM. 0 = empty cell.
+                        CellNote::Empty
                     } else {
                         match Pitch::try_from(dst[0] - 1) {
-                            Ok(n) => n,
-                            Err(_e) => Pitch::None,
+                            Ok(p) => CellNote::Play(p),
+                            Err(_) => CellNote::Empty,
                         }
                     }
                 },
@@ -97,13 +100,7 @@ impl PatternSlot {
 
     pub fn save_xm_unpack(&self) -> Vec<u8> {
         let mut bytes: [u8; 5] = [0; 5];
-        bytes[0] = {
-            if self.note.is_keyoff() {
-                97
-            } else {
-                self.note.value() + 1
-            }
-        };
+        bytes[0] = cell_note_to_xm_byte(&self.note);
         bytes[1] = {
             if let Some(instr) = self.instrument {
                 (instr + 1) as u8
@@ -119,13 +116,7 @@ impl PatternSlot {
 
     pub fn save_xm(&self) -> Vec<u8> {
         let mut bytes: [u8; 5] = [0; 5];
-        bytes[0] = {
-            if self.note.is_keyoff() {
-                97
-            } else {
-                self.note.value() + 1
-            }
-        };
+        bytes[0] = cell_note_to_xm_byte(&self.note);
         bytes[1] = {
             if let Some(instr) = self.instrument {
                 (instr + 1) as u8
@@ -173,5 +164,22 @@ impl PatternSlot {
         } // effect parameter
         dst[0] = pack_bits | 0b1000_0000;
         dst[0..i].to_vec()
+    }
+}
+
+/// Encode a `CellNote` to XM's note-byte convention.
+///
+/// XM's note byte uses `0` = empty, `1..=96` = pitch (one-based, so
+/// the byte is `pitch.value() + 1`), `97` = key-off. The format
+/// has no representation for note-cut or note-fade — those events
+/// can only enter the pattern via effects, so when encountered in
+/// a `CellNote::NoteCut` or `NoteFade` we emit `0` (empty note),
+/// preserving the rest of the cell unchanged.
+fn cell_note_to_xm_byte(n: &CellNote) -> u8 {
+    match n {
+        CellNote::Empty => 0,
+        CellNote::Play(p) => p.value() + 1,
+        CellNote::KeyOff => 97,
+        CellNote::NoteCut | CellNote::NoteFade => 0,
     }
 }
