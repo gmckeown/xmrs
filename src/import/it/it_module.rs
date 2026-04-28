@@ -438,6 +438,36 @@ impl ItModule {
             // reach it at `Zxx` time. `None` when the IT file's
             // header didn't flag macros as embedded.
             midi_macros: self.midi_macros.as_ref().map(|m| m.to_public()),
+            // Pattern highlight period (rows per beat / measure)
+            // — drawn from the IT header. Clamp the raw bytes to
+            // ≥ 1 because a value of 0 would produce a divide-by-
+            // zero in any editor that derives bar lines from these.
+            // Falling back to the defaults (4/16) when zero was
+            // written (some old IT files do this).
+            pattern_highlight: {
+                let beat = self.header.rows_per_beat;
+                let measure = self.header.rows_per_measure;
+                if beat == 0 || measure == 0 {
+                    PatternHighlight::default()
+                } else {
+                    PatternHighlight { beat, measure }
+                }
+            },
+            // Mix plugins: OpenMPT extension carrying VST / DSP
+            // routing. Only attached when the file actually had
+            // plugins parsed AND the table isn't degenerate (all-
+            // zero) — keeps the public field at `None` for the
+            // common case where the section was absent or empty.
+            mix_plugins: self
+                .plugins
+                .as_ref()
+                .filter(|p| !p.is_empty())
+                .map(|p| p.to_public()),
+            // Pitch-wheel depth (ITTECH:94). Header byte is u8 but
+            // ITTECH defines the valid range as 0..=15; clamp here so
+            // a malformed file can't propagate an out-of-spec value
+            // to downstream MIDI-out code.
+            pitch_wheel_depth: self.header.pitch_wheel_depth.min(15),
             // Mix volume: IT-specific constant (0..128 in the file,
             // normalised to 0..1 here). Applied as a final-mix
             // multiplier by the player, separate from the Vxx-

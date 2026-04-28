@@ -21,9 +21,10 @@ pub use crate::{
     instrument::{Instrument, InstrumentType},
     instrument_behavior::InstrumentBehavior,
     keyboard::Keyboard,
+    mix_plugin::{MixPlugin, MixPluginInfo, MixPlugins},
     module::{
-        ChannelDefault, MidiMacros, Module, ModuleFormat, PanResetPolicy, Pattern, PlaybackQuirks,
-        Row, MAX_NUM_ROWS,
+        ChannelDefault, MidiMacros, Module, ModuleFormat, PanResetPolicy, Pattern,
+        PatternHighlight, PlaybackQuirks, Row, MAX_NUM_ROWS,
     },
     period_helper::{FrequencyType, PeriodHelper},
     pitch::Pitch,

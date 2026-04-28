@@ -60,7 +60,12 @@ struct S3mPcmInstr {
     /// 0-63
     volume: u8,
     dsk: u8,
-    /// 0=unpacked, 1=DP30ADPCM
+    /// 0=unpacked, 1=amiga (module memory marker), 2=DP30ADPCM
+    /// — but no major decoder honours this byte. Schism's
+    /// `fmt/s3m.c:279` skips it as "packing info (never used)"
+    /// and st3play's `digdata.h:91` notes ADPCM is "not used in
+    /// st3play". Treated identically here: every sample is read
+    /// as raw PCM.
     pack: u8,
     // 1=loop on, 2=stereo (data left then data right), 4=s16le
     flags: u8,
@@ -92,6 +97,18 @@ impl S3mPcmInstr {
     }
 
     fn get_sample_data(&self, data: &[u8]) -> Result<SampleDataType, DecodeError> {
+        // The `pack` byte is essentially never honoured by real
+        // S3M decoders. ScreamTracker 3 itself documented it as
+        // `0=normal(disk), 1=amiga(module), 2=ADPCM`, but
+        // st3play's `digdata.h:91` explicitly notes that ADPCM
+        // is "not used in st3play", and schism's `fmt/s3m.c:279`
+        // skips the byte with the comment `"packing info (never
+        // used)"`. We mirror that: just decode every sample as
+        // raw PCM regardless of the packing nibble. Real-world
+        // S3M files with non-zero pack are vanishingly rare, and
+        // the cost of being stricter than the reference players
+        // is rejecting files they would happily play.
+
         let offset = self.get_sample_offset();
 
         if offset > data.len() {
@@ -354,6 +371,11 @@ pub struct S3mModule {
     positions: Vec<u8>,
     instruments: Vec<S3mMetaInstrument>,
     patterns: Vec<Vec<Vec<PatternSlot>>>,
+    /// Song message (free text), when the file has flag bit 0x80
+    /// set and `ptr_special` points at usable text. The S3M format
+    /// uses CR (0x0D) as line separator; we normalise to LF.
+    /// Empty when no readable message was found.
+    message: String,
 }
 
 impl S3mModule {
@@ -459,7 +481,64 @@ impl S3mModule {
             s3m.patterns.push(pattern);
         }
 
+        // Optional song message via the `ptr_special` parapointer.
+        // Triggered by flag bit 0x80 in the masterflags. The format
+        // is poorly standardised — most files that use it write
+        // null-terminated CR-separated ASCII at `ptr_special * 16`
+        // — so the extractor is best-effort: trim at the first NUL,
+        // require the result to be mostly printable, and bail
+        // silently otherwise. Failure here never aborts the load,
+        // because most S3M files don't have a usable message at
+        // all and we don't want to reject them for that.
+        if s3m.header.flags & 0x80 != 0 && s3m.header.ptr_special != 0 {
+            s3m.message = Self::extract_song_message(ser_s3m_module, s3m.header.ptr_special)
+                .unwrap_or_default();
+        }
+
         Ok(s3m)
+    }
+
+    /// Read up to 1024 bytes of null-terminated text at the
+    /// parapointer offset. Returns `None` when the data doesn't
+    /// look like text (less than ~75% printable bytes), so we
+    /// silently fall back to "no message" instead of polluting
+    /// `Module.comment` with binary noise from a tracker that
+    /// repurposed `ptr_special` for something else.
+    fn extract_song_message(data: &[u8], ptr_special: u16) -> Option<String> {
+        let offset = (ptr_special as usize).checked_mul(16)?;
+        if offset >= data.len() {
+            return None;
+        }
+        let raw = &data[offset..];
+        // Cap the scan to avoid running over the file when no NUL
+        // appears (some files store fixed-width unterminated text).
+        let scan_len = raw.len().min(1024);
+        let scanned = &raw[..scan_len];
+        let end = scanned.iter().position(|&b| b == 0).unwrap_or(scan_len);
+        let text_bytes = &scanned[..end];
+        if text_bytes.is_empty() {
+            return None;
+        }
+        // Sanity gate: at least 75% of bytes must be either
+        // printable ASCII, common whitespace, or the CR/LF that
+        // S3M uses as line separator. Pure binary fails this and
+        // is rejected outright.
+        let printable = text_bytes
+            .iter()
+            .filter(|&&b| b == b'\r' || b == b'\n' || b == b'\t' || (0x20..=0x7E).contains(&b))
+            .count();
+        if printable * 4 < text_bytes.len() * 3 {
+            return None;
+        }
+        // Normalise: CR → LF (S3M's native line separator is CR;
+        // editors / terminals expect LF). `from_utf8_lossy`
+        // substitutes U+FFFD for any stray non-ASCII byte that
+        // slipped past the gate above.
+        let normalised: Vec<u8> = text_bytes
+            .iter()
+            .map(|&b| if b == b'\r' { b'\n' } else { b })
+            .collect();
+        Some(String::from_utf8_lossy(&normalised).trim().to_string())
     }
 
     // load one pattern row
@@ -703,7 +782,19 @@ impl S3mModule {
         // upper nibble is non-uniform (ST3 = 0x1, IT-export = 0x2,
         // Schism = 0x4, OpenMPT = 0x5, …) and a fixed major.minor
         // split would lie for half the corpus.
-        module.comment = format!("S3M version 0x{:04X}", self.header.version);
+        //
+        // Optional song message (when the file's flag 0x80 +
+        // ptr_special pointed at usable text) is appended below
+        // the version line — same pattern as the IT importer
+        // appending `self.message` to its own comment.
+        module.comment = if self.message.is_empty() {
+            format!("S3M version 0x{:04X}", self.header.version)
+        } else {
+            format!(
+                "S3M version 0x{:04X}\n\n{}",
+                self.header.version, self.message
+            )
+        };
         // S3M's master-volume byte is encoded with bit 7 = stereo
         // flag and bits 6..0 = mixing volume in 0..127 range. Schism
         // (`fmt/s3m.c:166`) reads the same byte and stores it as

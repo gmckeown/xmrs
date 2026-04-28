@@ -4,6 +4,10 @@ use alloc::vec::Vec;
 use bincode::error::DecodeError;
 use serde::Deserialize;
 
+use crate::mix_plugin::{
+    MixPlugin as PublicMixPlugin, MixPluginInfo, MixPlugins as PublicMixPlugins,
+};
+
 const MAX_MIXPLUGINS: usize = 64;
 
 #[derive(Deserialize, Debug, Clone)]
@@ -25,8 +29,8 @@ pub struct MixPlugin {
 
 #[derive(Debug)]
 pub struct Plugins {
-    channel_settings: Vec<u32>,
-    mix: Vec<MixPlugin>,
+    pub channel_settings: Vec<u32>,
+    pub mix: Vec<MixPlugin>,
 }
 
 impl Default for Plugins {
@@ -107,5 +111,43 @@ impl Plugins {
             }
         }
         Ok((plugins, source.len() - data.len()))
+    }
+
+    /// Project the internal, file-shaped representation into the
+    /// public `MixPlugins` type that lives on `Module`. Drops the
+    /// `reserved` slot of `SndMixPluginInfo` (it's purely a file
+    /// padding field with no editor meaning) and otherwise just
+    /// re-shapes the data — both vectors keep their indexing so
+    /// `channel_assignments[ch] - 1` still selects the right
+    /// plugin slot.
+    pub fn to_public(&self) -> PublicMixPlugins {
+        PublicMixPlugins {
+            channel_assignments: self.channel_settings.clone(),
+            plugins: self
+                .mix
+                .iter()
+                .map(|p| PublicMixPlugin {
+                    info: MixPluginInfo {
+                        id1: p.info.id1,
+                        id2: p.info.id2,
+                        input_routing: p.info.input_routing,
+                        output_routing: p.info.output_routing,
+                    },
+                    data: p.data.clone(),
+                })
+                .collect(),
+        }
+    }
+
+    /// `true` when the table carries no useful information — every
+    /// channel routes to "no plugin" (0) and every slot is empty.
+    /// The IT importer uses this to decide whether to attach the
+    /// table to `Module::mix_plugins` at all (vs. leaving it `None`).
+    pub fn is_empty(&self) -> bool {
+        self.channel_settings.iter().all(|&v| v == 0)
+            && self
+                .mix
+                .iter()
+                .all(|p| p.info.id1 == 0 && p.info.id2 == 0 && p.data.is_none())
     }
 }

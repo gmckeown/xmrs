@@ -126,6 +126,39 @@ pub struct ItSampleHeader {
     pub vibrato_waveform: u8,
 }
 
+/// Accumulate a stream of `u8` deltas into absolute signed `i8`
+/// PCM. Wrapping arithmetic mirrors schism's `csf_decode_delta_
+/// 8bit_1chn` (`csndfile.c:734-748`).
+fn decode_delta_8(input: &[u8]) -> Vec<i8> {
+    let mut out: Vec<i8> = Vec::with_capacity(input.len());
+    let mut acc: u8 = 0;
+    for &b in input {
+        acc = acc.wrapping_add(b);
+        out.push(acc as i8);
+    }
+    out
+}
+
+/// Accumulate a stream of `u16` deltas (read with the supplied
+/// endianness) into absolute signed `i16` PCM. Mirrors schism's
+/// 16-bit PCMD branch in `csf_read_sample` (`csndfile.c:954`).
+/// Caller is responsible for slicing one channel's bytes when
+/// decoding split-stereo.
+fn decode_delta_16(bytes: &[u8], frame_count: usize, big_endian: bool) -> Vec<i16> {
+    let mut out: Vec<i16> = Vec::with_capacity(frame_count);
+    let mut acc: u16 = 0;
+    for i in 0..frame_count {
+        let raw = if big_endian {
+            u16::from_be_bytes([bytes[i * 2], bytes[i * 2 + 1]])
+        } else {
+            u16::from_le_bytes([bytes[i * 2], bytes[i * 2 + 1]])
+        };
+        acc = acc.wrapping_add(raw);
+        out.push(acc as i16);
+    }
+    out
+}
+
 impl ItSampleHeader {
     pub fn is_associated_sample(&self) -> bool {
         self.flags & 0b0000_0001 != 0
@@ -248,10 +281,149 @@ impl ItSampleHeader {
     }
 
     pub fn get_sample_data(&self, data: &[u8]) -> Result<SampleDataType, DecodeError> {
+        // Note on bits 3 (PTM byte-delta) and 4 (12-bit TX-Wave)
+        // of `convert_flags`: schism's IT loader (`fmt/its.c:254`)
+        // does not consult either bit — it dispatches solely on
+        // bits 0 (signed) and 2 (delta), so a real IT file with
+        // bits 3 / 4 set is silently decoded as ordinary PCM by
+        // schism. We do better for bit 3 (we have a PTM decoder
+        // below) and we deliberately ignore bit 4: no public
+        // reference implementation has a 12-bit-TX-Wave decoder,
+        // and matching schism's behaviour means files with the
+        // bit set still load, just as raw PCM the way every
+        // mainstream player would have rendered them anyway.
+
         if self.is_compressed() {
-            self.get_sample_data_from_compressed_values(data)
+            // In compressed mode bit 2 of `convert_flags` selects
+            // IT215-vs-IT214 — handled inside the compressed
+            // decoder. Single-delta / byte-delta flags do not
+            // apply here.
+            return self.get_sample_data_from_compressed_values(data);
+        }
+
+        if self.is_byte_delta_encoded() {
+            // PTM byte-delta. Schism only supports the 16-bit-
+            // mono form (`csndfile.c:1281`, `SF(16,M,LE,PTM)`);
+            // no real-world file uses other widths.
+            return self.get_sample_data_from_byte_delta(data);
+        }
+
+        if self.is_double_delta_encoded() {
+            // In **uncompressed** mode bit 2 means PCMD —
+            // each value is a delta from the previous, accumulate
+            // with wrapping arithmetic to recover absolute PCM.
+            // The method name reads "double" because the bit
+            // means double-delta in compressed mode (handled
+            // above); here, with `is_compressed()` already false,
+            // the same bit means simple single-delta.
+            // Source: schism `fmt/its.c:254` selects SF_PCMD on
+            // `cvt & 4`, decoder at `csndfile.c:852` (8-bit) /
+            // `csndfile.c:954` (16-bit).
+            return self.get_sample_data_from_delta(data);
+        }
+
+        self.get_sample_data_from_values(data)
+    }
+
+    /// PTM byte-delta decoder (IT `convert_flags` bit 3, schism
+    /// `SF(16,M,LE,PTM)`). Reads `sample_length * 2` signed-byte
+    /// deltas, accumulates them with byte-wrapping arithmetic
+    /// into a transient byte stream, then reinterprets that
+    /// stream as little-endian `i16` frames.
+    fn get_sample_data_from_byte_delta(&self, data: &[u8]) -> Result<SampleDataType, DecodeError> {
+        if !self.is_16bits() || self.is_stereo() {
+            return Err(DecodeError::Other(
+                "IT byte-delta-encoded samples are only defined for 16-bit mono",
+            ));
+        }
+        let frame_count = self.sample_length as usize;
+        let bytes_needed = frame_count * 2;
+        if data.len() < bytes_needed {
+            return Err(DecodeError::Other("IT byte-delta sample truncated"));
+        }
+
+        // Stage 1: accumulate signed-byte deltas.
+        let mut bytes: Vec<u8> = Vec::with_capacity(bytes_needed);
+        let mut acc: u8 = 0;
+        for &b in data.iter().take(bytes_needed) {
+            acc = acc.wrapping_add(b);
+            bytes.push(acc);
+        }
+        // Stage 2: reinterpret pairs as little-endian i16.
+        let mut out: Vec<i16> = Vec::with_capacity(frame_count);
+        for pair in bytes.chunks_exact(2) {
+            out.push(i16::from_le_bytes([pair[0], pair[1]]));
+        }
+        Ok(SampleDataType::Mono16(out))
+    }
+
+    /// PCMD single-delta decoder (IT `convert_flags` bit 2 in
+    /// uncompressed mode). Each value is a delta from the
+    /// previous; accumulating with wrapping arithmetic recovers
+    /// the absolute signed PCM regardless of how the original
+    /// stream was nominally signed/unsigned. Source: schism
+    /// `csndfile.c:852` (8-bit, mono / split-stereo) and
+    /// `csndfile.c:954` (16-bit, mono / split-stereo, with
+    /// optional big-endian byte order). IT samples only use the
+    /// "split" stereo layout (left block then right block),
+    /// matching schism's `SF_SS` path.
+    fn get_sample_data_from_delta(&self, data: &[u8]) -> Result<SampleDataType, DecodeError> {
+        let frame_count = self.sample_length as usize;
+        let be = self.is_samples_be();
+
+        if self.is_16bits() {
+            let bytes_per_chan = frame_count * 2;
+            let total = if self.is_stereo() {
+                bytes_per_chan * 2
+            } else {
+                bytes_per_chan
+            };
+            if data.len() < total {
+                return Err(DecodeError::Other(
+                    "IT delta-encoded 16-bit sample truncated",
+                ));
+            }
+
+            if self.is_stereo() {
+                let l = decode_delta_16(&data[..bytes_per_chan], frame_count, be);
+                let r = decode_delta_16(&data[bytes_per_chan..total], frame_count, be);
+                let mut out: Vec<i16> = Vec::with_capacity(frame_count * 2);
+                for i in 0..frame_count {
+                    out.push(l[i]);
+                    out.push(r[i]);
+                }
+                Ok(SampleDataType::Stereo16(out))
+            } else {
+                Ok(SampleDataType::Mono16(decode_delta_16(
+                    &data[..bytes_per_chan],
+                    frame_count,
+                    be,
+                )))
+            }
         } else {
-            self.get_sample_data_from_values(data)
+            let total = if self.is_stereo() {
+                frame_count * 2
+            } else {
+                frame_count
+            };
+            if data.len() < total {
+                return Err(DecodeError::Other(
+                    "IT delta-encoded 8-bit sample truncated",
+                ));
+            }
+
+            if self.is_stereo() {
+                let l = decode_delta_8(&data[..frame_count]);
+                let r = decode_delta_8(&data[frame_count..total]);
+                let mut out: Vec<i8> = Vec::with_capacity(frame_count * 2);
+                for i in 0..frame_count {
+                    out.push(l[i]);
+                    out.push(r[i]);
+                }
+                Ok(SampleDataType::Stereo8(out))
+            } else {
+                Ok(SampleDataType::Mono8(decode_delta_8(&data[..frame_count])))
+            }
         }
     }
 

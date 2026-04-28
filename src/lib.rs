@@ -65,6 +65,8 @@ pub mod instrument;
 pub mod instrument_behavior;
 /// IT-style keyboard remap: per-input-note sample + transposition.
 pub mod keyboard;
+/// IT-style mix-plugin table (OpenMPT extension).
+pub mod mix_plugin;
 /// SoundTracker Module with Steroid
 pub mod module;
 /// Period Helper

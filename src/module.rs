@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::instrument::Instrument;
+use crate::mix_plugin::MixPlugins;
 use crate::period_helper::FrequencyType;
 use crate::prelude::TrackUnit;
 
@@ -201,6 +202,7 @@ pub struct PlaybackQuirks {
     ///   * Ixy/Tremor `on_time` / `off_time` are effectively `+1`.
     ///   * Oxx past sample end plays from the END of the sample
     ///     instead of being ignored.
+    ///
     /// IT importer sets this from the header flag; non-IT formats
     /// leave it `false`. The replayer consults it on every
     /// tick-zero effect-resolution step.
@@ -294,6 +296,38 @@ pub struct ChannelDefault {
     pub surround: bool,
 }
 
+/// Pattern-grid display hint. Editors use these two periods to
+/// draw row-highlight separators in the pattern view, so a user
+/// can read beats and measures at a glance. Has no effect on
+/// playback — purely a UI cue.
+///
+/// IT carries this in its file header; XM, S3M and MOD do not.
+/// Defaulting to `(beat: 4, measure: 16)` means "4/4 time at 16th-
+/// note resolution", which matches IT's own startup defaults and
+/// what virtually every authored module assumes when the editor
+/// presents an empty grid.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PatternHighlight {
+    /// Number of rows that make up one beat. The editor draws a
+    /// subtle highlight at every multiple of this row index. Also
+    /// known as "rows per beat" in IT/OpenMPT.
+    pub beat: u8,
+    /// Number of rows that make up one measure. The editor draws
+    /// a stronger highlight at every multiple of this row index,
+    /// typically `beat * time_signature_top`. Also known as "rows
+    /// per measure" in IT/OpenMPT.
+    pub measure: u8,
+}
+
+impl Default for PatternHighlight {
+    fn default() -> Self {
+        Self {
+            beat: 4,
+            measure: 16,
+        }
+    }
+}
+
 /// SoundTracker Module with Steroid
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Module {
@@ -337,6 +371,41 @@ pub struct Module {
     /// the replayer's MIDI-macro interpreter (per-channel filter
     /// automation, MIDI-out, etc.).
     pub midi_macros: Option<MidiMacros>,
+    /// Pattern-grid display hint (rows per beat / rows per measure).
+    /// Populated from the IT header; XM/S3M/MOD inherit the
+    /// `PatternHighlight::default()` 4/16 cadence.
+    pub pattern_highlight: PatternHighlight,
+    /// Optional IT-style mix-plugin table (OpenMPT extension).
+    /// `None` for non-IT formats and for IT files without an
+    /// embedded plugin section.
+    pub mix_plugins: Option<MixPlugins>,
+    /// MIDI pitch-wheel depth declared by the module author, in
+    /// semitones. The IT header carries this byte (ITTECH:94, "PWD:
+    /// Pitch wheel depth for MIDI controllers") so downstream MIDI-
+    /// out code knows how to scale tracker pitch effects (Gxx/Fxx/
+    /// Exx) to MIDI 14-bit pitch-bend values when forwarding notes
+    /// played through `InstrMidi` / `InstrOpl` / `InstrSid`
+    /// instruments.
+    ///
+    /// **Not consumed by the core replayer.** xmrsplayer renders
+    /// only `InstrumentType::Default` (sampled) instruments
+    /// natively; the synth / MIDI-out paths are the responsibility
+    /// of code that wraps the player and observes its events. This
+    /// field exists so such wrappers can read a single source of
+    /// truth instead of carrying their own per-module config.
+    ///
+    /// Macro-driven pitch bend (`Zxx` / `SFx` macros encoding
+    /// `En ll mm` bytes) is unaffected — the macro author writes
+    /// the absolute 14-bit value directly, and xmrsplayer's
+    /// [`MidiObserver`](https://docs.rs/xmrsplayer) emits it
+    /// verbatim. PWD only matters when downstream code is
+    /// *generating* pitch bend from a tracker semitone delta.
+    ///
+    /// IT importer copies the header byte. Other formats default
+    /// to **2** semitones — the General MIDI default a receiver
+    /// would assume in the absence of an explicit RPN setup.
+    /// Range per ITTECH is 0..=15.
+    pub pitch_wheel_depth: u8,
     /// Song-level mix volume scalar (0..1). IT-specific: each IT
     /// file carries a "mix volume" register (0..128, default 48)
     /// which is a constant mixer-level headroom applied on top of
@@ -362,11 +431,11 @@ pub struct Module {
 ///
 /// Tables follow ITTECH layout:
 /// * `global`      — 9 entries (global MIDI setup: port init, note
-///                   on/off mapping, etc.)
+///   on/off mapping, etc.)
 /// * `parametric`  — 16 entries, selected per-channel via `SF0..SFF`
-///                   and invoked by `Zxx` with `xx < 0x80`
+///   and invoked by `Zxx` with `xx < 0x80`
 /// * `fixed`       — 128 entries, addressed absolutely via `Zxx`
-///                   with `xx >= 0x80` (index = `xx - 0x80`)
+///   with `xx >= 0x80` (index = `xx - 0x80`)
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct MidiMacros {
     pub global: Vec<Vec<u8>>,
@@ -391,6 +460,9 @@ impl Default for Module {
             channel_defaults: vec![],
             instrument: vec![],
             midi_macros: None,
+            pattern_highlight: PatternHighlight::default(),
+            mix_plugins: None,
+            pitch_wheel_depth: 2,
             mix_volume: 1.0,
         }
     }

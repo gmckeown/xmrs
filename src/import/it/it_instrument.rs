@@ -586,16 +586,28 @@ impl ItInstrument {
                 }
 
                 // IT fadeout: Schism / OpenMPT run a 16-bit counter
-                // that starts at 65536 and decrements by the
-                // `fadeout` value every tick. Time to fully fade =
-                // 65536 / fadeout ticks. The player's
-                // `volume_fadeout` register starts at 1.0 and is
-                // decremented by `instr.voice.volume_fadeout` per tick, so
-                // the matching scale is `fadeout / 65536`. The
-                // previous `/32768` formula faded notes twice as
-                // fast as reference implementations — audible on any
-                // IT module with NNA=Fade or a sustained tail.
-                instr.voice.volume_fadeout = source.instr.fadeout as f32 / 65536.0;
+                // that starts at 65536 and decrements by `fadeout`
+                // every tick. The two IT instrument formats expose
+                // the field on different domains, though, and need
+                // different scale factors to converge to the same
+                // playback rate:
+                //
+                //   * **post-2** (IT 2.x): `fadeout` is 0..128 with
+                //     a "count" of 1024 (ITTECH:204), so a max-value
+                //     fadeout reaches silence in 8 ticks. Schism
+                //     normalises with `fadeout << 5`.
+                //   * **pre-2** (IT 1.x): `fadeout` is 0..64 with a
+                //     "count" of 512 (ITTECH:140) — same 8-tick fade
+                //     at max, just on a smaller domain. Schism uses
+                //     `fadeout << 6`, i.e. 2× more shift than post-2.
+                //
+                // Mapped to the player's 0..1 `volume_fadeout`
+                // register, that means pre-2 must scale by twice
+                // post-2's factor to keep the per-tick decrement —
+                // and therefore the fade time — in agreement.
+                // Source: schism `fmt/iti.c:277` (pre-2) and `:362`
+                // (post-2), both feeding `sndmix.c:334`.
+                instr.voice.volume_fadeout = source.instr.fadeout as f32 / 32768.0;
 
                 let nna = match source.instr.nna {
                     1 => NewNoteAction::Continue,
@@ -677,7 +689,9 @@ impl ItInstrument {
                     _ => DuplicateCheckType::Off(nna),
                 };
 
-                // See note on fadeout scale at the earlier site.
+                // Post-2 fadeout scale: see the long comment on the
+                // pre-2 path. The `<< 5` Schism normalisation maps
+                // to `/65536` here.
                 instr.voice.volume_fadeout = source.instr.fadeout as f32 / 65536.0;
                 instr.voice.pitch_pan_center = source
                     .instr

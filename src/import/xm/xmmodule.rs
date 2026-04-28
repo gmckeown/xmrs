@@ -94,6 +94,16 @@ impl XmModule {
             // XM has no MIDI-macro concept — the feature is
             // IT-specific.
             midi_macros: None,
+            // XM has no pattern-highlight metadata in its header —
+            // inherit the editor-friendly default cadence (4/16).
+            pattern_highlight: crate::module::PatternHighlight::default(),
+            // XM has no mix-plugin section.
+            mix_plugins: None,
+            // XM doesn't carry a MIDI pitch-wheel-depth field. The
+            // GM default of 2 semitones is what any MIDI receiver
+            // would assume in the absence of an explicit RPN setup —
+            // matches the `Module::default()` value.
+            pitch_wheel_depth: 2,
             // XM has no mix-volume byte in its header. Schism
             // (`fmt/xm.c:885`) hard-codes `mixing_volume = 48` for
             // every imported XM, which normalised gives 48/128 =

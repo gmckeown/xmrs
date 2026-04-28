@@ -88,7 +88,7 @@ impl ItPattern {
             volume: NO_VOL_COL,
             ..PatternSlot::default()
         };
-        let mut result = vec![vec![no_vol_default.clone(); 64]; self.row_count as usize];
+        let mut result = vec![vec![no_vol_default; 64]; self.row_count as usize];
         let mut last_mask_vars = [0u8; 64];
         // Per-channel last-READ values. ITTECH specifies that the
         // "use last <field> for channel" mask bits (0x10 note, 0x20
@@ -106,7 +106,7 @@ impl ItPattern {
         let mut last_effect_parameter = [0u8; 64];
         let mut data_iter = self.packed_data.iter();
 
-        for row in 0..self.row_count as usize {
+        for row_slots in result.iter_mut() {
             let mut channel_mask = match data_iter.next() {
                 Some(&mask) => mask,
                 None => break,
@@ -124,7 +124,7 @@ impl ItPattern {
                     last_mask_vars[ch]
                 };
 
-                let mut slot = no_vol_default.clone();
+                let mut slot = no_vol_default;
 
                 if mask_variable & 0x01 != 0 {
                     // `CellNote::from_byte` handles every valid IT
@@ -173,7 +173,7 @@ impl ItPattern {
                     slot.effect_parameter = last_effect_parameter[ch];
                 }
 
-                result[row][ch] = slot;
+                row_slots[ch] = slot;
 
                 channel_mask = match data_iter.next() {
                     Some(&mask) => mask,

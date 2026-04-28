@@ -466,9 +466,9 @@ impl TrackImportEffect {
     /// `VolumeSlide`, `PanningSlide`, `ChannelVolumeSlide` and
     /// `Portamento`, where the `fine` flag partitions the variant into
     /// two independent tick scopes (tick 0 vs ticks > 0). Those pairs
-    /// must coexist on the same row (e.g. XM row with main-effect Axy
-    /// + vol-column D/U produces both a regular and a fine
-    /// `VolumeSlide`).
+    /// must coexist on the same row (e.g. an XM row with main-effect
+    /// Axy alongside a vol-column D/U produces both a regular and a
+    /// fine `VolumeSlide`).
     ///
     /// The previous implementation used `Vec::iter().position()` to
     /// find the first same-discriminant entry and discarded the new
