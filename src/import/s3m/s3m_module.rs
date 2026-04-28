@@ -9,6 +9,7 @@ use crate::import::orders_helper;
 use crate::import::patternslot::PatternSlot;
 use crate::prelude::*;
 
+use alloc::format;
 use alloc::string::String;
 use alloc::string::ToString;
 use alloc::{vec, vec::Vec};
@@ -694,7 +695,15 @@ impl S3mModule {
         let amigalimits = s3m_mflags & 0x10 != 0;
 
         module.name = self.header.title.clone();
-        module.comment = "XmRs reader".to_string();
+        // ST3's `version` byte pair (high nibble = tracker ID, low
+        // 12 bits = version) — propagated to the comment so editors
+        // can surface it. Mirrors what the XM importer does with its
+        // header `tracker_name` + `version_number`. We render it as
+        // a single hex word because the per-tracker layout of the
+        // upper nibble is non-uniform (ST3 = 0x1, IT-export = 0x2,
+        // Schism = 0x4, OpenMPT = 0x5, …) and a fixed major.minor
+        // split would lie for half the corpus.
+        module.comment = format!("S3M version 0x{:04X}", self.header.version);
         // S3M's master-volume byte is encoded with bit 7 = stereo
         // flag and bits 6..0 = mixing volume in 0..127 range. Schism
         // (`fmt/s3m.c:166`) reads the same byte and stores it as

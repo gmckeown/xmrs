@@ -6,6 +6,7 @@ use crate::import::import_memory::ImportMemory;
 use crate::import::import_memory::MemoryType;
 use crate::prelude::*;
 
+use alloc::format;
 use alloc::string::String;
 use alloc::string::ToString;
 use alloc::{vec, vec::Vec};
@@ -156,7 +157,14 @@ impl AmigaModule {
         let mut module = Module::default();
 
         module.name = self.title.clone();
-        module.comment = "XmRs reader".to_string();
+        // Preserve the format tag (`M.K.`, `FLT8`, `8CHN`, `OCTA`,
+        // …) parsed from offset 0x438. For 15-sample Soundtracker
+        // MODs there is no tag — fall back to an explicit label.
+        module.comment = if self.get_number_of_samples() == 15 {
+            "Soundtracker (15 samples, no tag)".to_string()
+        } else {
+            format!("MOD tag: {}", self.tag)
+        };
         module.profile = CompatibilityProfile::pt();
         module.frequency_type = FrequencyType::AmigaFrequencies;
         // MOD has no mix-volume byte. Schism initialises the mixer
@@ -167,6 +175,17 @@ impl AmigaModule {
         module.mix_volume = 48.0 / 128.0;
         module.default_tempo = 6;
         module.default_bpm = 125;
+        // MOD restart byte (offset 0x3B7). Soundtracker / Noisetracker
+        // used it as a real loop point; ProTracker writes 0x7F (127)
+        // as a sentinel meaning "no restart". Anything ≥ song length
+        // is therefore not a valid index — fall back to 0 in that
+        // case rather than letting a 127 propagate into a 64-pattern
+        // song.
+        module.restart_position = if (self.restart_position as usize) < self.song_length as usize {
+            self.restart_position as usize
+        } else {
+            0
+        };
         module.pattern_order = vec![self.positions[..usize::from(self.song_length)]
             .to_vec()
             .iter()
