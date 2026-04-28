@@ -5,9 +5,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 /// How to play sample
-#[derive(
-    Default, Serialize, Deserialize, Copy, Clone, IntoPrimitive, TryFromPrimitive, Debug,
-)]
+#[derive(Default, Serialize, Deserialize, Copy, Clone, IntoPrimitive, TryFromPrimitive, Debug)]
 #[repr(u8)]
 pub enum LoopType {
     #[default]

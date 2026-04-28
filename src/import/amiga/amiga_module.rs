@@ -11,6 +11,75 @@ use alloc::string::String;
 use alloc::string::ToString;
 use alloc::{vec, vec::Vec};
 
+/// Length, in bytes, of the fixed header preceding pattern data
+/// for each MOD variant. 600 = 20 (title) + 15 × 30 (samples) +
+/// 1 + 1 + 128 (song bytes); 1084 = 20 + 31 × 30 + 1 + 1 + 128 + 4
+/// (tag).
+const MOD_15_HEADER_SIZE: usize = 600;
+const MOD_31_HEADER_SIZE: usize = 1084;
+const AMIGA_SAMPLE_RECORD_SIZE: usize = 30;
+const POSITION_TABLE_SIZE: usize = 128;
+const AMIGA_ROWS_PER_PATTERN: usize = 64;
+const AMIGA_SLOT_SIZE: usize = 4;
+
+/// Map a 4-character format tag to its channel count, returning
+/// `None` for tags we don't recognise (which the loader treats as
+/// "no tag" — i.e., 15-sample Soundtracker layout). Centralised so
+/// `get_number_of_tracks` and the variant-detection path share one
+/// truth table.
+fn tag_str_to_num_tracks(tag: &str) -> Option<u8> {
+    match tag {
+        "TDZ1" => Some(1),
+        "2CHN" | "TDZ2" => Some(2),
+        "TDZ3" => Some(3),
+        "M.K." | "M!K!" | "FLT4" | "NSMS" | "LARD" | "PATT" | "EXO4" | "N.T." | "M&K!" | "FEST"
+        | "CD61" => Some(4),
+        "5CHN" => Some(5),
+        "6CHN" => Some(6),
+        "7CHN" => Some(7),
+        "8CHN" | "CD81" | "OKTA" | "OCTA" | "FLT8" | "EXO8" => Some(8),
+        "9CHN" => Some(9),
+        t if t.ends_with("CH") || t.ends_with("CN") => {
+            match t[..t.len() - 2].parse::<u8>().unwrap_or(0) {
+                0 => None,
+                v => Some(v),
+            }
+        }
+        _ => None,
+    }
+}
+
+/// `Some(num_tracks)` if the four bytes spell a recognised tag.
+/// Restricted to ASCII so we never pattern-match against bytes
+/// produced by `String::from_utf8_lossy` substituting U+FFFD.
+fn tag_bytes_to_num_tracks(tag: &[u8]) -> Option<u8> {
+    if tag.len() != 4 {
+        return None;
+    }
+    let s = core::str::from_utf8(tag).ok()?;
+    tag_str_to_num_tracks(s)
+}
+
+/// True when every byte is either NUL or in the printable-ASCII
+/// range. Used to reject random binary as a candidate title or
+/// sample name; a uniform-random 20-byte slice has a ~4e-9
+/// chance of passing.
+fn is_clean_text(bytes: &[u8]) -> bool {
+    bytes.iter().all(|&b| b == 0 || (0x20..=0x7E).contains(&b))
+}
+
+/// Which MOD layout the file matches.
+#[derive(Copy, Clone, Debug)]
+enum AmigaVariant {
+    /// 15-sample Ultimate Soundtracker era. 600-byte header,
+    /// no tag at offset 0x438 (those bytes are pattern data),
+    /// always 4 channels.
+    Fifteen,
+    /// 31-sample MOD with a recognised tag at offset 0x438.
+    /// 1084-byte header, channel count given by the tag.
+    ThirtyOne { num_tracks: u8 },
+}
+
 #[derive(Default, Debug)]
 pub struct AmigaModule {
     title: String,
@@ -25,25 +94,7 @@ pub struct AmigaModule {
 
 impl AmigaModule {
     fn get_number_of_tracks(&self) -> Option<u8> {
-        match self.tag.as_str() {
-            "TDZ1" => Some(1),
-            "2CHN" | "TDZ2" => Some(2),
-            "TDZ3" => Some(3),
-            "M.K." | "M!K!" | "FLT4" | "NSMS" | "LARD" | "PATT" | "EXO4" | "N.T." | "M&K!"
-            | "FEST" | "CD61" => Some(4),
-            "5CHN" => Some(5),
-            "6CHN" => Some(6),
-            "7CHN" => Some(7),
-            "8CHN" | "CD81" | "OKTA" | "OCTA" | "FLT8" | "EXO8" => Some(8),
-            "9CHN" => Some(9),
-            tag if tag.ends_with("CH") || tag.ends_with("CN") => {
-                match &tag[..tag.len() - 2].parse::<u8>().unwrap_or(0) {
-                    0 => None,
-                    v => Some(*v),
-                }
-            }
-            _ => None,
-        }
+        tag_str_to_num_tracks(self.tag.as_str())
     }
 
     fn get_number_of_samples(&self) -> usize {
@@ -57,7 +108,116 @@ impl AmigaModule {
         1 + *self.positions.iter().max().unwrap_or(&0) as usize
     }
 
+    /// Decide which MOD variant `data` matches, or refuse it. Run
+    /// before any byte-level parsing so non-MOD blobs fail fast
+    /// instead of being silently accepted as 15-sample garbage.
+    /// Neither variant has a magic signature, so the verdict comes
+    /// from header field ranges plus a file-size equation —
+    /// each on its own is weak, but the conjunction is decisive.
+    fn detect_variant(data: &[u8]) -> Result<AmigaVariant, DecodeError> {
+        // Try the high-confidence path first: the bytes at 0x438
+        // must spell a recognised tag AND the rest of the structure
+        // must validate against that variant. If both hold we
+        // commit to 31-sample without considering 15-sample at all.
+        if data.len() >= MOD_31_HEADER_SIZE {
+            if let Some(num_tracks) = tag_bytes_to_num_tracks(&data[0x438..0x438 + 4]) {
+                let v = AmigaVariant::ThirtyOne { num_tracks };
+                if Self::validate_structure(data, v).is_ok() {
+                    return Ok(v);
+                }
+            }
+        }
+        // Fall back to 15-sample. The Soundtracker layout has no
+        // tag at all (offset 0x438 is inside pattern data), so the
+        // structural checks are the only available evidence.
+        if Self::validate_structure(data, AmigaVariant::Fifteen).is_ok() {
+            return Ok(AmigaVariant::Fifteen);
+        }
+        Err(DecodeError::Other("Not an Amiga MOD module"))
+    }
+
+    /// Cheap range / size sanity checks for one variant. Each
+    /// individual check (volume ≤ 64, finetune ≤ 15, ASCII-only
+    /// names, file size ≥ declared content) is weak alone but
+    /// cumulatively rejects a uniform-random binary blob with
+    /// overwhelming probability — across 15 sample slots
+    /// `volume ≤ 64` × `finetune ≤ 15` is on the order of 1e-27.
+    fn validate_structure(data: &[u8], variant: AmigaVariant) -> Result<(), DecodeError> {
+        let (num_samples, num_tracks, header_size) = match variant {
+            AmigaVariant::Fifteen => (15usize, 4u8, MOD_15_HEADER_SIZE),
+            AmigaVariant::ThirtyOne { num_tracks } => (31, num_tracks, MOD_31_HEADER_SIZE),
+        };
+
+        if data.len() < header_size {
+            return Err(DecodeError::Other("File too short for MOD header"));
+        }
+
+        // Title bytes 0..20 must be printable ASCII or NUL —
+        // pre-rejects nearly all random binary.
+        if !is_clean_text(&data[..20]) {
+            return Err(DecodeError::Other("MOD title is not ASCII"));
+        }
+
+        let mut total_sample_bytes: u64 = 0;
+        for i in 0..num_samples {
+            let off = 20 + i * AMIGA_SAMPLE_RECORD_SIZE;
+            if !is_clean_text(&data[off..off + 22]) {
+                return Err(DecodeError::Other("MOD sample name is not ASCII"));
+            }
+            let length_div2 = u16::from_be_bytes([data[off + 22], data[off + 23]]);
+            let finetune = data[off + 24];
+            let volume = data[off + 25];
+            if finetune > 0x0F {
+                return Err(DecodeError::Other("MOD sample finetune > 15"));
+            }
+            if volume > 0x40 {
+                return Err(DecodeError::Other("MOD sample volume > 64"));
+            }
+            total_sample_bytes = total_sample_bytes.saturating_add(2 * length_div2 as u64);
+        }
+
+        let song_length_off = 20 + num_samples * AMIGA_SAMPLE_RECORD_SIZE;
+        let song_length = data[song_length_off];
+        if song_length == 0 || song_length > 128 {
+            return Err(DecodeError::Other("MOD song_length out of range"));
+        }
+
+        let positions_off = song_length_off + 2;
+        let positions = &data[positions_off..positions_off + POSITION_TABLE_SIZE];
+        // Only the first `song_length` entries are meaningful; the
+        // rest is don't-care padding written as zeros by every
+        // historical tracker but liable to be garbage in fuzz input.
+        let max_pos = *positions[..song_length as usize].iter().max().unwrap_or(&0);
+        if max_pos >= 128 {
+            return Err(DecodeError::Other("MOD position byte out of range"));
+        }
+
+        // The decisive check: every byte the loader would read must
+        // actually be present in the file. Headers + patterns +
+        // sample data, summed exactly the way the rest of `load`
+        // walks them. Random blobs almost never satisfy this.
+        let pattern_size =
+            num_tracks as u64 * AMIGA_ROWS_PER_PATTERN as u64 * AMIGA_SLOT_SIZE as u64;
+        let num_patterns = max_pos as u64 + 1;
+        let expected = (header_size as u64)
+            .saturating_add(pattern_size.saturating_mul(num_patterns))
+            .saturating_add(total_sample_bytes);
+        if expected > data.len() as u64 {
+            return Err(DecodeError::Other("MOD file shorter than declared content"));
+        }
+
+        Ok(())
+    }
+
     pub fn load(ser_amiga_module: &[u8]) -> Result<AmigaModule, DecodeError> {
+        // Refuse non-MOD garbage up-front. Without this the loader
+        // would happily decode any sufficiently-long binary as a
+        // 15-sample MOD because that branch has no signature to
+        // anchor on — we'd return a `Module` filled with noise and
+        // the auto-detect path in `Module::load` would never get a
+        // chance to escalate to a different format.
+        let variant = Self::detect_variant(ser_amiga_module)?;
+
         let mut amiga = AmigaModule {
             ..Default::default()
         };
@@ -71,8 +231,18 @@ impl AmigaModule {
             .trim()
             .to_string();
 
-        // get tag if any?
-        amiga.tag = String::from_utf8_lossy(&ser_amiga_module[0x438..0x438 + 4]).to_string();
+        // Tag only exists in the 31-sample layout. For the 15-sample
+        // layout offset 0x438 is inside the first pattern's data, so
+        // reading it produces noise that would mis-trigger
+        // `tag_str_to_num_tracks` if we ever fed it back through the
+        // existing match arms. Leave the tag empty so
+        // `get_number_of_samples` returns 15 by the `None` arm.
+        amiga.tag = match variant {
+            AmigaVariant::ThirtyOne { .. } => {
+                String::from_utf8_lossy(&ser_amiga_module[0x438..0x438 + 4]).to_string()
+            }
+            AmigaVariant::Fifteen => String::new(),
+        };
 
         let mut data = &ser_amiga_module[0x14..];
 
