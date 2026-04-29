@@ -9,7 +9,7 @@
 //! before doing anything useful.
 //!
 //! `CellNote` makes the distinction explicit. Most code paths only
-//! care about the [`Play`](Self::Play) arm — that's where a real
+//! care about the [`Play`](crate::cell_note::CellNote::Play) arm — that's where a real
 //! pitch lands. The other arms describe note-column events, and the
 //! channel logic dispatches them through `match` rather than through
 //! ad-hoc `is_keyoff` / `is_fade` checks.
@@ -35,7 +35,7 @@ use serde::{Deserialize, Serialize};
 ///   it was. Specific to IT (and Schism's reading of any
 ///   out-of-spec byte 120..=252 as fade, see `fmt/it.c:284`).
 ///
-/// `Default` is [`Empty`] so that pattern slots constructed by
+/// `Default` is [`Empty`](Self::Empty) so that pattern slots constructed by
 /// `Default::default()` start as silent.
 #[derive(Default, Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CellNote {

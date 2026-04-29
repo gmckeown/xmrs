@@ -3,12 +3,12 @@
 //! The struct is now decomposed into three sub-types, each tackling
 //! one orthogonal concern:
 //!
-//! - [`VoiceSetup`] — envelope, fadeout, vibrato, filter, panning,
+//! - [`VoiceSetup`](crate::voice_setup::VoiceSetup) — envelope, fadeout, vibrato, filter, panning,
 //!   random variations: everything that shapes the voice once it's
 //!   been triggered.
-//! - [`InstrumentBehavior`] — NNA / DCT / DCA: what happens when a
+//! - [`InstrumentBehavior`](crate::instrument_behavior::InstrumentBehavior) — NNA / DCT / DCA: what happens when a
 //!   channel already running this instrument is retriggered.
-//! - [`Keyboard`] — per-input-note sample selection and
+//! - [`Keyboard`](crate::keyboard::Keyboard) — per-input-note sample selection and
 //!   transposition: the IT-style drum-kit table. For non-IT formats
 //!   the keyboard is the identity remap.
 //!

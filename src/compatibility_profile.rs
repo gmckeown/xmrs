@@ -32,7 +32,7 @@
 //! Importers pick the constructor that matches the source file,
 //! then optionally tweak the per-file quirks (IT's `is_old_effects`,
 //! S3M's amigalimits) on the returned profile. Editor-authored
-//! modules use [`Self::modern`] — clean, no historical bug
+//! modules use [`CompatibilityProfile::modern`](crate::compatibility_profile::CompatibilityProfile::modern) — clean, no historical bug
 //! emulation.
 
 use serde::{Deserialize, Serialize};

@@ -338,7 +338,7 @@ pub struct Module {
     /// [`crate::compatibility_profile::CompatibilityProfile`] for
     /// the named constructors importers use; editor-authored
     /// modules typically leave this at
-    /// [`CompatibilityProfile::modern`] for clean, quirk-free
+    /// [`CompatibilityProfile::modern`](crate::compatibility_profile::CompatibilityProfile::modern) for clean, quirk-free
     /// playback.
     pub profile: crate::compatibility_profile::CompatibilityProfile,
     pub frequency_type: FrequencyType,
