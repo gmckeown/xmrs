@@ -585,29 +585,22 @@ impl ItInstrument {
                     instr.voice.volume_envelope = Envelope::default();
                 }
 
-                // IT fadeout: Schism / OpenMPT run a 16-bit counter
-                // that starts at 65536 and decrements by `fadeout`
-                // every tick. The two IT instrument formats expose
-                // the field on different domains, though, and need
-                // different scale factors to converge to the same
-                // playback rate:
+                // IT fadeout (pre-2, IT 1.x): the raw byte is in
+                // 0..64 and the IT runtime decrements an internal
+                // counter (initial value 512 — ITTECH:140) by that
+                // amount every tick; the voice dies when the counter
+                // crosses zero, so the maximum fadeout (64) reaches
+                // silence in 512/64 = 8 ticks.
                 //
-                //   * **post-2** (IT 2.x): `fadeout` is 0..128 with
-                //     a "count" of 1024 (ITTECH:204), so a max-value
-                //     fadeout reaches silence in 8 ticks. Schism
-                //     normalises with `fadeout << 5`.
-                //   * **pre-2** (IT 1.x): `fadeout` is 0..64 with a
-                //     "count" of 512 (ITTECH:140) — same 8-tick fade
-                //     at max, just on a smaller domain. Schism uses
-                //     `fadeout << 6`, i.e. 2× more shift than post-2.
-                //
-                // Mapped to the player's 0..1 `volume_fadeout`
-                // register, that means pre-2 must scale by twice
-                // post-2's factor to keep the per-tick decrement —
-                // and therefore the fade time — in agreement.
-                // Source: schism `fmt/iti.c:277` (pre-2) and `:362`
-                // (post-2), both feeding `sndmix.c:334`.
-                instr.voice.volume_fadeout = source.instr.fadeout as f32 / 32768.0;
+                // The player keeps an equivalent counter normalised
+                // to 0..1 (`StateInstrDefault::volume_fadeout`,
+                // initial 1.0), so the per-tick decrement we store
+                // here is `fadeout / 512`. Post-2's domain is twice
+                // as wide (0..128 with count 1024 — see the post-2
+                // arm below), and the two scales are arranged so the
+                // *fade time at a given raw byte* stays the same
+                // across formats.
+                instr.voice.volume_fadeout = source.instr.fadeout as f32 / 512.0;
 
                 let nna = match source.instr.nna {
                     1 => NewNoteAction::Continue,
@@ -689,10 +682,23 @@ impl ItInstrument {
                     _ => DuplicateCheckType::Off(nna),
                 };
 
-                // Post-2 fadeout scale: see the long comment on the
-                // pre-2 path. The `<< 5` Schism normalisation maps
-                // to `/65536` here.
-                instr.voice.volume_fadeout = source.instr.fadeout as f32 / 65536.0;
+                // IT fadeout (post-2, IT 2.x): the raw byte is in
+                // 0..128 and the IT runtime decrements an internal
+                // counter (initial value 1024 — ITTECH:204) by that
+                // amount every tick. Maximum fadeout (128) therefore
+                // reaches silence in 1024/128 = 8 ticks; this matches
+                // the documented IT behaviour and the comment on the
+                // pre-2 arm above.
+                //
+                // The player keeps the equivalent counter normalised
+                // to 0..1, so the per-tick decrement is `fadeout /
+                // 1024`. (Until 0.10.3 this was `fadeout / 65536` —
+                // 64× too small — which made any IT voice with the
+                // volume envelope disabled run a fadeout 64× longer
+                // than intended; on a forward-looped sample, that's
+                // up to a full minute of audible tail after a `===`
+                // before the voice finally died.)
+                instr.voice.volume_fadeout = source.instr.fadeout as f32 / 1024.0;
                 instr.voice.pitch_pan_center = source
                     .instr
                     .pitch_pan_center
