@@ -1,25 +1,50 @@
 use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
 
+use crate::fixed::fixed::Q15;
+use crate::fixed::units::EnvValue;
+
 /// Envelope Point, frame for the abscissa, value for the ordinate
 #[derive(Default, Serialize, Deserialize, Copy, Clone, Debug)]
 pub struct EnvelopePoint {
     /// Frame number of the point (X-coordinate)
     pub frame: usize,
-    /// Value of the point (Y-coordinate) [0..1.0]
-    pub value: f32,
+    /// Value of the point (Y-coordinate). [`EnvValue`] wraps a
+    /// Q1.15 in `[0, 1]` (volume / pitch envelopes) or
+    /// `[-1, 1]` (signed-magnitude pan envelopes in some
+    /// formats). The previous `f32` field was always populated
+    /// with a value in those ranges, so the change is exact —
+    /// modulo one LSB of Q1.15 quantisation, well below the
+    /// envelope's audible resolution.
+    pub value: EnvValue,
 }
 
 impl EnvelopePoint {
-    /// Linear interpolation between two envelope points
-    pub fn lerp(a: &EnvelopePoint, b: &EnvelopePoint, pos: usize) -> f32 {
+    /// Linear interpolation between two envelope points, in
+    /// Q1.15. Equivalent to the previous `f32` lerp:
+    ///   `a.value * (1.0 - p) + b.value * p`
+    /// with `p = (pos - a.frame) / (b.frame - a.frame)`,
+    /// expressed in saturating fixed-point arithmetic. The
+    /// boundary cases (`pos <= a.frame`, `pos >= b.frame`,
+    /// `a.frame == b.frame`) are handled the same way as
+    /// before.
+    pub fn lerp(a: &EnvelopePoint, b: &EnvelopePoint, pos: usize) -> EnvValue {
         if pos <= a.frame {
             a.value
         } else if pos >= b.frame {
             b.value
         } else {
-            let p: f32 = (pos - a.frame) as f32 / (b.frame - a.frame) as f32;
-            a.value * (1.0 - p) + b.value * p
+            // (pos - a.frame) and (b.frame - a.frame) both
+            // fit comfortably in i32 for any realistic
+            // envelope (frames are bounded by the module's
+            // pattern length × tempo).
+            let num = (pos - a.frame) as i32;
+            let den = (b.frame - a.frame) as i32;
+            // p = num / den, in Q1.15.
+            let p = Q15::from_ratio(num, den);
+            // Linear interpolation between the two envelope
+            // points, in the typed Q-format domain.
+            EnvValue::lerp(a.value, b.value, p)
         }
     }
 }
@@ -97,33 +122,47 @@ mod tests {
     use super::*;
     use alloc::vec;
 
+    /// Helper: build an envelope value from an integer ratio,
+    /// mirroring the float-era literals: `ev(0, 1) == 0.0`,
+    /// `ev(1, 1) == 1.0`, `ev(1, 2) == 0.5`.
+    fn ev(num: i32, den: i32) -> EnvValue {
+        EnvValue::from_q15(Q15::from_ratio(num, den))
+    }
+
     #[test]
     fn lerp_at_boundaries() {
         let a = EnvelopePoint {
             frame: 0,
-            value: 0.0,
+            value: ev(0, 1),
         };
         let b = EnvelopePoint {
             frame: 10,
-            value: 1.0,
+            value: ev(1, 1),
         };
-        assert_eq!(EnvelopePoint::lerp(&a, &b, 0), 0.0);
-        assert_eq!(EnvelopePoint::lerp(&a, &b, 10), 1.0);
-        assert!((EnvelopePoint::lerp(&a, &b, 5) - 0.5).abs() < 1e-5);
+        assert_eq!(EnvelopePoint::lerp(&a, &b, 0), ev(0, 1));
+        assert_eq!(EnvelopePoint::lerp(&a, &b, 10), ev(1, 1));
+        // Midpoint should be approximately 0.5. Exact equality
+        // is not guaranteed because `Q15::ONE` is `0x7FFF`, so
+        // `0x7FFF >> 1 = 0x3FFF`, one LSB short of `HALF`
+        // (`0x4000`). The previous f32 test used `< 1e-5`; we
+        // tolerate a few raw Q15 LSBs (≈ 1.5e-4 ≈ -76 dBFS).
+        let mid = EnvelopePoint::lerp(&a, &b, 5);
+        let drift = (mid.raw_q15().raw() - Q15::HALF.raw()).abs();
+        assert!(drift <= 4, "midpoint drift {} LSB > 4", drift);
     }
 
     #[test]
     fn lerp_before_and_after() {
         let a = EnvelopePoint {
             frame: 5,
-            value: 0.0,
+            value: ev(0, 1),
         };
         let b = EnvelopePoint {
             frame: 15,
-            value: 1.0,
+            value: ev(1, 1),
         };
-        assert_eq!(EnvelopePoint::lerp(&a, &b, 0), 0.0); // before a
-        assert_eq!(EnvelopePoint::lerp(&a, &b, 20), 1.0); // after b
+        assert_eq!(EnvelopePoint::lerp(&a, &b, 0), ev(0, 1)); // before a
+        assert_eq!(EnvelopePoint::lerp(&a, &b, 20), ev(1, 1)); // after b
     }
 
     #[test]
@@ -160,15 +199,15 @@ mod tests {
             point: vec![
                 EnvelopePoint {
                     frame: 0,
-                    value: 0.0,
+                    value: ev(0, 1),
                 },
                 EnvelopePoint {
                     frame: 10,
-                    value: 0.5,
+                    value: ev(1, 2),
                 },
                 EnvelopePoint {
                     frame: 20,
-                    value: 1.0,
+                    value: ev(1, 1),
                 },
             ],
             ..Default::default()

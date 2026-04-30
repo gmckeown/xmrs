@@ -8,15 +8,6 @@ use bincode::Decode;
 use core::fmt;
 use serde::Deserialize;
 
-// Float math backend (only needed when `std` is disabled).
-// Priority: std > libm > micromath.
-#[cfg(all(not(feature = "std"), not(feature = "libm"), feature = "micromath"))]
-#[allow(unused_imports)]
-use micromath::F32Ext;
-#[cfg(all(not(feature = "std"), feature = "libm"))]
-#[allow(unused_imports)]
-use num_traits::float::Float;
-
 #[derive(Deserialize, Default, Decode)]
 #[repr(C)]
 pub struct ItEditHistoryEntry {
@@ -66,10 +57,18 @@ impl ItEditHistoryEntry {
 
     /// Return Duration
     pub fn duration(&self) -> Duration {
-        let ticks = self.run_time as f32 / 18.2;
-        let seconds = ticks as u64;
-        let nanoseconds = (ticks.fract() * 1e9) as u32;
-        Duration::new(seconds, nanoseconds)
+        // FAT timestamps run at 18.2 Hz (the IBM PC system
+        // timer). `18.2 = 91/5`, so `seconds = run_time × 5 / 91`
+        // is exact integer math; the remainder gives the
+        // fractional tick which converts to nanoseconds via
+        // `remainder × 1e9 / 91` (max `90 × 1e9 = 9 × 10¹⁰`,
+        // fits `u64`). Replaces `(run_time as f32 / 18.2)` and
+        // `.fract() * 1e9`.
+        let scaled = (self.run_time as u64) * 5;
+        let seconds = scaled / 91;
+        let remainder = scaled % 91; // ∈ [0, 90]
+        let nanoseconds = (remainder * 1_000_000_000) / 91;
+        Duration::new(seconds, nanoseconds as u32)
     }
 }
 

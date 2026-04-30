@@ -1,6 +1,7 @@
 use crate::{
     cell_note::CellNote,
     effect::{GlobalEffect, TrackEffect},
+    fixed::units::Volume,
 };
 use core::fmt::*;
 use serde::{Deserialize, Serialize};
@@ -11,7 +12,10 @@ use alloc::vec::Vec;
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct TrackUnit {
     pub note: CellNote,
-    pub velocity: f32,
+    /// Note-trigger velocity, Q1.15 in `[0, 1]`. Was `f32`.
+    /// MIDI-style: `Volume::FULL` for a normal trigger,
+    /// `Volume::SILENT` is a silent trigger.
+    pub velocity: Volume,
     pub instrument: Option<usize>,
     pub effects: Vec<TrackEffect>,
     pub global_effects: Vec<GlobalEffect>,
@@ -21,7 +25,7 @@ impl Default for TrackUnit {
     fn default() -> Self {
         Self {
             note: CellNote::default(),
-            velocity: 1.0,
+            velocity: Volume::FULL,
             instrument: None,
             effects: vec![],
             global_effects: vec![],

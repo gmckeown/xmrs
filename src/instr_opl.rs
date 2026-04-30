@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::fixed::units::Finetune;
+
 /// MDI_OPLREGS structure
 #[derive(Default, Serialize, Deserialize, Copy, Clone, Debug)]
 pub struct MdiOpl {
@@ -46,6 +48,8 @@ pub struct InstrOpl {
     pub volume: u8, // 0-63
     /// [-96..95] with 0 <=> C-4
     pub relative_pitch: i8,
-    /// [-1..1]
-    pub finetune: f32,
+    /// Sub-semitone detune, Q1.15. In tracker convention,
+    /// `±0x4000` raw ≈ `±0.5` semitone (one full step span);
+    /// `Finetune::ZERO` = on the integer grid.
+    pub finetune: Finetune,
 }

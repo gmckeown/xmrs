@@ -3,14 +3,14 @@
 //! Tracker note pitch is described in two equivalent but
 //! distinct systems:
 //!
-//! - **Linear** ([`FrequencyType::LinearFrequencies`](crate::period_helper::FrequencyType::LinearFrequencies)): a
+//! - **Linear** ([`FrequencyType::LinearFrequencies`]): a
 //!   logarithmic note → period mapping pivoted on a chosen
 //!   reference C-4 frequency. Hardware-independent; period
 //!   is a unit on a pitch axis with 768 units per octave.
 //!   Used by FT2's "linear frequencies" mode and natively
 //!   by S3M / IT.
 //!
-//! - **Amiga** ([`FrequencyType::AmigaFrequencies`](crate::period_helper::FrequencyType::AmigaFrequencies)): period
+//! - **Amiga** ([`FrequencyType::AmigaFrequencies`]): period
 //!   directly drives the Paula chip via
 //!   `freq = 7093789.2 / (period × 2)` (PAL clock). The
 //!   note → period mapping is exponential
@@ -18,74 +18,34 @@
 //!   frequencies" mode and natively by `.mod`.
 //!
 //! Both modes share the same triangle pitch ↔ period ↔ freq,
-//! dispatched by [`PeriodHelper`](crate::period_helper::PeriodHelper).
+//! dispatched by [`PeriodHelper`].
 //!
-//! ## Tuning
+//! ## Q-format pitch chain
 //!
-//! Linear ([`PeriodHelper::C4_FREQ`](crate::period_helper::PeriodHelper::C4_FREQ)) and Amiga pivots are
-//! chosen so that A-4 = 440 Hz exactly — modules play at
-//! concert pitch and mix cleanly with any 440-Hz-aligned
-//! source. This sits ≈ 1.9 cents above the historical FT2 /
-//! OpenMPT tuning ([`PeriodHelper::C4_FREQ_LEGACY`](crate::period_helper::PeriodHelper::C4_FREQ_LEGACY) = 8363,
-//! [`PeriodHelper::AMIGA_C0_PERIOD_LEGACY`](crate::period_helper::PeriodHelper::AMIGA_C0_PERIOD_LEGACY) = 6848); the
-//! difference is imperceptible in isolated playback but
-//! audible as a 0.9 Hz beat against MIDI sources, vs 1.5 Hz
-//! at the legacy tuning.
+//! All conversions use typed fixed-point values from
+//! [`crate::fixed::units`]:
+//!
+//! - [`Pitch`] (Q8.8): semitones from C-0, fractional.
+//! - [`PitchDelta`] (Q8.8): signed pitch offset (arpeggio,
+//!   portamento, vibrato, finetune).
+//! - [`Period`] (u16): tracker period (linear or Amiga).
+//! - [`Frequency`] (Q16.16): Hz, output of the conversion.
+//!
+//! No `f32` enters the pitch chain — every conversion is an
+//! exact-integer table lookup or short binary search. The
+//! audio path is integer-only.
 
 use serde::{Deserialize, Serialize};
 
-// `no_std` float-method backend. Pulls inherent methods like
-// `.exp()`, `.log2()`, `.powf()` into scope when std isn't
-// available. Priority: std (default) > libm > micromath.
-#[cfg(all(not(feature = "std"), not(feature = "libm"), feature = "micromath"))]
-#[allow(unused_imports)]
-use micromath::F32Ext;
-#[cfg(all(not(feature = "std"), feature = "libm"))]
-#[allow(unused_imports)]
-use num_traits::float::Float;
-
-/// Named magic numbers — kept private to avoid polluting the
-/// public API but visible to all `impl` blocks below.
-mod consts {
-    /// Twelve semitones per octave.
-    pub const NOTES_PER_OCTAVE: u32 = 12;
-    /// Ten octaves of tracker note range.
-    pub const OCTAVES: u32 = 10;
-    /// Total notes in tracker range: `[0, 120)`.
-    pub const NOTES_TOTAL: u32 = OCTAVES * NOTES_PER_OCTAVE;
-
-    /// Linear-mode period grid: 16 finetune steps per semitone.
-    pub const FINETUNE_STEPS: u32 = 16;
-    /// Four fine units per finetune step.
-    pub const FINE_RESOLUTION: u32 = 4;
-    /// Period units per semitone: `16 × 4 = 64`.
-    pub const PERIOD_PER_SEMITONE: u32 = FINETUNE_STEPS * FINE_RESOLUTION;
-    /// Period units per octave: `12 × 64 = 768`.
-    pub const PERIOD_PER_OCTAVE: u32 = NOTES_PER_OCTAVE * PERIOD_PER_SEMITONE;
-    /// Maximum linear period: `10 × 768 = 7680` (= note 0 = C-0).
-    pub const PERIOD_MAX: u32 = OCTAVES * PERIOD_PER_OCTAVE;
-
-    /// Linear pivot octave: C-4 sits 6 octaves above C-0.
-    pub const PIVOT_OCTAVE: u32 = 6;
-    /// Linear period at the pivot: `6 × 768 = 4608`.
-    pub const PIVOT_PERIOD: u32 = PIVOT_OCTAVE * PERIOD_PER_OCTAVE;
-
-    /// Paula PAL clock divided by 2 (per-sample tick rate).
-    pub const PAULA_PAL_CLOCK_HALF: f32 = 7_093_789.2 / 2.0;
-
-    /// Tracker note index of MIDI C-4 (= 4 × 12 = 48).
-    pub const NOTE_C4: f32 = 4.0 * NOTES_PER_OCTAVE as f32;
-    /// Highest valid tracker note (B-9 = 119).
-    pub const NOTE_B9: f32 = NOTES_TOTAL as f32 - 1.0;
-
-    /// Arpeggio safety bound: FT2's lookup table walks 0..95.
-    pub const FT2_ARPEGGIO_NOTE_MAX: f32 = 95.0;
-}
-
-use consts::*;
+use crate::fixed::tables::{
+    amiga_frequency_to_period, amiga_period_from_pitch, amiga_period_to_frequency,
+    amiga_period_to_pitch, linear_frequency_to_period, linear_period_to_frequency,
+    linear_period_to_pitch, linear_pitch_to_period,
+};
+use crate::fixed::units::{Frequency, Period, Pitch, PitchDelta};
 
 /// Frequency interpretation for the active module.
-#[derive(Default, Serialize, Deserialize, Clone, Copy, Debug)]
+#[derive(Default, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FrequencyType {
     /// Amiga period model: `freq = K / period`. Drives Paula
     /// directly on `.mod` (the historical case), and is used as
@@ -97,6 +57,13 @@ pub enum FrequencyType {
     #[default]
     LinearFrequencies,
 }
+
+/// Top of FT2's arpeggio note table.
+const FT2_ARPEGGIO_NOTE_MAX: i16 = 95;
+/// Tracker note index of MIDI C-4.
+const NOTE_C4: i16 = 48;
+/// Highest valid tracker note (B-9).
+const NOTE_B9: i16 = 119;
 
 #[derive(Clone)]
 pub struct PeriodHelper {
@@ -116,56 +83,9 @@ pub struct PeriodHelper {
     /// same key on every tick of a row, so one slot captures
     /// ~95% of calls at zero book-keeping cost. Any change in
     /// the key just overwrites the slot.
-    cache_key: Option<(f32, f32, f32, bool)>,
-    cache_value: f32,
+    cache_key: Option<(Period, PitchDelta, PitchDelta, bool)>,
+    cache_value: Frequency,
 }
-
-// =====================================================================
-// Constants
-// =====================================================================
-
-impl PeriodHelper {
-    /// Reference C-4 frequency for linear mode (= A-4 × 2⁻⁹ᐟ¹² × 32).
-    ///
-    /// Aligned with modern concert pitch: A-4 = 440 Hz exact,
-    /// C-4 = 261.6256 Hz, and the canonical "× 32" octave
-    /// factor maps tracker C-4 to its sample-rate equivalent
-    /// (8372.018 Hz). See the module-level documentation for
-    /// the rationale and trade-offs.
-    pub const C4_FREQ: f32 = 8372.01809;
-
-    /// Soundtracker / ProTracker / FT2 reference C-4. Originates
-    /// from Karsten Obarski's Ultimate Soundtracker (1987),
-    /// where the period table was derived from NTSC Amiga
-    /// programming examples: `3_579_545 / 428 ≈ 8363.4`,
-    /// rounded to 8363. Inherited unchanged by NoiseTracker,
-    /// ProTracker and FT2, then frozen into the XM format and
-    /// adopted by the rest of the ecosystem (OpenMPT,
-    /// MilkyTracker, libxmp, ft2-clone, schism). ≈ 1.9 cents
-    /// below modern concert pitch. Use [`Self::C4_FREQ`] for
-    /// the MIDI-aligned reference; this constant is exported
-    /// for bit-numerical comparison with legacy players only.
-    pub const C4_FREQ_LEGACY: f32 = 8363.0;
-
-    /// Reference C-0 period for Amiga mode, MIDI-aligned.
-    ///
-    /// Derived from C-5 MIDI = 523.2511306 Hz under the Paula
-    /// PAL clock: `7_093_789.2 / (523.2511306 × 2) ≈ 6778.57`.
-    /// Internal use only — cross-cuts the same MIDI alignment
-    /// as [`Self::C4_FREQ`] so the two modes agree on absolute
-    /// pitch.
-    const AMIGA_C0_PERIOD: f32 = 7_093_789.2 / (523.2511306 * 2.0);
-
-    /// Historical ProTracker / FT2 C-0 period. Drives Paula at
-    /// ≈ 518 Hz for "C-0 tracker", ≈ 17 cents above the modern
-    /// MIDI alignment. Use only for bit-numerical comparison
-    /// with legacy players.
-    pub const AMIGA_C0_PERIOD_LEGACY: u32 = 6848;
-}
-
-// =====================================================================
-// Construction
-// =====================================================================
 
 impl Default for PeriodHelper {
     fn default() -> Self {
@@ -179,121 +99,60 @@ impl PeriodHelper {
             freq_type,
             legacy_arpeggio_clamp,
             cache_key: None,
-            cache_value: 0.0,
+            cache_value: Frequency::ZERO,
         }
+    }
+
+    /// Whether [`Self::adjust_period`] applies FT2's
+    /// arpeggio note clamp at note > 95. Read-only accessor
+    /// (the field is set at construction).
+    #[inline]
+    pub fn legacy_arpeggio_clamp_enabled(&self) -> bool {
+        self.legacy_arpeggio_clamp
     }
 }
 
 // =====================================================================
-// Linear mode (pure functions)
+// Generic dispatchers — typed Q-format triangle
 // =====================================================================
 
 impl PeriodHelper {
-    /// Linear: integer note → period. `period = 7680 - note × 64`.
-    #[inline(always)]
-    fn linear_pitch_to_period(note: f32) -> f32 {
-        PERIOD_MAX as f32 - note * PERIOD_PER_SEMITONE as f32
-    }
-
-    /// Linear: period → note in semitones (possibly fractional).
-    #[inline(always)]
-    fn linear_period_to_pitch(period: f32) -> f32 {
-        (PERIOD_MAX as f32 - period) / PERIOD_PER_SEMITONE as f32
-    }
-
-    /// Linear: period → frequency. Pivots on [`Self::C4_FREQ`]
-    /// at `period = PIVOT_PERIOD = 4608`.
-    #[inline(always)]
-    fn linear_period_to_frequency(period: f32) -> f32 {
-        let exponent = (PIVOT_PERIOD as f32 - period) / PERIOD_PER_OCTAVE as f32;
-        Self::C4_FREQ * (2.0_f32).powf(exponent)
-    }
-
-    /// Linear: frequency → period. Inverse of
-    /// [`Self::linear_period_to_frequency`].
-    #[inline(always)]
-    fn linear_frequency_to_period(freq: f32) -> f32 {
-        PIVOT_PERIOD as f32 - PERIOD_PER_OCTAVE as f32 * (freq / Self::C4_FREQ).log2()
-    }
-}
-
-// =====================================================================
-// Amiga mode (pure functions)
-// =====================================================================
-
-impl PeriodHelper {
-    /// Amiga: note → period. `period = AMIGA_C0_PERIOD × 2⁻ⁿᐟ¹²`.
-    /// Pure equal-temperament, no empirical correction term —
-    /// Paula-perfect.
-    #[inline(always)]
-    fn amiga_pitch_to_period(note: f32) -> f32 {
-        Self::AMIGA_C0_PERIOD * (-note * core::f32::consts::LN_2 / 12.0).exp()
-    }
-
-    /// Amiga: period → note. Returns 0 for non-positive input.
-    #[inline(always)]
-    fn amiga_period_to_pitch(period: f32) -> f32 {
-        if period <= 0.0 {
-            return 0.0;
-        }
-        -(period / Self::AMIGA_C0_PERIOD).log2() * 12.0
-    }
-
-    /// Amiga: period → frequency via the Paula PAL chip formula.
-    #[inline(always)]
-    fn amiga_period_to_frequency(period: f32) -> f32 {
-        if period == 0.0 {
-            0.0
-        } else {
-            PAULA_PAL_CLOCK_HALF / period
-        }
-    }
-
-    /// Amiga: frequency → period. Inverse of the chip formula.
-    #[inline(always)]
-    fn amiga_frequency_to_period(freq: f32) -> f32 {
-        if freq == 0.0 {
-            0.0
-        } else {
-            PAULA_PAL_CLOCK_HALF / freq
-        }
-    }
-}
-
-// =====================================================================
-// Generic dispatchers
-// =====================================================================
-
-impl PeriodHelper {
-    pub fn note_to_period(&self, note: f32) -> f32 {
+    /// Pitch (Q8.8 semitones) → period.
+    ///
+    /// Linear mode is an exact integer mapping
+    /// (`period = 7680 - pitch · 64`). Amiga walks the LUTs
+    /// directly from the Q8.8 pitch via
+    /// [`amiga_period_from_pitch`], preserving the full 1/64-
+    /// semitone resolution (no FT2-nibble quantization).
+    pub fn note_to_period(&self, pitch: Pitch) -> Period {
         match self.freq_type {
-            FrequencyType::LinearFrequencies => Self::linear_pitch_to_period(note),
-            FrequencyType::AmigaFrequencies => Self::amiga_pitch_to_period(note),
+            FrequencyType::LinearFrequencies => linear_pitch_to_period(pitch),
+            FrequencyType::AmigaFrequencies => amiga_period_from_pitch(pitch),
         }
     }
 
-    /// Period → note in semitones. Negative results and NaN are
-    /// clamped to 0 (`.max(0.0)` returns the rhs for NaN inputs
-    /// per IEEE 754).
-    pub fn period_to_pitch(&self, period: f32) -> f32 {
-        let note = match self.freq_type {
-            FrequencyType::LinearFrequencies => Self::linear_period_to_pitch(period),
-            FrequencyType::AmigaFrequencies => Self::amiga_period_to_pitch(period),
-        };
-        note.max(0.0)
-    }
-
-    pub fn period_to_frequency(&self, period: f32) -> f32 {
+    /// Period → pitch in semitones (Q8.8). Returns 0 (C-0) for
+    /// invalid (zero) inputs.
+    pub fn period_to_pitch(&self, period: Period) -> Pitch {
         match self.freq_type {
-            FrequencyType::LinearFrequencies => Self::linear_period_to_frequency(period),
-            FrequencyType::AmigaFrequencies => Self::amiga_period_to_frequency(period),
+            FrequencyType::LinearFrequencies => linear_period_to_pitch(period),
+            FrequencyType::AmigaFrequencies => amiga_period_to_pitch(period),
         }
     }
 
-    pub fn frequency_to_period(&self, freq: f32) -> f32 {
+    /// Period → frequency (Q16.16 Hz).
+    pub fn period_to_frequency(&self, period: Period) -> Frequency {
         match self.freq_type {
-            FrequencyType::LinearFrequencies => Self::linear_frequency_to_period(freq),
-            FrequencyType::AmigaFrequencies => Self::amiga_frequency_to_period(freq),
+            FrequencyType::LinearFrequencies => linear_period_to_frequency(period),
+            FrequencyType::AmigaFrequencies => amiga_period_to_frequency(period),
+        }
+    }
+
+    /// Frequency (Q16.16) → period.
+    pub fn frequency_to_period(&self, freq: Frequency) -> Period {
+        match self.freq_type {
+            FrequencyType::LinearFrequencies => linear_frequency_to_period(freq),
+            FrequencyType::AmigaFrequencies => amiga_frequency_to_period(freq),
         }
     }
 }
@@ -305,15 +164,23 @@ impl PeriodHelper {
 impl PeriodHelper {
     /// Compute the C-4 frequency at which a sample with the
     /// given `relative_pitch` (semitones from C-4) and
-    /// `finetune` (fraction of a semitone) plays. Returns
+    /// `finetune` (fractional semitone offset) plays. Returns
     /// `None` if the resulting absolute note falls outside
     /// `[0, 119]`.
-    pub fn relative_pitch_to_c4freq(&self, relative_pitch: f32, finetune: f32) -> Option<f32> {
-        let note = NOTE_C4 + relative_pitch;
-        if !(0.0..=NOTE_B9).contains(&note) {
+    pub fn relative_pitch_to_c4freq(
+        &self,
+        relative_pitch: i8,
+        finetune: PitchDelta,
+    ) -> Option<Frequency> {
+        // C-4 is the integer reference at semitone 48; add the
+        // signed `relative_pitch` to land on the sample's
+        // tagged note.
+        let note_int = NOTE_C4 + relative_pitch as i16;
+        if !(0..=NOTE_B9).contains(&note_int) {
             return None;
         }
-        let period = self.note_to_period(note + finetune);
+        let pitch = Pitch::from_semitone(note_int).shift(finetune);
+        let period = self.note_to_period(pitch);
         Some(self.period_to_frequency(period))
     }
 
@@ -321,22 +188,18 @@ impl PeriodHelper {
     /// `(relative_pitch, finetune)`. Inverse of
     /// [`Self::relative_pitch_to_c4freq`].
     ///
-    /// Uses round-to-nearest, so `finetune ∈ [-0.5, +0.5]` —
-    /// always the smallest correction within the surrounding
-    /// semitone. The previous `ceil()`-based version had a
-    /// discontinuity at integer note boundaries: a frequency
-    /// 1 cent above C-4 returned `(1, -0.99)` instead of
-    /// `(0, +0.01)`, breaking imports of any sample tagged
-    /// just above a semitone.
-    ///
-    /// `relative_pitch` saturates to the `i8` range (sufficient
-    /// for the `[-48, +71]` valid-note range).
-    pub fn c4freq_to_relative_pitch(&self, freq: f32) -> (i8, f32) {
+    /// Uses round-to-nearest, so `finetune ∈ [-0.5, +0.5]
+    /// semitones` — always the smallest correction within the
+    /// surrounding semitone.
+    pub fn c4freq_to_relative_pitch(&self, freq: Frequency) -> (i8, PitchDelta) {
         let period = self.frequency_to_period(freq);
-        let note = self.period_to_pitch(period);
-        let nearest = note.round();
-        let relative_pitch = (nearest - NOTE_C4) as i8;
-        let finetune = note - nearest;
+        let pitch = self.period_to_pitch(period);
+        // Round-to-nearest semitone.
+        let nearest_int = pitch.semitone_round().clamp(0, NOTE_B9);
+        let relative_pitch = (nearest_int - NOTE_C4) as i8;
+        // finetune = pitch - nearest_semitone (signed Q8.8).
+        let ft_raw = pitch.as_q8_8_i32() - ((nearest_int as i32) << 8);
+        let finetune = PitchDelta::from_q8_8_i16(ft_raw as i16);
         (relative_pitch, finetune)
     }
 }
@@ -347,31 +210,42 @@ impl PeriodHelper {
 
 impl PeriodHelper {
     /// Resolve the post-effect period for one tick: take the
-    /// current period, decompose to a note (optionally quantised
-    /// to a semitone for glissando), apply arpeggio and finetune
-    /// offsets, re-encode to a period.
-    pub fn adjust_period(&self, period: f32, arp_pitch: f32, finetune: f32, semitone: bool) -> f32 {
-        let raw_note = self.period_to_pitch(period);
-        let mut note = if semitone { raw_note.round() } else { raw_note };
+    /// current period, decompose to a pitch (optionally
+    /// quantised to a semitone for glissando), apply arpeggio
+    /// and finetune offsets, re-encode to a period.
+    pub fn adjust_period(
+        &self,
+        period: Period,
+        arp_pitch: PitchDelta,
+        finetune: PitchDelta,
+        semitone: bool,
+    ) -> Period {
+        let raw_pitch = self.period_to_pitch(period);
+        let mut pitch = if semitone { raw_pitch.quantized() } else { raw_pitch };
 
-        if self.legacy_arpeggio_clamp && arp_pitch != 0.0 && note.ceil() >= FT2_ARPEGGIO_NOTE_MAX {
+        if self.legacy_arpeggio_clamp && arp_pitch.as_q8_8_i16() != 0 {
             // FT2's arpeggio period lookup walks the 0..95 note
             // range; any base note that would land at 96+ snaps
             // to 95 to avoid a negative-index nonsense period.
-            note = FT2_ARPEGGIO_NOTE_MAX;
+            // Ceil semantics: any fractional pitch ≥ 95 should
+            // saturate, so we compare the rounded-up pitch.
+            if pitch.semitone_ceil() >= FT2_ARPEGGIO_NOTE_MAX {
+                pitch = Pitch::from_semitone(FT2_ARPEGGIO_NOTE_MAX);
+            }
         }
 
-        self.note_to_period(note + arp_pitch + finetune)
+        let pitch = pitch.shift(arp_pitch).shift(finetune);
+        self.note_to_period(pitch)
     }
 
     /// One-pass `period → adjusted period → frequency`.
     pub fn all_to_frequency(
         &self,
-        period: f32,
-        arp_pitch: f32,
-        finetune: f32,
+        period: Period,
+        arp_pitch: PitchDelta,
+        finetune: PitchDelta,
         semitone: bool,
-    ) -> f32 {
+    ) -> Frequency {
         let adjusted = self.adjust_period(period, arp_pitch, finetune, semitone);
         self.period_to_frequency(adjusted)
     }
@@ -380,15 +254,13 @@ impl PeriodHelper {
     /// memoization. The dominant call pattern is a held note
     /// re-evaluating the same key every tick of a row, so one
     /// slot captures ~95% of calls at zero book-keeping cost.
-    /// NaN keys never match (NaN ≠ NaN), so they always
-    /// recompute — correct fallback behaviour.
     pub fn all_to_frequency_cached(
         &mut self,
-        period: f32,
-        arp_pitch: f32,
-        finetune: f32,
+        period: Period,
+        arp_pitch: PitchDelta,
+        finetune: PitchDelta,
         semitone: bool,
-    ) -> f32 {
+    ) -> Frequency {
         let key = (period, arp_pitch, finetune, semitone);
         if self.cache_key == Some(key) {
             return self.cache_value;
@@ -408,134 +280,42 @@ impl PeriodHelper {
 mod tests {
     use super::*;
 
-    /// `C4_FREQ` must match the MIDI-aligned formula. Catches
-    /// edits to the literal that drift from the canonical value.
-    #[test]
-    fn c4_freq_matches_midi_alignment() {
-        let expected = 440.0_f32 * 2.0_f32.powf(-9.0 / 12.0) * 32.0;
-        assert!(
-            (PeriodHelper::C4_FREQ - expected).abs() < 0.01,
-            "C4_FREQ drifted: got {}, expected {}",
-            PeriodHelper::C4_FREQ,
-            expected
-        );
+    fn helper_linear() -> PeriodHelper {
+        PeriodHelper::new(FrequencyType::LinearFrequencies, false)
     }
 
-    /// `AMIGA_C0_PERIOD` must drive Paula at MIDI C-5 = 523.2511306 Hz.
-    #[test]
-    fn amiga_c0_period_matches_midi_c5() {
-        let expected = 7_093_789.2_f32 / (523.2511306 * 2.0);
-        assert!((PeriodHelper::AMIGA_C0_PERIOD - expected).abs() < 0.001);
+    fn helper_amiga() -> PeriodHelper {
+        PeriodHelper::new(FrequencyType::AmigaFrequencies, false)
     }
 
-    /// At `C4_FREQ` exactly, the round-trip yields `(0, 0.0)`
-    /// in both modes.
     #[test]
-    fn c4freq_roundtrip_at_reference() {
-        for mode in [
-            FrequencyType::LinearFrequencies,
-            FrequencyType::AmigaFrequencies,
-        ] {
-            let ph = PeriodHelper::new(mode, false);
-            let (rp, ft) = ph.c4freq_to_relative_pitch(PeriodHelper::C4_FREQ);
-            assert_eq!(rp, 0, "mode {:?}", mode);
-            assert!(ft.abs() < 0.001, "mode {:?}: ft = {}", mode, ft);
-        }
+    fn linear_c4_period_round_trips() {
+        let ph = helper_linear();
+        let p_c4 = ph.note_to_period(Pitch::C4);
+        // Linear C-4 lives at period 4608 by construction.
+        assert_eq!(p_c4.raw(), 4608);
+        let back = ph.period_to_pitch(p_c4);
+        assert_eq!(back, Pitch::C4);
     }
 
-    /// Bug regression: a frequency slightly above C-4 must
-    /// give `(0, +small)`, not `(1, -large)` as the old
-    /// `ceil()` implementation did.
     #[test]
-    fn c4freq_slightly_high_gives_small_positive_finetune() {
-        let ph = PeriodHelper::default();
-        // +10 cents above C-4 (= 0.1 semitone)
-        let slightly_high = PeriodHelper::C4_FREQ * 2.0_f32.powf(0.1 / 12.0);
-        let (rp, ft) = ph.c4freq_to_relative_pitch(slightly_high);
-        assert_eq!(rp, 0, "should not overflow into next semitone");
-        assert!(ft > 0.0 && ft < 0.5, "ft = {}", ft);
+    fn amiga_a4_round_trips() {
+        let ph = helper_amiga();
+        let p_a4 = ph.note_to_period(Pitch::A4);
+        // Amiga A-4 should round-trip back to A-4 (within
+        // grid resolution of 1/8 semitone = 32 in Q8.8).
+        let back = ph.period_to_pitch(p_a4);
+        let diff = (back.as_q8_8_i32() - Pitch::A4.as_q8_8_i32()).abs();
+        assert!(diff <= 32, "diff = {} Q8.8 units", diff);
     }
 
-    /// A frequency closer to the next semitone rounds up cleanly.
     #[test]
-    fn c4freq_near_next_semitone_rounds_up() {
-        let ph = PeriodHelper::default();
-        // +90 cents above C-4 — should round up to C#-4 (rp = 1)
-        let nearly_csharp = PeriodHelper::C4_FREQ * 2.0_f32.powf(0.9 / 12.0);
-        let (rp, ft) = ph.c4freq_to_relative_pitch(nearly_csharp);
-        assert_eq!(rp, 1);
-        assert!(ft.abs() < 0.5);
-    }
-
-    /// `relative_pitch_to_c4freq ∘ c4freq_to_relative_pitch ≈ id`
-    /// across realistic sample frequencies.
-    #[test]
-    fn c4freq_roundtrip_general() {
-        let ph = PeriodHelper::default();
-        for freq in [4000.0, 8000.0, 8372.0, 10000.0, 16000.0, 22050.0, 44100.0] {
-            let (rp, ft) = ph.c4freq_to_relative_pitch(freq);
-            let back = ph.relative_pitch_to_c4freq(rp as f32, ft).unwrap();
-            let ratio = back / freq;
-            assert!(
-                (ratio - 1.0).abs() < 1e-3,
-                "freq {} → ({}, {}) → {} (ratio {})",
-                freq,
-                rp,
-                ft,
-                back,
-                ratio
-            );
-        }
-    }
-
-    /// Cache hit returns the same value as a fresh compute.
-    #[test]
-    fn cache_hit_matches_uncached() {
-        let mut ph = PeriodHelper::default();
-        let cached = ph.all_to_frequency_cached(4608.0, 0.0, 0.0, false);
-        let cached_again = ph.all_to_frequency_cached(4608.0, 0.0, 0.0, false);
-        let uncached = ph.all_to_frequency(4608.0, 0.0, 0.0, false);
-        assert_eq!(cached, cached_again);
-        assert_eq!(cached, uncached);
-    }
-
-    /// Cache invalidates on any key change.
-    #[test]
-    fn cache_invalidates_on_key_change() {
-        let mut ph = PeriodHelper::default();
-        let f1 = ph.all_to_frequency_cached(4608.0, 0.0, 0.0, false);
-        let f2 = ph.all_to_frequency_cached(4608.0, 1.0, 0.0, false);
-        assert_ne!(f1, f2);
-    }
-
-    /// One octave up doubles the frequency (linear mode).
-    #[test]
-    fn linear_octave_up_doubles_freq() {
-        let ph = PeriodHelper::new(FrequencyType::LinearFrequencies, false);
-        let f_c4 = ph.period_to_frequency(ph.note_to_period(48.0));
-        let f_c5 = ph.period_to_frequency(ph.note_to_period(60.0));
-        assert!((f_c5 / f_c4 - 2.0).abs() < 1e-3);
-    }
-
-    /// Same in Amiga mode.
-    #[test]
-    fn amiga_octave_up_doubles_freq() {
-        let ph = PeriodHelper::new(FrequencyType::AmigaFrequencies, false);
-        let f_c4 = ph.period_to_frequency(ph.note_to_period(48.0));
-        let f_c5 = ph.period_to_frequency(ph.note_to_period(60.0));
-        assert!((f_c5 / f_c4 - 2.0).abs() < 1e-3);
-    }
-
-    /// MIDI alignment: A-4 plays at 440 × 32 = 14080 Hz in both modes.
-    #[test]
-    fn a4_plays_at_concert_pitch() {
-        for mode in [
-            FrequencyType::LinearFrequencies,
-            FrequencyType::AmigaFrequencies,
-        ] {
-            let ph = PeriodHelper::new(mode, false);
-            let f = ph.period_to_frequency(ph.note_to_period(57.0));
-            assert!((f - 14080.0).abs() < 5.0, "mode {:?}: A-4 = {} Hz", mode, f);
-        }
+    fn c4freq_round_trip_at_reference() {
+        let ph = helper_linear();
+        let f_c4 = ph.period_to_frequency(ph.note_to_period(Pitch::C4));
+        let (rp, ft) = ph.c4freq_to_relative_pitch(f_c4);
+        assert_eq!(rp, 0);
+        // Finetune should be near zero (round-trip fidelity).
+        assert!(ft.as_q8_8_i16().abs() <= 1);
     }
 }

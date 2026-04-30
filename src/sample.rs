@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use crate::fixed::units::{Amp, ChannelVolume, Finetune, Panning, Volume};
+
 /// How to play sample
 #[derive(Default, Serialize, Deserialize, Copy, Clone, IntoPrimitive, TryFromPrimitive, Debug)]
 #[repr(u8)]
@@ -31,7 +33,15 @@ impl PartialEq for LoopType {
 
 impl Eq for LoopType {}
 
-/// is sample recorded with 8 or 16 bits depth
+/// is sample recorded with 8, 16 bits depth, or native f32
+///
+/// `StereoFloat` is the input format for callers that produce
+/// audio data as `f32` directly (typical: WAV imports, audio
+/// engines bridged in from a desktop host). It is converted
+/// to Q1.15 [`Amp`] at read time via the saturating cast in
+/// [`Sample::at`]. The audio runtime itself never carries
+/// `f32` after this conversion — the variant is purely an
+/// input-format option.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum SampleDataType {
     Mono8(Vec<i8>),
@@ -66,25 +76,32 @@ pub struct Sample {
     pub name: String,
     /// [-96..95] with 0 <=> C-4
     pub relative_pitch: i8,
-    /// [-1..1]
-    pub finetune: f32,
-    /// [0..1] linear value — ALWAYS-applied sample scale (IT's GvL,
-    /// 0..64 normalised). Independent of the note-column volume.
-    pub volume: f32,
-    /// [0..1] linear value — starting note volume used when a
-    /// pattern cell triggers this sample without a volume-column
-    /// override. IT calls this "Vol" (default note volume, 0..64
-    /// normalised); MOD / XM / S3M have no equivalent and leave it
-    /// at `1.0` (full).
+    /// Sub-semitone detune, Q1.15 in `[-1, +1]`. Was `f32` —
+    /// see [`Finetune`] for the conversion convention.
+    pub finetune: Finetune,
+    /// ALWAYS-applied sample scale (IT's GvL, `0..64`
+    /// normalised), Q1.15 in `[0, 1]`. Independent of the
+    /// note-column volume.
+    ///
+    /// Was `f32`. Field name kept for API stability even
+    /// though semantically this is the channel-applied
+    /// volume — see the GvL documentation in the IT spec.
+    pub volume: ChannelVolume,
+    /// Starting note volume used when a pattern cell triggers
+    /// this sample without a volume-column override (IT's
+    /// "Vol", `0..64` normalised), Q1.15 in `[0, 1]`. MOD /
+    /// XM / S3M have no equivalent and leave it at
+    /// [`Volume::FULL`].
     ///
     /// Layered on top of `volume` at note-trigger time:
-    ///   voice_start = sample.volume * sample.default_note_volume
-    /// while a V-column override replaces `default_note_volume` at
-    /// trigger time, letting `volume` (GvL in IT terminology) keep
-    /// scaling the sample regardless.
-    pub default_note_volume: f32,
-    /// [0..1] <=> [left..right]
-    pub panning: f32,
+    ///   `voice_start = sample.volume × sample.default_note_volume`
+    /// while a V-column override replaces `default_note_volume`
+    /// at trigger time, letting `volume` (GvL) keep scaling the
+    /// sample regardless.
+    pub default_note_volume: Volume,
+    /// Pan position, Q1.15 in `[0, 1]` (`0` left, `0.5` centre,
+    /// `1.0` right).
+    pub panning: Panning,
 
     /// loop type
     pub loop_flag: LoopType,
@@ -121,28 +138,60 @@ impl Sample {
         self.len() == 0
     }
 
-    /// return sample at seek
+    /// return sample at seek as a Q1.15 stereo pair.
+    ///
+    /// Each variant maps directly to Q1.15 with no rounding:
+    /// * `Mono8` / `Stereo8`: i8 is "Q1.7"; left-shift by 8
+    ///   widens to Q1.15 — the low byte is zero, the upper
+    ///   byte is the sign-extended sample.
+    /// * `Mono16` / `Stereo16`: i16 IS Q1.15.
+    /// * `StereoFloat`: input-side `f32` (e.g. WAV imports);
+    ///   the saturating `× 32768.0 as i16` cast is the input
+    ///   boundary — once converted to [`Amp`], the audio path
+    ///   is integer-only.
     #[inline(always)]
-    pub fn at(&self, seek: usize) -> (f32, f32) {
+    pub fn at(&self, seek: usize) -> (Amp, Amp) {
         match &self.data {
-            Some(SampleDataType::Mono8(v)) => (v[seek] as f32 / 128.0, v[seek] as f32 / 128.0),
-            Some(SampleDataType::Mono16(v)) => (v[seek] as f32 / 32768.0, v[seek] as f32 / 32768.0),
-            Some(SampleDataType::Stereo8(v)) => {
-                (v[seek * 2] as f32 / 128.0, v[seek * 2 + 1] as f32 / 128.0)
+            Some(SampleDataType::Mono8(v)) => {
+                let raw = (v[seek] as i16) << 8;
+                let a = Amp::from_q15_i16(raw);
+                (a, a)
             }
-            Some(SampleDataType::Stereo16(v)) => (
-                v[seek * 2] as f32 / 32768.0,
-                v[seek * 2 + 1] as f32 / 32768.0,
+            Some(SampleDataType::Mono16(v)) => {
+                let a = Amp::from_q15_i16(v[seek]);
+                (a, a)
+            }
+            Some(SampleDataType::Stereo8(v)) => (
+                Amp::from_q15_i16((v[seek * 2] as i16) << 8),
+                Amp::from_q15_i16((v[seek * 2 + 1] as i16) << 8),
             ),
-            Some(SampleDataType::StereoFloat(v)) => (v[seek * 2], v[seek * 2 + 1]),
-            None => (0.0, 0.0),
+            Some(SampleDataType::Stereo16(v)) => (
+                Amp::from_q15_i16(v[seek * 2]),
+                Amp::from_q15_i16(v[seek * 2 + 1]),
+            ),
+            Some(SampleDataType::StereoFloat(v)) => {
+                // Input-side `f32 → Q1.15` saturating cast. Per
+                // the Rust reference (since 1.45), `f32 as i16`
+                // is well-defined: NaN → 0, ±∞ → ±i16::MAX/MIN,
+                // and out-of-range values saturate to the
+                // bounds — which is exactly the semantic we
+                // want at this audio input boundary.
+                let to_amp = |x: f32| -> Amp {
+                    Amp::from_q15_i16((x * 32768.0) as i16)
+                };
+                (to_amp(v[seek * 2]), to_amp(v[seek * 2 + 1]))
+            }
+            None => (Amp::SILENCE, Amp::SILENCE),
         }
     }
 
     pub fn clamp(&mut self) {
-        self.volume = self.volume.clamp(0.0, 1.0);
-        self.panning = self.panning.clamp(0.0, 1.0);
-        self.finetune = self.finetune.clamp(-1.0, 1.0);
+        // `volume`, `panning`, and `finetune` were `f32` with
+        // explicit `clamp(0.0, 1.0)` / `clamp(-1.0, +1.0)`
+        // calls. Their fixed-point types are bounded by
+        // construction (`Q15` is in `[-1, +1)` always; the
+        // domain newtypes' `from_*` constructors saturate),
+        // so the runtime clamp is no-op and has been removed.
         self.relative_pitch = self.relative_pitch.clamp(-95, 96);
 
         if self.sustain_loop_start as usize > self.len() {
@@ -273,7 +322,7 @@ impl Sample {
         }
     }
 
-    /// return sample size (8 or 16 bits)
+    /// return sample size (8, 16 bits, or 32 for f32)
     pub fn bits(&self) -> u8 {
         match &self.data {
             Some(SampleDataType::Mono8(_)) => 8,
@@ -294,10 +343,10 @@ mod tests {
         Sample {
             name: alloc::string::String::new(),
             relative_pitch: 0,
-            finetune: 0.0,
-            volume: 1.0,
-            default_note_volume: 1.0,
-            panning: 0.5,
+            finetune: Finetune::ZERO,
+            volume: ChannelVolume::FULL,
+            default_note_volume: Volume::FULL,
+            panning: Panning::CENTER,
             loop_flag,
             loop_start,
             loop_length,

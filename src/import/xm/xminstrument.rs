@@ -8,6 +8,8 @@ use alloc::string::String;
 use alloc::{vec, vec::Vec};
 
 use crate::envelope::{Envelope, EnvelopePoint};
+use crate::fixed::fixed::Q8_8;
+use crate::fixed::units::{EnvValue, PitchDelta, Volume};
 use crate::instr_default::InstrDefault;
 use crate::instrument::{Instrument, InstrumentType};
 use crate::module::Module;
@@ -109,7 +111,11 @@ impl XmInstrDefault {
         let mut i = 0;
         for ep in &e.point {
             let f = ep.frame.to_le_bytes();
-            let v = ((64.0 * ep.value) as u16).to_le_bytes();
+            // Inverse of `EnvValue::from_byte_64`: get back the
+            // tracker byte in `0..=64`. Round-trip is exact for
+            // every byte that came in through the importer; see
+            // [`EnvValue::to_byte_64`] for the rounding rule.
+            let v = (ep.value.to_byte_64() as u16).to_le_bytes();
             dst[i] = f[0];
             dst[i + 1] = f[1];
             dst[i + 2] = v[0];
@@ -165,11 +171,19 @@ impl XmInstrDefault {
                     Waveform::TranslatedRampDown => 3,
                     _ => 0,
                 };
-                xmid.vibrato_sweep = (id.voice.vibrato.sweep * 255.0) as u8;
-                xmid.vibrato_depth = (id.voice.vibrato.depth * 15.0 * 2.0) as u8;
-                xmid.vibrato_rate = (id.voice.vibrato.speed * 63.0 * 4.0) as u8;
+                // XM stores each vibrato parameter as a u8 byte
+                // representing `value × scale`. Scales come from
+                // the FT2 reference: sweep × 255, depth × 30,
+                // rate × 252. `to_ratio_byte` does the multiply
+                // with proper round-to-nearest and clamps to u8.
+                xmid.vibrato_sweep = id.voice.vibrato.sweep.to_ratio_byte(255);
+                xmid.vibrato_depth = id.voice.vibrato.depth.to_ratio_byte(15 * 2);
+                xmid.vibrato_rate = id.voice.vibrato.speed.to_ratio_byte(63 * 4);
 
-                xmid.volume_fadeout = (id.voice.volume_fadeout * 4095.0 * 4.0 * 2.0 + 0.5) as u16;
+                // XM stores volume_fadeout as `value × 32760`
+                // in u16. The previous `+ 0.5` rounding bias is
+                // baked into `to_ratio_u16`'s round-to-nearest.
+                xmid.volume_fadeout = id.voice.volume_fadeout.to_ratio_u16(4095 * 4 * 2);
 
                 xmid.midi_on = if id.midi.muted { 0 } else { 1 };
                 xmid.midi_channel = id.midi.channel;
@@ -354,7 +368,7 @@ impl XmInstrument {
         for _i in 0..src.len() / 4 {
             let ep = EnvelopePoint {
                 frame: iter.next()? as usize,
-                value: iter.next()? as f32 / 64.0,
+                value: EnvValue::from_byte_64(iter.next()? as u8),
             };
             e.point.push(ep);
         }
@@ -398,7 +412,7 @@ impl XmInstrument {
                 id.voice.pan_envelope =
                     Self::envelope_from_slice(&xmi.panning_envelope[0..num_pan_pt])
                         .unwrap_or_default();
-                id.voice.volume_fadeout = xmi.volume_fadeout as f32 / 4095.0 / 4.0 / 2.0;
+                id.voice.volume_fadeout = Volume::from_ratio(xmi.volume_fadeout as i32, 4095 * 4 * 2);
                 id.sample = sample;
 
                 // copy volume envelope data
@@ -494,9 +508,9 @@ impl XmInstrument {
                         3 => Waveform::TranslatedRampDown,
                         _ => Waveform::TranslatedSine,
                     };
-                    v.speed = xmi.vibrato_rate as f32 / 63.0 / 4.0;
-                    v.depth = xmi.vibrato_depth as f32 / 15.0 / 2.0;
-                    v.sweep = xmi.vibrato_sweep as f32 / 255.0;
+                    v.speed = Q8_8::from_ratio(xmi.vibrato_rate as i16, 63 * 4);
+                    v.depth = PitchDelta::from_ratio(xmi.vibrato_depth as i16, 15 * 2);
+                    v.sweep = Q8_8::from_ratio(xmi.vibrato_sweep as i16, 255);
                 }
 
                 id.midi.muted = xmi.midi_on == 0;

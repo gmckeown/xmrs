@@ -5,6 +5,8 @@ use bincode::error::DecodeError;
 use serde::Deserialize;
 use serde_big_array::BigArray;
 
+use crate::fixed::fixed::Q15;
+use crate::fixed::units::{EnvValue, Panning, Volume};
 use crate::prelude::*;
 
 use super::serde_helper::deserialize_string_12;
@@ -118,7 +120,7 @@ impl ItEnvelopePre2 {
                 orig_idx,
                 EnvelopePoint {
                     frame: *tick as usize,
-                    value: (*magnitude as f32) / 64.0,
+                    value: EnvValue::from_byte_64(*magnitude),
                 },
             ));
         }
@@ -329,7 +331,7 @@ impl ItEnvelopePost2 {
                     orig_idx,
                     EnvelopePoint {
                         frame: *tick as usize,
-                        value: (*value as f32) / 64.0,
+                        value: EnvValue::from_byte_64(*value),
                     },
                 )
             })
@@ -362,13 +364,11 @@ impl ItEnvelopePost2 {
             .iter()
             .enumerate()
             .map(|(orig_idx, (value, tick))| {
-                let signed = *value as i8; // -32..=32 in the format
-                let normalised = (signed as f32 + 32.0) / 64.0; // → 0.0..=1.0
                 (
                     orig_idx,
                     EnvelopePoint {
                         frame: *tick as usize,
-                        value: normalised,
+                        value: EnvValue::from_signed_byte_64(*value as i8),
                     },
                 )
             })
@@ -600,7 +600,7 @@ impl ItInstrument {
                 // arm below), and the two scales are arranged so the
                 // *fade time at a given raw byte* stays the same
                 // across formats.
-                instr.voice.volume_fadeout = source.instr.fadeout as f32 / 512.0;
+                instr.voice.volume_fadeout = Volume::from_ratio(source.instr.fadeout as i32, 512);
 
                 let nna = match source.instr.nna {
                     1 => NewNoteAction::Continue,
@@ -698,22 +698,28 @@ impl ItInstrument {
                 // than intended; on a forward-looped sample, that's
                 // up to a full minute of audible tail after a `===`
                 // before the voice finally died.)
-                instr.voice.volume_fadeout = source.instr.fadeout as f32 / 1024.0;
+                instr.voice.volume_fadeout = Volume::from_ratio(source.instr.fadeout as i32, 1024);
                 instr.voice.pitch_pan_center = source
                     .instr
                     .pitch_pan_center
                     .try_into()
                     .unwrap_or(Pitch::C4);
-                instr.voice.pitch_pan_separation = source.instr.pitch_pan_separation as f32 / 32.0;
-                instr.voice.volume = source.instr.global_volume as f32 / 128.0;
+                // Signed `[-32, 32]` → Q1.15 in `[-1, 1]`.
+                instr.voice.pitch_pan_separation =
+                    Q15::from_ratio(source.instr.pitch_pan_separation as i32, 32);
+                // IT global volume is 0..128.
+                instr.voice.volume = Volume::from_ratio(source.instr.global_volume as i32, 128);
                 instr.voice.default_pan = if source.instr.default_pan & 0b1000_0000 == 0 {
-                    source.instr.default_pan as f32 / 64.0
+                    Panning::from_byte_64(source.instr.default_pan)
                 } else {
-                    0.5
+                    Panning::CENTER
                 };
+                // Random variations are stored as `0..=100`
+                // percent.
                 instr.voice.random_volume_variation =
-                    source.instr.random_volume_variation as f32 / 100.0;
-                instr.voice.random_pan_variation = source.instr.random_pan_variation as f32 / 100.0;
+                    Q15::from_ratio(source.instr.random_volume_variation as i32, 100);
+                instr.voice.random_pan_variation =
+                    Q15::from_ratio(source.instr.random_pan_variation as i32, 100);
 
                 instr.voice.initial_filter_cutoff = source.instr.initial_filter_cutoff;
                 instr.voice.initial_filter_resonance = source.instr.initial_filter_resonance;

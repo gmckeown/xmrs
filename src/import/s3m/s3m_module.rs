@@ -3,6 +3,7 @@ use bincode;
 use bincode::error::DecodeError;
 use serde::Deserialize;
 
+use crate::fixed::units::{ChannelVolume, Finetune, Frequency, Panning, Period, Volume};
 use crate::import::import_memory::ImportMemory;
 use crate::import::import_memory::MemoryType;
 use crate::import::orders_helper;
@@ -174,14 +175,12 @@ impl S3mPcmInstr {
             let (left_channel, right_channel) = p.split_at(half_length);
 
             for i in 0..half_length {
-                let l = left_channel[i] ^ 0x80;
-                let r = right_channel[i] ^ 0x80;
-                dst.push(l as i8);
-                dst.push(r as i8);
+                dst.push(u8_pcm_to_i8(left_channel[i]));
+                dst.push(u8_pcm_to_i8(right_channel[i]));
             }
         } else {
             for &v in p.iter().take(length) {
-                dst.push((v ^ 0x80) as i8)
+                dst.push(u8_pcm_to_i8(v))
             }
         }
         dst
@@ -196,18 +195,32 @@ impl S3mPcmInstr {
             let (left_channel, right_channel) = p.split_at(half_length);
 
             for i in 0..half_length {
-                let l = left_channel[i] ^ 0x8000;
-                let r = right_channel[i] ^ 0x8000;
-                dst.push(l as i16);
-                dst.push(r as i16);
+                dst.push(u16_pcm_to_i16(left_channel[i]));
+                dst.push(u16_pcm_to_i16(right_channel[i]));
             }
         } else {
             for &v in p.iter().take(length) {
-                dst.push((v ^ 0x8000) as i16)
+                dst.push(u16_pcm_to_i16(v))
             }
         }
         dst
     }
+}
+
+/// Convert an unsigned-PCM byte to signed-PCM by flipping the
+/// midpoint bit. S3M stores 8-bit PCM samples as unsigned
+/// (`0..=255`, silence at `128`); the audio path expects signed
+/// (`-128..=127`, silence at `0`). XOR with the MSB inverts the
+/// high bit, mapping `0 ↔ -128`, `128 ↔ 0`, `255 ↔ +127`.
+#[inline]
+const fn u8_pcm_to_i8(u: u8) -> i8 {
+    (u ^ 0x80) as i8
+}
+
+/// 16-bit equivalent of [`u8_pcm_to_i8`].
+#[inline]
+const fn u16_pcm_to_i16(u: u16) -> i16 {
+    (u ^ 0x8000) as i16
 }
 
 #[repr(C)]
@@ -278,8 +291,17 @@ impl S3mOplInstr {
         i_opl.element.modulator_wave_select = self.mod8;
         i_opl.element.carrier_wave_select = self.car9;
         i_opl.volume = self.volume;
-        let rn = ph.c4freq_to_relative_pitch(self.c2spd as f32);
-        i_opl.finetune = rn.1;
+        // C2-speed → (relative_pitch, finetune) using the Q-format
+        // pitch tables. `c4freq_to_relative_pitch` returns
+        // `(i8 semitones, PitchDelta Q8.8 fractional)`. Map the
+        // fractional `PitchDelta` raw into a `Finetune` (Q1.15)
+        // by `<< 7` (256→32768 = 2^7 widening). The fractional
+        // part of `PitchDelta` here is bounded to ±0.5 semitone
+        // by the splitting convention, well inside Q1.15 range.
+        let f = Frequency::from_hz(self.c2spd);
+        let rn = ph.c4freq_to_relative_pitch(f);
+        i_opl.finetune =
+            crate::fixed::units::Finetune::from_q15_i32_sat((rn.1.as_q8_8_i32()) << 7);
         i_opl.relative_pitch = rn.0;
 
         i_opl
@@ -726,12 +748,12 @@ impl S3mModule {
                     ChannelDefault::default()
                 } else if s & 0x08 != 0 {
                     ChannelDefault {
-                        panning: Some(0xC0 as f32 / 256.0), // soft right
+                        panning: Some(Panning::from_byte_255(0xC0)), // soft right
                         ..ChannelDefault::default()
                     }
                 } else {
                     ChannelDefault {
-                        panning: Some(0x40 as f32 / 256.0), // soft left
+                        panning: Some(Panning::from_byte_255(0x40)), // soft left
                         ..ChannelDefault::default()
                     }
                 }
@@ -805,7 +827,7 @@ impl S3mModule {
         // rescaling at `fmt/s3m.c:233` — it only applies to a
         // legacy variant and would silently change levels for
         // mainstream S3Ms.)
-        module.mix_volume = ((self.header.master_volume & 0x7F) as f32) / 128.0;
+        module.mix_volume = Volume::from_ratio((self.header.master_volume & 0x7F) as i32, 128);
         // Canonical ST3 replay profile. The amigalimits masterflag
         // is per-file, so we overlay it on top of the base profile.
         module.profile = {
@@ -813,7 +835,13 @@ impl S3mModule {
             if amigalimits {
                 // ST3 `aspd` range `[453, 3424]` → xmrs Amiga units
                 // `[113.25, 856]` (xmrs periods are 1/4 of ST3's).
-                p.quirks.period_clamp = Some((113.25, 856.0));
+                //
+                // Truncated to integer `Period` after the migration
+                // (was `(113.25, 856.0)`). The lost 0.25 sub-period
+                // precision is well below an audible cent of pitch
+                // and matches the typed `Period` storage.
+                p.quirks.period_clamp =
+                    Some((Period::from_raw(113), Period::from_raw(856)));
             }
             p
         };
@@ -849,21 +877,36 @@ impl S3mModule {
                     let data = s3m_meta_instr.sample.clone();
                     // Guard against degenerate c2spd values (0, or absurdly
                     // small) producing NaN/inf in `c4freq_to_relative_pitch`.
-                    // 8363 Hz is the historical Amiga/ST3 default for C-4.
-                    let c2spd = if pcm.c2spd == 0 {
-                        PeriodHelper::C4_FREQ as u32
+                    // 8372 Hz is the modern MIDI-aligned C-4 reference.
+                    let c2spd_hz = if pcm.c2spd == 0 {
+                        crate::fixed::tables::C4_FREQ_HZ
                     } else {
                         pcm.c2spd
                     };
-                    let rn = ph.c4freq_to_relative_pitch(c2spd as f32);
+                    let f = Frequency::from_hz(c2spd_hz);
+                    let rn = ph.c4freq_to_relative_pitch(f);
+                    // `rn.1` is `PitchDelta` (Q8.8 semitones, in
+                    // `[-0.5, +0.5]` after round-to-nearest);
+                    // `Sample.finetune` is `Finetune` (Q1.15
+                    // where ±1 = ±1 semitone). Conversion is a
+                    // simple `<< 7` (256 → 32768), with
+                    // saturation guarding the corner cases.
+                    let finetune = {
+                        // PitchDelta is Q8.8 in `[-0.5, +0.5]`,
+                        // Finetune is Q1.15 where `±1 = ±1
+                        // semitone`. Width promotion is `<< 7`
+                        // (256 → 32768), saturated.
+                        let pd_raw = rn.1.as_q8_8_i32();
+                        Finetune::from_q15_i32_sat(pd_raw << 7)
+                    };
                     let sample = Sample {
                         name: s3m_meta_instr.filename.clone(),
                         relative_pitch: rn.0,
-                        finetune: rn.1,
-                        volume: pcm.volume as f32 / 64.0,
+                        finetune,
+                        volume: ChannelVolume::from_byte_64(pcm.volume),
                         // S3M has no per-sample default note volume.
-                        default_note_volume: 1.0,
-                        panning: 0.5,
+                        default_note_volume: Volume::FULL,
+                        panning: Panning::CENTER,
                         loop_flag: if pcm.is_loop() {
                             LoopType::Forward
                         } else {

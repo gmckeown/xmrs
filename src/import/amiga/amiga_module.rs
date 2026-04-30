@@ -2,6 +2,7 @@ use super::amiga_sample::AmigaSample;
 use super::patternslot::PatternSlot;
 use bincode::error::DecodeError;
 
+use crate::fixed::units::Volume;
 use crate::import::import_memory::ImportMemory;
 use crate::import::import_memory::MemoryType;
 use crate::prelude::*;
@@ -342,7 +343,7 @@ impl AmigaModule {
         // `fmt/xm.c:885`) — same default as XM. We mirror that so
         // every format feeds the player's mixer with the same
         // pre-attenuated level.
-        module.mix_volume = 48.0 / 128.0;
+        module.mix_volume = Volume::from_ratio(48, 128);
         module.default_tempo = 6;
         module.default_bpm = 125;
         // MOD restart byte (offset 0x3B7). Soundtracker / Noisetracker

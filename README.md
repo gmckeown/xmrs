@@ -114,32 +114,59 @@ cargo run --example sid
 
 Defaults: `["std", "import"]`.
 
-| Feature        | Purpose                                                     |
-| -------------- | ----------------------------------------------------------- |
-| `std`          | Build against `std`; uses `f32`'s inherent math methods.    |
-| `import`       | Umbrella: enables every `import_*` format importer.         |
-| `import_mod`   | Amiga ProTracker MOD.                                       |
-| `import_xm`    | Fast Tracker II XM (and XI instruments).                    |
-| `import_s3m`   | Scream Tracker 3 S3M.                                       |
-| `import_it`    | Impulse Tracker IT.                                         |
-| `import_sid`   | Commodore 64 SID (bundled Rob Hubbard tunes).               |
-| `libm`         | Float math via [`libm`](https://crates.io/crates/libm) (pick one in `no_std`).           |
-| `micromath`    | Float math via [`micromath`](https://crates.io/crates/micromath) (pick one in `no_std`). |
-| `demo`         | Pulls in `clap`, `std` and `import` for the CLI examples.   |
-| `rand8` / `rand16` / `rand64` | Extra xorshift widths (`rand32` is always on). |
+| Feature           | Purpose                                                             |
+| ----------------- | ------------------------------------------------------------------- |
+| `std`             | Build against `std`. Only forwards `std` to a few dependencies (`bincode`, `serde`, `num_enum`); the crate itself does not need `std` for arithmetic — see below. |
+| `float-helpers`   | Add `f32 ↔ Q` conversions on every fixed-point and domain type in `crate::fixed`. Intended for the editor / desktop side (level-meters, plotting, GUI numeric fields). Self-contained, uses only `core`-stable `f32` operations — no math backend pulled in. Never enable it on the embedded target. |
+| `import`          | Umbrella: enables every `import_*` format importer.                 |
+| `import_mod`      | Amiga ProTracker MOD.                                               |
+| `import_xm`       | Fast Tracker II XM (and XI instruments).                            |
+| `import_s3m`      | Scream Tracker 3 S3M.                                               |
+| `import_it`       | Impulse Tracker IT.                                                 |
+| `import_sid`      | Commodore 64 SID (bundled Rob Hubbard tunes).                       |
+| `demo`            | Pulls in `clap`, `std` and `import` for the CLI examples.           |
+| `rand8` / `rand16` / `rand64` | Extra xorshift widths (`rand32` is always on).          |
 
 ### `no_std` builds
 
-With `std` disabled, exactly one math backend is required — the crate
-refuses to compile otherwise:
+The crate compiles **fully `no_std` with no math backend at all**. Every
+former `f32` site on the runtime path has been folded to integer
+Q-format arithmetic — pitch / period / frequency tables, the LFO
+(`waveform.rs`), the IT importer's `c5_speed_to_finetune` (binary
+search via `linear_frequency_to_period`), envelopes, panning, filter,
+sample interpolation. No `libm`, no `micromath`, no `num-traits`.
+
+`bincode` is pulled in only by the importer features that need it —
+with no `import_*` enabled, it is not compiled. `serde-big-array` is
+core (the IT keyboard table is `[Option<_>; 120]`, beyond serde's
+native const-generic limit of `N ≤ 32`).
 
 ```sh
-# libm backend:
-cargo build --no-default-features --features "libm import" --release
+# Minimal build, no importers (pre-baked blobs only):
+cargo build --no-default-features --release
 
-# micromath backend (smaller, less precise):
-cargo build --no-default-features --features "micromath import" --release
+# Embedded build, MOD + XM importers only:
+cargo build --no-default-features --features "import_mod import_xm" --release
 ```
+
+## Concert pitch (440 Hz / MIDI-aligned)
+
+Notes resolve to **MIDI-aligned frequencies by default**: A-4 plays at
+exactly 440 Hz, C-4 at 261.626 Hz, etc. This means tracker output mixes
+cleanly with any 440-Hz-aligned source (MIDI sequencers, DAW samples,
+commercial audio) without a detune.
+
+Two reference constants govern this, both in `crate::fixed::tables`:
+
+| Mode                      | Default (MIDI-aligned) | Legacy (FT2 / PT)                |
+| ------------------------- | ---------------------- | -------------------------------- |
+| Linear (XM/IT linear)     | `C4_FREQ_HZ = 8372`    | `C4_FREQ_HZ_LEGACY = 8363` (≈ −2 cents) |
+| Amiga (MOD/S3M/IT amiga)  | `AMIGA_C0_PERIOD = 6779` | `AMIGA_C0_PERIOD_LEGACY = 6848` (≈ +17 cents) |
+
+The legacy values are exposed for bit-numerical comparison against
+reference players (OpenMPT, libxmp, schism, ft2-clone). Most users
+should leave the defaults alone — that's what makes a tracker note
+sound *in tune* against modern audio.
 
 ### Embedded / footprint-sensitive builds
 

@@ -55,7 +55,45 @@ use crate::import::xm::mod_xm_effect::ModXmEffect;
 use super::patternslot::PatternSlot;
 use super::track_import_effect::TrackImportEffect;
 use super::track_import_unit::TrackImportUnit;
+use crate::fixed::fixed::{Q15, Q8_8};
+use crate::fixed::units::PitchDelta;
 use crate::prelude::*;
+
+/// Stash a [`Q15`] into the i16-raw effect-memory cache.
+#[inline]
+fn cache_q15(q: Q15) -> i16 {
+    q.raw()
+}
+
+/// Inverse of [`cache_q15`].
+#[inline]
+fn cached_q15(slot: i16) -> Q15 {
+    Q15::from_raw(slot)
+}
+
+/// Stash a [`Q8_8`] into the i16-raw cache.
+#[inline]
+fn cache_q8_8(q: Q8_8) -> i16 {
+    q.raw()
+}
+
+/// Inverse of [`cache_q8_8`].
+#[inline]
+fn cached_q8_8(slot: i16) -> Q8_8 {
+    Q8_8::from_raw(slot)
+}
+
+/// Stash a [`PitchDelta`] into the i16-raw cache.
+#[inline]
+fn cache_pitch_delta(p: PitchDelta) -> i16 {
+    p.as_q8_8_i16()
+}
+
+/// Inverse of [`cache_pitch_delta`].
+#[inline]
+fn cached_pitch_delta(slot: i16) -> PitchDelta {
+    PitchDelta::from_q8_8_i16(slot)
+}
 
 // Memory type
 pub enum MemoryType {
@@ -135,8 +173,8 @@ pub struct ItImportFlags {
 /// For compatibility between formats and to compensate for special case difficulties with memory management, a best effort analysis is performed during import to associate the exact value with each effect.
 // Horrible hack to store values...use from left to right. First usable type wins.
 pub struct ImportMemory {
-    global: [(f32, f32, usize, usize); ARRAY_SIZE], // s3m way: shared across all channels
-    channel: [[(f32, f32, usize, usize); ARRAY_SIZE]; 64], // mod, xm, it way
+    global: [(i16, i16, usize, usize); ARRAY_SIZE], // s3m way: shared across all channels
+    channel: [[(i16, i16, usize, usize); ARRAY_SIZE]; 64], // mod, xm, it way
     /// S3M-specific masterflags resolved at import time. Only read
     /// when `mem` is `MemoryType::S3m`; importers of other formats
     /// leave it at its default (all-zero). Configured by the S3M
@@ -151,8 +189,8 @@ pub struct ImportMemory {
 impl Default for ImportMemory {
     fn default() -> Self {
         Self {
-            global: [(0.0, 0.0, 0, 0); ARRAY_SIZE],
-            channel: [[(0.0, 0.0, 0, 0); ARRAY_SIZE]; 64],
+            global: [(0, 0, 0, 0); ARRAY_SIZE],
+            channel: [[(0, 0, 0, 0); ARRAY_SIZE]; 64],
             s3m_flags: S3mImportFlags::default(),
             it_flags: ItImportFlags::default(),
         }
@@ -203,16 +241,16 @@ impl ImportMemory {
                             // No memory use
                         }
                         MemoryType::Xm | MemoryType::It | MemoryType::S3m => {
-                            if *a == 0.0 {
-                                *a = self.channel[index][PANBRELLO].0
+                            if *a == Q8_8::ZERO {
+                                *a = cached_q8_8(self.channel[index][PANBRELLO].0)
                             } else {
-                                self.channel[index][PANBRELLO].0 = *a;
+                                self.channel[index][PANBRELLO].0 = cache_q8_8(*a);
                             }
                             // second arg
-                            if *b == 0.0 {
-                                *b = self.channel[index][PANBRELLO].1
+                            if *b == Q15::ZERO {
+                                *b = cached_q15(self.channel[index][PANBRELLO].1)
                             } else {
-                                self.channel[index][PANBRELLO].1 = *b;
+                                self.channel[index][PANBRELLO].1 = cache_q15(*b);
                             }
                         }
                     }
@@ -224,10 +262,10 @@ impl ImportMemory {
                             // No memory use
                         }
                         MemoryType::Xm | MemoryType::It | MemoryType::S3m => {
-                            if *a == 0.0 {
-                                *a = self.channel[index][PANNING_SLIDE].0
+                            if *a == Q15::ZERO {
+                                *a = cached_q15(self.channel[index][PANNING_SLIDE].0)
                             } else {
-                                self.channel[index][PANNING_SLIDE].0 = *a;
+                                self.channel[index][PANNING_SLIDE].0 = cache_q15(*a);
                             }
                         }
                     }
@@ -239,7 +277,7 @@ impl ImportMemory {
                             // No memory use
                         }
                         MemoryType::Xm => {
-                            if *a == 0.0 {
+                            if *a == 0 {
                                 *a = self.channel[index][PORTAMENTO_UP].0
                             } else {
                                 self.channel[index][PORTAMENTO_UP].0 = *a;
@@ -255,14 +293,14 @@ impl ImportMemory {
                             // E and F already share it in IT without
                             // the flag — the flag only extends that
                             // sharing to G.
-                            if *a == 0.0 {
+                            if *a == 0 {
                                 *a = self.channel[index][PORTAMENTO_UP].0
                             } else {
                                 self.channel[index][PORTAMENTO_UP].0 = *a;
                             }
                         }
                         MemoryType::S3m => {
-                            if *a == 0.0 {
+                            if *a == 0 {
                                 *a = self.global[PORTAMENTO_UP].0
                             } else {
                                 self.global[PORTAMENTO_UP].0 = *a;
@@ -277,7 +315,7 @@ impl ImportMemory {
                             // No memory use
                         }
                         MemoryType::Xm => {
-                            if *a == 0.0 {
+                            if *a == 0 {
                                 *a = self.channel[index][PORTAMENTO_DOWN].0
                             } else {
                                 self.channel[index][PORTAMENTO_DOWN].0 = *a;
@@ -289,14 +327,14 @@ impl ImportMemory {
                             // read/write PORTAMENTO_UP so the slot
                             // is shared between them — and with G
                             // when the link flag is on.
-                            if *a == 0.0 {
+                            if *a == 0 {
                                 *a = self.channel[index][PORTAMENTO_UP].0
                             } else {
                                 self.channel[index][PORTAMENTO_UP].0 = *a;
                             }
                         }
                         MemoryType::S3m => {
-                            if *a == 0.0 {
+                            if *a == 0 {
                                 *a = self.global[PORTAMENTO_DOWN].0
                             } else {
                                 self.global[PORTAMENTO_DOWN].0 = *a;
@@ -311,14 +349,14 @@ impl ImportMemory {
                             // No memory use
                         }
                         MemoryType::Xm | MemoryType::It => {
-                            if *a == 0.0 {
+                            if *a == 0 {
                                 *a = self.channel[index][PORTAMENTO_FINE_UP].0
                             } else {
                                 self.channel[index][PORTAMENTO_FINE_UP].0 = *a;
                             }
                         }
                         MemoryType::S3m => {
-                            if *a == 0.0 {
+                            if *a == 0 {
                                 *a = self.global[PORTAMENTO_FINE_UP].0
                             } else {
                                 self.global[PORTAMENTO_FINE_UP].0 = *a;
@@ -333,14 +371,14 @@ impl ImportMemory {
                             // No memory use
                         }
                         MemoryType::Xm | MemoryType::It => {
-                            if *a == 0.0 {
+                            if *a == 0 {
                                 *a = self.channel[index][PORTAMENTO_FINE_DOWN].0
                             } else {
                                 self.channel[index][PORTAMENTO_FINE_DOWN].0 = *a;
                             }
                         }
                         MemoryType::S3m => {
-                            if *a == 0.0 {
+                            if *a == 0 {
                                 *a = self.global[PORTAMENTO_FINE_DOWN].0
                             } else {
                                 self.global[PORTAMENTO_FINE_DOWN].0 = *a;
@@ -355,14 +393,14 @@ impl ImportMemory {
                             // No memory use
                         }
                         MemoryType::Xm | MemoryType::It => {
-                            if *a == 0.0 {
+                            if *a == 0 {
                                 *a = self.channel[index][PORTAMENTO_FINE_EXTRA_UP].0
                             } else {
                                 self.channel[index][PORTAMENTO_FINE_EXTRA_UP].0 = *a;
                             }
                         }
                         MemoryType::S3m => {
-                            if *a == 0.0 {
+                            if *a == 0 {
                                 *a = self.global[PORTAMENTO_FINE_EXTRA_UP].0
                             } else {
                                 self.global[PORTAMENTO_FINE_EXTRA_UP].0 = *a;
@@ -377,14 +415,14 @@ impl ImportMemory {
                             // No memory use
                         }
                         MemoryType::Xm | MemoryType::It => {
-                            if *a == 0.0 {
+                            if *a == 0 {
                                 *a = self.channel[index][PORTAMENTO_FINE_EXTRA_DOWN].0
                             } else {
                                 self.channel[index][PORTAMENTO_FINE_EXTRA_DOWN].0 = *a;
                             }
                         }
                         MemoryType::S3m => {
-                            if *a == 0.0 {
+                            if *a == 0 {
                                 *a = self.global[PORTAMENTO_FINE_EXTRA_DOWN].0
                             } else {
                                 self.global[PORTAMENTO_FINE_EXTRA_DOWN].0 = *a;
@@ -427,7 +465,7 @@ impl ImportMemory {
 
                 TrackImportEffect::TonePortamento(a) => match mem {
                     MemoryType::Mod | MemoryType::Xm | MemoryType::S3m => {
-                        if *a == 0.0 {
+                        if *a == 0 {
                             *a = self.channel[index][TONE_PORTAMENTO].0
                         } else {
                             self.channel[index][TONE_PORTAMENTO].0 = *a;
@@ -442,7 +480,7 @@ impl ImportMemory {
                             // `PORTAMENTO_UP`); reading a zero-param
                             // on any of them reads from that same
                             // slot. The canonical ITTECH semantics.
-                            if *a == 0.0 {
+                            if *a == 0 {
                                 *a = self.channel[index][PORTAMENTO_UP].0
                             } else {
                                 self.channel[index][PORTAMENTO_UP].0 = *a;
@@ -450,7 +488,7 @@ impl ImportMemory {
                         } else {
                             // Standard IT: Gxx has its own register,
                             // separate from Exx / Fxx.
-                            if *a == 0.0 {
+                            if *a == 0 {
                                 *a = self.channel[index][TONE_PORTAMENTO].0
                             } else {
                                 self.channel[index][TONE_PORTAMENTO].0 = *a;
@@ -461,27 +499,27 @@ impl ImportMemory {
 
                 TrackImportEffect::Tremolo(a, b) => match mem {
                     MemoryType::Mod | MemoryType::Xm | MemoryType::It => {
-                        if *a == 0.0 {
-                            *a = self.channel[index][TREMOLO].0
+                        if *a == Q8_8::ZERO {
+                            *a = cached_q8_8(self.channel[index][TREMOLO].0)
                         } else {
-                            self.channel[index][TREMOLO].0 = *a;
+                            self.channel[index][TREMOLO].0 = cache_q8_8(*a);
                         }
-                        if *b == 0.0 {
-                            *b = self.channel[index][TREMOLO].1
+                        if *b == Q15::ZERO {
+                            *b = cached_q15(self.channel[index][TREMOLO].1)
                         } else {
-                            self.channel[index][TREMOLO].1 = *b;
+                            self.channel[index][TREMOLO].1 = cache_q15(*b);
                         }
                     }
                     MemoryType::S3m => {
-                        if *a == 0.0 {
-                            *a = self.global[TREMOLO].0
+                        if *a == Q8_8::ZERO {
+                            *a = cached_q8_8(self.global[TREMOLO].0)
                         } else {
-                            self.global[TREMOLO].0 = *a;
+                            self.global[TREMOLO].0 = cache_q8_8(*a);
                         }
-                        if *b == 0.0 {
-                            *b = self.global[TREMOLO].1
+                        if *b == Q15::ZERO {
+                            *b = cached_q15(self.global[TREMOLO].1)
                         } else {
-                            self.global[TREMOLO].1 = *b;
+                            self.global[TREMOLO].1 = cache_q15(*b);
                         }
                     }
                 },
@@ -549,15 +587,15 @@ impl ImportMemory {
 
                 TrackImportEffect::Vibrato(a, b) => match mem {
                     MemoryType::Mod | MemoryType::Xm | MemoryType::It | MemoryType::S3m => {
-                        if *a == 0.0 {
-                            *a = self.channel[index][VIBRATO].0
+                        if *a == Q8_8::ZERO {
+                            *a = cached_q8_8(self.channel[index][VIBRATO].0)
                         } else {
-                            self.channel[index][VIBRATO].0 = *a;
+                            self.channel[index][VIBRATO].0 = cache_q8_8(*a);
                         }
-                        if *b == 0.0 {
-                            *b = self.channel[index][VIBRATO].1
+                        if *b == PitchDelta::ZERO {
+                            *b = cached_pitch_delta(self.channel[index][VIBRATO].1)
                         } else {
-                            self.channel[index][VIBRATO].1 = *b;
+                            self.channel[index][VIBRATO].1 = cache_pitch_delta(*b);
                         }
                     }
                 },
@@ -568,15 +606,15 @@ impl ImportMemory {
                             // No memory
                         }
                         MemoryType::S3m => {
-                            if *a == 0.0 {
-                                *a = self.channel[index][VIBRATO_FINE].0
+                            if *a == Q8_8::ZERO {
+                                *a = cached_q8_8(self.channel[index][VIBRATO_FINE].0)
                             } else {
-                                self.channel[index][VIBRATO_FINE].0 = *a;
+                                self.channel[index][VIBRATO_FINE].0 = cache_q8_8(*a);
                             }
-                            if *b == 0.0 {
-                                *b = self.channel[index][VIBRATO_FINE].1
+                            if *b == PitchDelta::ZERO {
+                                *b = cached_pitch_delta(self.channel[index][VIBRATO_FINE].1)
                             } else {
-                                self.channel[index][VIBRATO_FINE].1 = *b;
+                                self.channel[index][VIBRATO_FINE].1 = cache_pitch_delta(*b);
                             }
                         }
                     }
@@ -588,17 +626,17 @@ impl ImportMemory {
                             // No memory
                         }
                         MemoryType::Xm | MemoryType::It => {
-                            if *a == 0.0 {
-                                *a = self.channel[index][PITCH_VOLUME_SLIDE_0].0
+                            if *a == Q15::ZERO {
+                                *a = cached_q15(self.channel[index][PITCH_VOLUME_SLIDE_0].0)
                             } else {
-                                self.channel[index][PITCH_VOLUME_SLIDE_0].0 = *a;
+                                self.channel[index][PITCH_VOLUME_SLIDE_0].0 = cache_q15(*a);
                             }
                         }
                         MemoryType::S3m => {
-                            if *a == 0.0 {
-                                *a = self.global[PITCH_VOLUME_SLIDE_0].0
+                            if *a == Q15::ZERO {
+                                *a = cached_q15(self.global[PITCH_VOLUME_SLIDE_0].0)
                             } else {
-                                self.global[PITCH_VOLUME_SLIDE_0].0 = *a;
+                                self.global[PITCH_VOLUME_SLIDE_0].0 = cache_q15(*a);
                             }
                         }
                     }
@@ -610,17 +648,17 @@ impl ImportMemory {
                             // No memory
                         }
                         MemoryType::Xm | MemoryType::It => {
-                            if *a == 0.0 {
-                                *a = self.channel[index][PITCH_VOLUME_SLIDE_N].0
+                            if *a == Q15::ZERO {
+                                *a = cached_q15(self.channel[index][PITCH_VOLUME_SLIDE_N].0)
                             } else {
-                                self.channel[index][PITCH_VOLUME_SLIDE_N].0 = *a;
+                                self.channel[index][PITCH_VOLUME_SLIDE_N].0 = cache_q15(*a);
                             }
                         }
                         MemoryType::S3m => {
-                            if *a == 0.0 {
-                                *a = self.global[PITCH_VOLUME_SLIDE_N].0
+                            if *a == Q15::ZERO {
+                                *a = cached_q15(self.global[PITCH_VOLUME_SLIDE_N].0)
                             } else {
-                                self.global[PITCH_VOLUME_SLIDE_N].0 = *a;
+                                self.global[PITCH_VOLUME_SLIDE_N].0 = cache_q15(*a);
                             }
                         }
                     }
@@ -632,7 +670,7 @@ impl ImportMemory {
                             // No memory
                         }
                         MemoryType::Xm => {
-                            if *a == 0.0 {
+                            if *a == 0 {
                                 *a = self.channel[index][FX_VOLUME_TONE_PORTAMENTO].0
                             } else {
                                 self.channel[index][FX_VOLUME_TONE_PORTAMENTO].0 = *a;
@@ -650,10 +688,13 @@ impl ImportMemory {
                             // No memory
                         }
                         MemoryType::Xm => {
-                            if *a == 0.0 {
-                                *a = self.channel[index][FX_VOLUME_VIBRATO_DEPTH].0
+                            if *a == PitchDelta::ZERO {
+                                *a = cached_pitch_delta(
+                                    self.channel[index][FX_VOLUME_VIBRATO_DEPTH].0,
+                                )
                             } else {
-                                self.channel[index][FX_VOLUME_VIBRATO_DEPTH].0 = *a;
+                                self.channel[index][FX_VOLUME_VIBRATO_DEPTH].0 =
+                                    cache_pitch_delta(*a);
                             }
                         }
                         MemoryType::It => {
@@ -669,10 +710,10 @@ impl ImportMemory {
                             // No memory
                         }
                         MemoryType::Xm | MemoryType::It | MemoryType::S3m => {
-                            if *a == 0.0 {
-                                *a = self.channel[index][CHANNEL_VOLUME_SLIDE].0
+                            if *a == Q15::ZERO {
+                                *a = cached_q15(self.channel[index][CHANNEL_VOLUME_SLIDE].0)
                             } else {
-                                self.channel[index][CHANNEL_VOLUME_SLIDE].0 = *a;
+                                self.channel[index][CHANNEL_VOLUME_SLIDE].0 = cache_q15(*a);
                             }
                         }
                     }
@@ -705,10 +746,10 @@ impl ImportMemory {
                             // No memory
                         }
                         MemoryType::Xm | MemoryType::It | MemoryType::S3m => {
-                            if *a == 0.0 {
-                                *a = self.channel[index][CHANNEL_VOLUME_SLIDE].0
+                            if *a == Q15::ZERO {
+                                *a = cached_q15(self.channel[index][CHANNEL_VOLUME_SLIDE].0)
                             } else {
-                                self.channel[index][CHANNEL_VOLUME_SLIDE].0 = *a;
+                                self.channel[index][CHANNEL_VOLUME_SLIDE].0 = cache_q15(*a);
                             }
                         }
                     }

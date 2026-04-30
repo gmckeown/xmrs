@@ -1,21 +1,21 @@
+use crate::fixed::fixed::{Q15, Q8_8};
+use crate::fixed::units::{ChannelVolume, Finetune, Panning, PitchDelta, RetrigMul, Volume};
 use crate::{prelude::NewNoteAction, waveform::Waveform};
 use serde::{Deserialize, Serialize};
-
-// Float math backend (only needed when `std` is disabled).
-// Priority: std > libm > micromath.
-#[cfg(all(not(feature = "std"), not(feature = "libm"), feature = "micromath"))]
-#[allow(unused_imports)]
-use micromath::F32Ext;
-#[cfg(all(not(feature = "std"), feature = "libm"))]
-#[allow(unused_imports)]
-use num_traits::float::Float;
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum NoteRetrigOperator {
     #[default]
     None,
-    Sum(f32),
-    Mul(f32),
+    /// Add a signed Q1.15 delta to the running volume on
+    /// each retrigger. Was `f32`. Range is `[-1, +1]`; the
+    /// player clamps the resulting volume to `[0, 1]`.
+    Sum(Q15),
+    /// Multiply the running volume on each retrigger.
+    /// `RetrigMul` is Q3.13 in `[-4, +4)`, matching the IT
+    /// retrigger multiplier table (`1/3`, `1/2`, `2`, `1.5`,
+    /// etc.).
+    Mul(RetrigMul),
 }
 
 #[repr(u8)]
@@ -29,14 +29,16 @@ pub enum TrackEffect {
         half2: usize,
     },
 
-    /// `value`, set the Channel Volume
-    /// Channel Volume effect
-    ChannelVolume(f32),
+    /// `value`, set the Channel Volume.
+    /// Was `f32` — Q1.15 in `[0, 1]`. See [`ChannelVolume`].
+    ChannelVolume(ChannelVolume),
 
-    // `(speed, tick)`, slides the current channel volume up or down
+    /// `(speed, fine)`, slide the current channel volume up or
+    /// down. `speed` is a signed Q1.15 delta-per-tick (was
+    /// `f32`); positive = up, negative = down.
     /// Channel Volume effect
     ChannelVolumeSlide {
-        speed: f32,
+        speed: Q15,
         /// if true, only at tick0, otherwise from tick1
         fine: bool,
     },
@@ -46,9 +48,9 @@ pub enum TrackEffect {
     Glissando(bool),
 
     /// `tune`, this effet should be used together with a note.
-    /// It will cause another fine-tune value to be used
-    /// Pitch effect
-    InstrumentFineTune(f32),
+    /// It will cause another fine-tune value to be used.
+    /// Was `f32` — Q1.15 in `[-1, +1]`. See [`Finetune`].
+    InstrumentFineTune(Finetune),
 
     /// `nna` Change Instrument New Note Action
     /// Misc effect
@@ -125,9 +127,12 @@ pub enum TrackEffect {
         volume_modifier: NoteRetrigOperator,
     },
 
-    /// `(speed, depth)`, set Panbrello
+    /// `(speed, depth)`, set Panbrello.
+    /// `speed` is `Q8_8` cycles/tick (was `f32`). `depth` is
+    /// `Q15` signed amplitude in `[-1, 1]` of the panning
+    /// modulation (was `f32`).
     /// Panning effect
-    Panbrello { speed: f32, depth: f32 },
+    Panbrello { speed: Q8_8, depth: Q15 },
 
     /// `(waveform, retrig)`, change Panbrello waveform.
     /// Panning effect
@@ -137,20 +142,22 @@ pub enum TrackEffect {
         retrig: bool,
     },
 
-    /// `position` [0.0..1.0], sets the panning position
-    /// 0.0 is the leftmost position and 1.0 the rightmost
-    /// Panning effect
-    Panning(f32),
+    /// `position` Q1.15 in `[0, 1]`, sets the panning position.
+    /// `0` is fully left, `1` fully right. Was `f32`. See
+    /// [`Panning`].
+    Panning(Panning),
 
-    /// `(speed, tick)`, this effect slide the panning position
+    /// `(speed, fine)`, slide the panning position. `speed` is a
+    /// signed Q1.15 delta-per-tick (was `f32`).
     /// Panning effect
     PanningSlide {
-        speed: f32,
+        speed: Q15,
         /// if true, only at tick0, otherwise from tick1
         fine: bool,
     },
 
-    /// `speed` (period units added per application), `fine` flag.
+    /// `speed` (signed period units added per application — was
+    /// `f32`), `fine` flag.
     ///
     /// Pitch effect, covering every FT2 pitch-slide variant that
     /// manipulates the raw period directly (as opposed to
@@ -168,16 +175,19 @@ pub enum TrackEffect {
     /// (pitch up); a positive speed lengthens it (pitch down). The
     /// importer pre-scales by the format's unit factor so `speed` is
     /// always in xmrs period units ready to be added to `period`.
-    Portamento { speed: f32, fine: bool },
+    /// `i16` covers the FT2 worst-case (±255 × 4 = ±1020 LU).
+    Portamento { speed: i16, fine: bool },
 
-    /// `speed`, portamento to note at speed.
+    /// `speed`, portamento toward the note at `speed` period
+    /// units per tick (signed, was `f32`).
     /// see `::Glissando` to round to the nearest halftone
-    /// Pitch efect
-    TonePortamento(f32),
+    /// Pitch effect
+    TonePortamento(i16),
 
-    /// `(speed, depth)`
+    /// `(speed, depth)`. `speed` Q8.8 cycles/tick, `depth`
+    /// `Q15` signed amplitude in `[-1, 1]` (was `f32`).
     /// Volume effect
-    Tremolo { speed: f32, depth: f32 },
+    Tremolo { speed: Q8_8, depth: Q15 },
 
     /// `(waveform, retrig)`, change Tremolo waveform.
     /// Volume effect
@@ -196,17 +206,18 @@ pub enum TrackEffect {
         off_time: usize,
     },
 
-    /// `(speed, depth)`, set Vibrato
+    /// `(speed, depth)`, set Vibrato. `speed` Q8.8 cycles/tick,
+    /// `depth` semitones (PitchDelta, Q8.8). Was `f32`.
     /// Pitch effect
-    Vibrato { speed: f32, depth: f32 },
+    Vibrato { speed: Q8_8, depth: PitchDelta },
 
-    /// `speed`, set Vibrato speed
+    /// `speed`, set Vibrato speed (Q8.8 cycles/tick — was `f32`).
     /// Pitch effect
-    VibratoSpeed(f32),
+    VibratoSpeed(Q8_8),
 
-    /// `depth`, set Vibrato depth
+    /// `depth`, set Vibrato depth (semitones, PitchDelta — was `f32`).
     /// Pitch effect
-    VibratoDepth(f32),
+    VibratoDepth(PitchDelta),
 
     /// `(waveform, retrig)`, change Vibrato waveform.
     /// Pitch effect
@@ -216,18 +227,20 @@ pub enum TrackEffect {
         retrig: bool,
     },
 
-    /// `(value, tick)`, set the current volume at the current tick
+    /// `(value, tick)`, set the current volume at the current tick.
+    /// `value` was `f32` — Q1.15 in `[0, 1]`. See [`Volume`].
     /// Volume effect
     Volume {
-        value: f32,
+        value: Volume,
         /// set at the current tick
         tick: usize,
     },
 
-    /// `(speed, tick)`, slides the current volume up or down
+    /// `(speed, fine)`, slide the current volume up or down.
+    /// `speed` is a signed Q1.15 delta-per-tick (was `f32`).
     /// Volume effect
     VolumeSlide {
-        speed: f32,
+        speed: Q15,
         /// if true, only at tick0, otherwise from tick1
         fine: bool,
     },
@@ -293,13 +306,13 @@ pub enum GlobalEffect {
     /// `speed` set the speed of the song
     Speed(usize),
 
-    /// `value`, set the global Volume
-    Volume(f32),
+    /// `value`, set the global Volume. Was `f32` — Q1.15 in
+    /// `[0, 1]`. See [`Volume`].
+    Volume(Volume),
 
-    /// `(speed, tick)`, slides the global volume up or down
-    /// if tick is true, only at tick0, otherwise from tick1
-    /// Volume
-    VolumeSlide { speed: f32, fine: bool },
+    /// `(speed, fine)`, slide the global volume up or down.
+    /// `speed` is a signed Q1.15 delta-per-tick (was `f32`).
+    VolumeSlide { speed: Q15, fine: bool },
 }
 
 impl TrackEffect {
@@ -318,9 +331,13 @@ impl TrackEffect {
                 half1: h1 + o1,
                 half2: h2 + o2,
             }),
-            (TrackEffect::ChannelVolume(value1), TrackEffect::ChannelVolume(value2)) => Some(
-                TrackEffect::ChannelVolume((value1 + value2).clamp(0.0, 1.0)),
-            ),
+            (TrackEffect::ChannelVolume(value1), TrackEffect::ChannelVolume(value2)) => {
+                // Two `ChannelVolume` events on one row: cumulative
+                // sum (saturating in `+`), then clamped to `[0, 1]`.
+                let sum = (*value1 + *value2)
+                    .clamp(ChannelVolume::SILENT, ChannelVolume::FULL);
+                Some(TrackEffect::ChannelVolume(sum))
+            }
             (
                 TrackEffect::ChannelVolumeSlide {
                     speed: h1,
@@ -331,14 +348,16 @@ impl TrackEffect {
                     fine: o_fine,
                 },
             ) if h_fine == o_fine => Some(TrackEffect::ChannelVolumeSlide {
-                speed: h1 + o1,
+                speed: *h1 + *o1,
                 fine: *o_fine,
             }),
             (TrackEffect::Glissando(_h1), TrackEffect::Glissando(o1)) => {
                 Some(TrackEffect::Glissando(*o1)) // overwrite glissando value.
             }
             (TrackEffect::InstrumentFineTune(h1), TrackEffect::InstrumentFineTune(o1)) => {
-                Some(TrackEffect::InstrumentFineTune(h1 + o1))
+                // Two finetunes on one row → typed saturating
+                // sum (kept inside Q1.15 by `Finetune`'s `+`).
+                Some(TrackEffect::InstrumentFineTune(*h1 + *o1))
             }
             (
                 TrackEffect::InstrumentPanningEnvelopePosition(h1),
@@ -410,8 +429,8 @@ impl TrackEffect {
                     depth: o2,
                 },
             ) => Some(TrackEffect::Panbrello {
-                speed: h1 + o1,
-                depth: h2 + o2,
+                speed: *h1 + *o1,
+                depth: *h2 + *o2,
             }),
             (
                 TrackEffect::PanbrelloWaveform {
@@ -429,7 +448,9 @@ impl TrackEffect {
                 }) // overwrite values
             }
             (TrackEffect::Panning(h1), TrackEffect::Panning(o1)) => {
-                Some(TrackEffect::Panning(h1 + o1))
+                // Two `Panning` events on one row → saturating
+                // sum (corner case to begin with).
+                Some(TrackEffect::Panning(*h1 + *o1))
             }
             (
                 TrackEffect::PanningSlide {
@@ -441,7 +462,7 @@ impl TrackEffect {
                     fine: o_fine,
                 },
             ) if h_fine == o_fine => Some(TrackEffect::PanningSlide {
-                speed: h1 + o1,
+                speed: *h1 + *o1,
                 fine: *o_fine,
             }),
             (
@@ -454,11 +475,15 @@ impl TrackEffect {
                     fine: o_fine,
                 },
             ) if h_fine == o_fine => Some(TrackEffect::Portamento {
-                speed: h1 + o1,
+                // `Portamento.speed` is plain `i16` (signed period
+                // delta-per-tick); no Q-format Add — keep the
+                // explicit saturating call.
+                speed: h1.saturating_add(*o1),
                 fine: *o_fine,
             }),
             (TrackEffect::TonePortamento(h1), TrackEffect::TonePortamento(o1)) => {
-                Some(TrackEffect::TonePortamento(h1 + o1))
+                // Plain `i16` — no Q-format Add.
+                Some(TrackEffect::TonePortamento(h1.saturating_add(*o1)))
             }
             (
                 TrackEffect::Tremolo {
@@ -470,8 +495,8 @@ impl TrackEffect {
                     depth: o2,
                 },
             ) => Some(TrackEffect::Tremolo {
-                speed: h1 + o1,
-                depth: h2 + o2,
+                speed: *h1 + *o1,
+                depth: *h2 + *o2,
             }),
             (
                 TrackEffect::TremoloWaveform {
@@ -511,14 +536,14 @@ impl TrackEffect {
                     depth: o2,
                 },
             ) => Some(TrackEffect::Vibrato {
-                speed: h1 + o1,
-                depth: h2 + o2,
+                speed: *h1 + *o1,
+                depth: *h2 + *o2,
             }),
             (TrackEffect::VibratoSpeed(h1), TrackEffect::VibratoSpeed(o1)) => {
-                Some(TrackEffect::VibratoSpeed(h1 + o1))
+                Some(TrackEffect::VibratoSpeed(*h1 + *o1))
             }
             (TrackEffect::VibratoDepth(h1), TrackEffect::VibratoDepth(o1)) => {
-                Some(TrackEffect::VibratoDepth(h1 + o1))
+                Some(TrackEffect::VibratoDepth(*h1 + *o1))
             }
             (
                 TrackEffect::VibratoWaveform {
@@ -544,10 +569,16 @@ impl TrackEffect {
                     value: value2,
                     tick: tick2,
                 },
-            ) => Some(TrackEffect::Volume {
-                value: (value1 + value2).clamp(0.0, 1.0),
-                tick: tick1 + tick2,
-            }),
+            ) => {
+                // Two `Volume` events on one row → cumulative
+                // sum, clamped to `[0, 1]`.
+                let sum = (*value1 + *value2)
+                    .clamp(Volume::SILENT, Volume::FULL);
+                Some(TrackEffect::Volume {
+                    value: sum,
+                    tick: tick1 + tick2,
+                })
+            }
             (
                 TrackEffect::VolumeSlide {
                     speed: speed1,
@@ -564,7 +595,7 @@ impl TrackEffect {
                 // D/U), and `remove_duplicates_and_merge` keeps them as
                 // parallel entries when `merge` returns `None`.
                 Some(TrackEffect::VolumeSlide {
-                    speed: speed1 + speed2,
+                    speed: *speed1 + *speed2,
                     fine: *o_fine,
                 })
             }

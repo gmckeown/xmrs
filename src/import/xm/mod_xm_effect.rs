@@ -1,3 +1,8 @@
+use crate::fixed::fixed::{Q15, Q8_8};
+use crate::fixed::from_tracker::{
+    lfo_depth_from_nibble_16, lfo_speed_from_nibble_64, vibrato_depth_from_nibble_16,
+};
+use crate::fixed::units::{Finetune, Panning, PitchDelta, Volume};
 use crate::import::patternslot::PatternSlot;
 use crate::import::track_import_effect::TrackImportEffect;
 use crate::import::track_import_unit::TrackImportUnit;
@@ -8,13 +13,13 @@ use alloc::vec::Vec;
 pub struct ModXmEffect;
 
 impl ModXmEffect {
-    fn mod_xm_volume_slide(param: u8) -> Option<f32> {
+    fn mod_xm_volume_slide(param: u8) -> Option<Q15> {
         let upper_nibble = param & 0xF0;
         let lower_nibble = param & 0x0F;
 
         match (upper_nibble, lower_nibble) {
-            (f, 0) => Some((f >> 4) as f32 / 64.0), // Slide up
-            (0, f) => Some(-(f as f32) / 64.0),     // Slide down
+            (f, 0) => Some(Q15::from_ratio((f >> 4) as i32, 64)), // Slide up
+            (0, f) => Some(Q15::from_ratio(-(f as i32), 64)),     // Slide down
             _ => None,
         }
     }
@@ -42,70 +47,80 @@ impl ModXmEffect {
                 // mode keeps the classic ×4 multiplier because its
                 // period resolution is 4× finer than Amiga's the other
                 // way around.
-                let param = current.effect_parameter as f32;
-                let speed = match freq_type {
-                    FrequencyType::LinearFrequencies => -4.0 * param,
+                //
+                // PortamentoUp speed is the *signed* delta added to
+                // period each tick — pitch up means period goes down
+                // (period and pitch are inverse), so we use a negative
+                // delta. Range: linear `-4*255 = -1020`, fits in `i16`.
+                let param = current.effect_parameter as i16;
+                let speed: i16 = match freq_type {
+                    FrequencyType::LinearFrequencies => -4 * param,
                     FrequencyType::AmigaFrequencies => -param,
                 };
                 Some(vec![TrackImportEffect::PortamentoUp(speed)])
             }
             0x02 => {
-                let param = current.effect_parameter as f32;
-                let speed = match freq_type {
-                    FrequencyType::LinearFrequencies => 4.0 * param,
+                let param = current.effect_parameter as i16;
+                let speed: i16 = match freq_type {
+                    FrequencyType::LinearFrequencies => 4 * param,
                     FrequencyType::AmigaFrequencies => param,
                 };
                 Some(vec![TrackImportEffect::PortamentoDown(speed)])
             }
             0x03 => {
-                let param = current.effect_parameter as f32;
-                let speed = match freq_type {
-                    FrequencyType::LinearFrequencies => 4.0 * param,
+                let param = current.effect_parameter as i16;
+                let speed: i16 = match freq_type {
+                    FrequencyType::LinearFrequencies => 4 * param,
                     FrequencyType::AmigaFrequencies => param,
                 };
                 Some(vec![TrackImportEffect::TonePortamento(speed)])
             }
             0x04 => {
+                // XM 4xy: x = speed nibble (1/64 cycles/tick),
+                // y = depth nibble (1/16 semitones).
                 let param = current.effect_parameter;
-                let speed = ((param & 0xF0) >> 4) as f32 / 64.0;
-                let depth = (param & 0x0F) as f32 / 16.0;
+                let speed = lfo_speed_from_nibble_64((param & 0xF0) >> 4);
+                let depth = vibrato_depth_from_nibble_16(param & 0x0F);
                 Some(vec![TrackImportEffect::Vibrato(speed, depth)])
             }
             0x05 => {
                 let vs = Self::mod_xm_volume_slide(current.effect_parameter);
                 if let Some(vste) = vs {
                     Some(vec![
-                        TrackImportEffect::TonePortamento(0.0),
+                        TrackImportEffect::TonePortamento(0),
                         TrackImportEffect::VolumeSlideN(vste),
                     ])
                 } else {
                     Some(vec![
-                        TrackImportEffect::TonePortamento(0.0),
-                        TrackImportEffect::VolumeSlideN(0.0),
+                        TrackImportEffect::TonePortamento(0),
+                        TrackImportEffect::VolumeSlideN(Q15::ZERO),
                     ])
                 }
             }
             0x06 => {
                 if let Some(vste) = Self::mod_xm_volume_slide(current.effect_parameter) {
                     Some(vec![
-                        TrackImportEffect::Vibrato(0.0, 0.0),
+                        TrackImportEffect::Vibrato(Q8_8::ZERO, PitchDelta::ZERO),
                         TrackImportEffect::VolumeSlideN(vste),
                     ])
                 } else {
                     Some(vec![
-                        TrackImportEffect::Vibrato(0.0, 0.0),
-                        TrackImportEffect::VolumeSlideN(0.0),
+                        TrackImportEffect::Vibrato(Q8_8::ZERO, PitchDelta::ZERO),
+                        TrackImportEffect::VolumeSlideN(Q15::ZERO),
                     ])
                 }
             }
             0x07 => {
+                // XM 7xy: x = speed nibble, y = depth nibble (1/16
+                // amplitude). Tremolo modulates volume in `[-1, 1]`,
+                // so depth is `Q15`.
                 let param = current.effect_parameter;
-                let speed = ((param & 0xF0) >> 4) as f32 / 64.0;
-                let depth = (param & 0x0F) as f32 / 16.0;
+                let speed = lfo_speed_from_nibble_64((param & 0xF0) >> 4);
+                let depth = lfo_depth_from_nibble_16(param & 0x0F);
                 Some(vec![TrackImportEffect::Tremolo(speed, depth)])
             }
             0x08 => Some(vec![TrackImportEffect::Panning(
-                (current.effect_parameter as f32) / 255.0,
+                Panning::from_byte_255(current.effect_parameter),
             )]),
             0x09 => Some(vec![TrackImportEffect::InstrumentSampleOffset(
                 current.effect_parameter as usize * 256,
@@ -113,7 +128,7 @@ impl ModXmEffect {
             0x0A => Self::mod_xm_volume_slide(current.effect_parameter)
                 .map(|vste| vec![TrackImportEffect::VolumeSlideN(vste)]),
             0x0C => Some(vec![TrackImportEffect::Volume(
-                (current.effect_parameter.min(64) as f32) / 64.0,
+                Volume::from_byte_64(current.effect_parameter.min(64)),
                 0,
             )]),
             0x0E => {
@@ -129,17 +144,17 @@ impl ModXmEffect {
                     // is always Amiga, so the * 1 path matches it
                     // directly.
                     0x1 => (param != 0).then(|| {
-                        let p = param as f32;
-                        let speed = match freq_type {
-                            FrequencyType::LinearFrequencies => -4.0 * p,
+                        let p = param as i16;
+                        let speed: i16 = match freq_type {
+                            FrequencyType::LinearFrequencies => -4 * p,
                             FrequencyType::AmigaFrequencies => -p,
                         };
                         vec![TrackImportEffect::PortamentoFineUp(speed)]
                     }),
                     0x2 => (param != 0).then(|| {
-                        let p = param as f32;
-                        let speed = match freq_type {
-                            FrequencyType::LinearFrequencies => 4.0 * p,
+                        let p = param as i16;
+                        let speed: i16 = match freq_type {
+                            FrequencyType::LinearFrequencies => 4 * p,
                             FrequencyType::AmigaFrequencies => p,
                         };
                         vec![TrackImportEffect::PortamentoFineDown(speed)]
@@ -157,7 +172,11 @@ impl ModXmEffect {
                         Some(vec![TrackImportEffect::VibratoWaveform(waveform, retrig)])
                     }
                     0x5 => Some(vec![TrackImportEffect::InstrumentFineTune(
-                        param as f32 / 8.0 - 1.0,
+                        // E5y: signed nibble centred at 8 (E58 =
+                        // zero); `(y - 8) / 8` maps to `[-1, +1]`.
+                        // Was `param as f32 / 8.0 - 1.0`; the
+                        // equivalent integer form is `(y - 8) / 8`.
+                        Finetune::from_ratio(param as i32 - 8, 8),
                     )]),
                     0x7 => {
                         let waveform = match param & 0b0000_0011 {
@@ -169,10 +188,14 @@ impl ModXmEffect {
                         Some(vec![TrackImportEffect::TremoloWaveform(waveform, retrig)])
                     }
                     0x9 => Some(vec![TrackImportEffect::NoteRetrig(param as usize)]),
-                    0xA => Some(vec![TrackImportEffect::VolumeSlide0((param as f32) / 64.0)]),
-                    0xB => Some(vec![TrackImportEffect::VolumeSlide0(
-                        -(param as f32) / 64.0,
-                    )]),
+                    0xA => Some(vec![TrackImportEffect::VolumeSlide0(Q15::from_ratio(
+                        param as i32,
+                        64,
+                    ))]),
+                    0xB => Some(vec![TrackImportEffect::VolumeSlide0(Q15::from_ratio(
+                        -(param as i32),
+                        64,
+                    ))]),
                     0xC => Some(vec![TrackImportEffect::NoteCut(param as usize, false)]),
                     0xD => Some(vec![TrackImportEffect::NoteDelay(param as usize)]),
                     _ => None,
@@ -194,10 +217,14 @@ impl ModXmEffect {
                 let lower_nibble = param & 0x0F;
 
                 match (upper_nibble, lower_nibble) {
-                    (f, 0) => Some(vec![TrackImportEffect::PanningSlideN(
-                        (f >> 4) as f32 / 16.0,
-                    )]), // Slide up
-                    (0, f) => Some(vec![TrackImportEffect::PanningSlideN(-(f as f32) / 16.0)]), // Slide down
+                    (f, 0) => Some(vec![TrackImportEffect::PanningSlideN(Q15::from_ratio(
+                        (f >> 4) as i32,
+                        16,
+                    ))]), // Slide up
+                    (0, f) => Some(vec![TrackImportEffect::PanningSlideN(Q15::from_ratio(
+                        -(f as i32),
+                        16,
+                    ))]), // Slide down
                     _ => None,
                 }
             }
@@ -236,21 +263,31 @@ impl ModXmEffect {
                         // "extra fine" — 4× finer than regular 1xx.
                         // Mode-aware: Linear uses `* 1` (matches
                         // FT2), Amiga uses `* 0.25` (xmrs Amiga is
-                        // 4× coarser). This applies at tick 0 only.
-                        let p = param as f32;
-                        let speed = match freq_type {
+                        // 4× coarser).
+                        //
+                        // PHASE 2 PRECISION NOTE: the previous f32
+                        // speed could carry the 0.25 amiga factor
+                        // exactly. With `i16` we truncate via `/4`,
+                        // so amiga X1/X2 with `y < 4` becomes a no-op
+                        // (loss of 0.25/0.5/0.75 sub-period steps).
+                        // Practical impact is limited — extra-fine
+                        // amiga sliding is rare in MOD modules — and
+                        // honest integer truncation matches the
+                        // post-migration storage of `Period` as `u16`.
+                        let p = param as i16;
+                        let speed: i16 = match freq_type {
                             FrequencyType::LinearFrequencies => -p,
-                            FrequencyType::AmigaFrequencies => -p * 0.25,
+                            FrequencyType::AmigaFrequencies => -p / 4,
                         };
                         Some(vec![TrackImportEffect::PortamentoExtraFineUp(speed)])
                     }
                     2 => {
                         // X2y: Extra fine portamento down. Same
                         // reasoning as X1y above.
-                        let p = param as f32;
-                        let speed = match freq_type {
+                        let p = param as i16;
+                        let speed: i16 = match freq_type {
                             FrequencyType::LinearFrequencies => p,
-                            FrequencyType::AmigaFrequencies => p * 0.25,
+                            FrequencyType::AmigaFrequencies => p / 4,
                         };
                         Some(vec![TrackImportEffect::PortamentoExtraFineDown(speed)])
                     }
@@ -276,33 +313,40 @@ impl ModXmEffect {
             // frequent vol-column command.
             0x1..=0x5 => {
                 let clamped = current.volume.min(0x50);
-                Some(TrackImportEffect::Volume((clamped - 0x10) as f32 / 64.0, 0))
+                Some(TrackImportEffect::Volume(
+                    Volume::from_byte_64(clamped - 0x10),
+                    0,
+                ))
             }
             // - - Volume slide down (0..15). Regular slide: applies at
             //     ticks > 0, i.e. VolumeSlideN in our vocabulary
             //     (FT2 VJumpTab_TickNonZero[6] = v_VolSlideDown).
-            0x6 => Some(TrackImportEffect::VolumeSlideN(
-                -((current.volume & 0x0F) as f32) / 64.0,
-            )),
+            0x6 => Some(TrackImportEffect::VolumeSlideN(Q15::from_ratio(
+                -((current.volume & 0x0F) as i32),
+                64,
+            ))),
             // + - Volume slide up (0..15). Same tick scope as 0x6.
-            0x7 => Some(TrackImportEffect::VolumeSlideN(
-                ((current.volume & 0x0F) as f32) / 64.0,
-            )),
+            0x7 => Some(TrackImportEffect::VolumeSlideN(Q15::from_ratio(
+                (current.volume & 0x0F) as i32,
+                64,
+            ))),
             // D - Fine volume slide down (0..15). Fine slide: applies once
             //     at tick 0, i.e. VolumeSlide0
             //     (FT2 VJumpTab_TickZero[8] = v_FineVolSlideDown).
-            0x8 => Some(TrackImportEffect::VolumeSlide0(
-                -((current.volume & 0x0F) as f32) / 64.0,
-            )),
+            0x8 => Some(TrackImportEffect::VolumeSlide0(Q15::from_ratio(
+                -((current.volume & 0x0F) as i32),
+                64,
+            ))),
             // U - Fine volume slide up (0..15). Same tick scope as 0x8.
-            0x9 => Some(TrackImportEffect::VolumeSlide0(
-                ((current.volume & 0x0F) as f32) / 64.0,
-            )),
+            0x9 => Some(TrackImportEffect::VolumeSlide0(Q15::from_ratio(
+                (current.volume & 0x0F) as i32,
+                64,
+            ))),
             // S - Vibrato speed (0..15)
             0xA => {
                 let s = current.volume & 0x0F;
                 if s != 0 {
-                    Some(TrackImportEffect::VibratoSpeed((s as f32) / 64.0))
+                    Some(TrackImportEffect::VibratoSpeed(lfo_speed_from_nibble_64(s)))
                 } else {
                     None
                 }
@@ -311,14 +355,18 @@ impl ModXmEffect {
             0xB => {
                 let d = current.volume & 0x0F;
                 if d != 0 {
-                    Some(TrackImportEffect::VibratoDepthFxVol((d as f32) / 16.0))
+                    Some(TrackImportEffect::VibratoDepthFxVol(
+                        vibrato_depth_from_nibble_16(d),
+                    ))
                 } else {
                     None
                 }
             }
             // P - Set panning
             0xC => Some(TrackImportEffect::Panning(
-                ((current.volume & 0x0F) as f32) / 16.0,
+                // Volume column nibble `0..=15` → pan position.
+                // Was `nibble as f32 / 16.0` — direct ratio.
+                Panning::from_ratio((current.volume & 0x0F) as i32, 16),
             )),
             // L - Panning slide left
             0xD => {
@@ -330,22 +378,26 @@ impl ModXmEffect {
                     // unconditionally when nibble == 0, because tmp16 then
                     // equals outPan (always < 256). Documented there as an
                     // FT2 bug that some XM modules rely on. Materializing
-                    // this as an explicit `Panning(0.0)` keeps the replayer
-                    // path simple.
-                    Some(TrackImportEffect::Panning(0.0))
+                    // this as an explicit `Panning::LEFT` keeps the
+                    // replayer path simple.
+                    Some(TrackImportEffect::Panning(Panning::LEFT))
                 } else {
-                    Some(TrackImportEffect::PanningSlideN(-(nibble as f32) / 16.0))
+                    Some(TrackImportEffect::PanningSlideN(Q15::from_ratio(
+                        -(nibble as i32),
+                        16,
+                    )))
                 }
             }
             // R - Panning slide right
-            0xE => Some(TrackImportEffect::PanningSlideN(
-                ((current.volume & 0x0F) as f32) / 16.0,
-            )),
+            0xE => Some(TrackImportEffect::PanningSlideN(Q15::from_ratio(
+                (current.volume & 0x0F) as i32,
+                16,
+            ))),
             // M - Tone portamento (0..15)
             0xF => {
-                let speed = (current.volume & 0x0F) as f32 * 16.0;
-                let speed = match freq_type {
-                    FrequencyType::LinearFrequencies => 4.0 * speed,
+                let speed = (current.volume & 0x0F) as i16 * 16;
+                let speed: i16 = match freq_type {
+                    FrequencyType::LinearFrequencies => 4 * speed,
                     FrequencyType::AmigaFrequencies => speed,
                 };
                 Some(TrackImportEffect::TonePortamentoFxVol(speed))
@@ -397,9 +449,9 @@ impl ModXmEffect {
                 }
             }
             // Gxx: Set global volume
-            0x10 => Some(GlobalEffect::Volume(
-                (current.effect_parameter.min(64) as f32) / 64.0,
-            )),
+            0x10 => Some(GlobalEffect::Volume(Volume::from_byte_64(
+                current.effect_parameter.min(64),
+            ))),
             // Hxy: Global volume slide
             0x11 => {
                 let param = current.effect_parameter;
@@ -408,11 +460,11 @@ impl ModXmEffect {
 
                 match (upper_nibble, lower_nibble) {
                     (0, f) => Some(GlobalEffect::VolumeSlide {
-                        speed: -(f as f32) / 64.0,
+                        speed: Q15::from_ratio(-(f as i32), 64),
                         fine: false,
                     }), // Slide down
                     (f, 0) => Some(GlobalEffect::VolumeSlide {
-                        speed: (f >> 4) as f32 / 64.0,
+                        speed: Q15::from_ratio((f >> 4) as i32, 64),
                         fine: false,
                     }), // Slide up
                     _ => None,

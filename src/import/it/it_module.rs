@@ -1,3 +1,4 @@
+use crate::fixed::units::{ChannelVolume, Panning, Volume};
 use crate::import::import_memory::{ImportMemory, MemoryType};
 use crate::import::orders_helper;
 use crate::import::patternslot::PatternSlot;
@@ -360,12 +361,12 @@ impl ItModule {
                 let mut entry = ChannelDefault::default();
 
                 // --- Volume ---
-                // IT stores 0..64; we normalise to 0..1. Full volume
-                // (64) is the default, so leave `None` to keep the
-                // player at its 1.0 default.
+                // IT stores 0..64; full volume (64) is the default,
+                // so leave `None` to keep the player at its 1.0
+                // default. Map 0..63 → `ChannelVolume::from_byte_64`.
                 let vol = vol_raw.min(64);
                 if vol != 64 {
-                    entry.volume = Some(vol as f32 / 64.0);
+                    entry.volume = Some(ChannelVolume::from_byte_64(vol));
                 }
 
                 // --- Pan / mute / surround ---
@@ -380,10 +381,11 @@ impl ItModule {
                     // Apply pan_separation: scale distance from
                     // centre 32 by pan_sep/128, then re-centre.
                     let pan = 32 + ((pan - 32) * pan_sep / 128);
-                    let pan = pan.clamp(0, 64) as u32;
+                    let pan = pan.clamp(0, 64) as u8;
                     if pan != 32 {
-                        // Map 0..64 → 0..1.
-                        entry.panning = Some(pan as f32 / 64.0);
+                        // Map 0..64 → Panning Q1.15 via the existing
+                        // ratio helper.
+                        entry.panning = Some(Panning::from_ratio(pan as i32, 64));
                     }
                 }
 
@@ -472,7 +474,7 @@ impl ItModule {
             // normalised to 0..1 here). Applied as a final-mix
             // multiplier by the player, separate from the Vxx-
             // animated global volume.
-            mix_volume: (self.header.mix_volume.min(128) as f32) / 128.0,
+            mix_volume: Volume::from_ratio(self.header.mix_volume.min(128) as i32, 128),
         };
 
         let mut im = ImportMemory::default();

@@ -1,17 +1,11 @@
 /// Generic Effect enum Helper to parse and record memory data definitively to TrackEffect.
+use crate::fixed::fixed::{Q15, Q8_8};
+use crate::fixed::from_tracker::{retrig_mul_ft2, retrig_mul_s3m, retrig_volume_delta_q15};
+use crate::fixed::units::{ChannelVolume, Finetune, Panning, PitchDelta, RetrigMul, Volume};
 use crate::prelude::*;
 use alloc::vec;
 use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
-
-// Float math backend (only needed when `std` is disabled).
-// Priority: std > libm > micromath.
-#[cfg(all(not(feature = "std"), not(feature = "libm"), feature = "micromath"))]
-#[allow(unused_imports)]
-use micromath::F32Ext;
-#[cfg(all(not(feature = "std"), feature = "libm"))]
-#[allow(unused_imports)]
-use num_traits::float::Float;
 
 /// FT2/ST3 multi-retrig volume modifier table.
 ///
@@ -19,27 +13,24 @@ use num_traits::float::Float;
 /// the same shape: nibbles 1–5 subtract 1/2/4/8/16, nibbles 9–D add
 /// the same, and nibbles 6/7/E/F are multiplicative. The two formats
 /// disagree on the nibble-6 constant only — FT2 uses `11/16`, ST3
-/// `10/16` — which the caller supplies via `mul6`.
+/// `10/16` — encoded in [`retrig_mul_ft2`] vs
+/// [`retrig_mul_s3m`].
 ///
 /// Additive deltas use `1/64` as the unit (xmrs's normalised volume
-/// scale, where 0.0 = silent and 1.0 = full).
-fn note_retrig_volume_modifier(nibble: usize, mul6: f32) -> NoteRetrigOperator {
-    const S: f32 = 1.0 / 64.0;
+/// scale, where `Volume::SILENT` is 0 and `Volume::FULL` is 1).
+fn note_retrig_volume_modifier_ft2(nibble: usize) -> NoteRetrigOperator {
+    note_retrig_volume_modifier_dispatch(nibble, retrig_mul_ft2(nibble as u8))
+}
+
+fn note_retrig_volume_modifier_s3m(nibble: usize) -> NoteRetrigOperator {
+    note_retrig_volume_modifier_dispatch(nibble, retrig_mul_s3m(nibble as u8))
+}
+
+#[inline]
+fn note_retrig_volume_modifier_dispatch(nibble: usize, mul: RetrigMul) -> NoteRetrigOperator {
     match nibble {
-        1 => NoteRetrigOperator::Sum(-S),
-        2 => NoteRetrigOperator::Sum(-2.0 * S),
-        3 => NoteRetrigOperator::Sum(-4.0 * S),
-        4 => NoteRetrigOperator::Sum(-8.0 * S),
-        5 => NoteRetrigOperator::Sum(-16.0 * S),
-        6 => NoteRetrigOperator::Mul(mul6),
-        7 => NoteRetrigOperator::Mul(1.0 / 2.0),
-        9 => NoteRetrigOperator::Sum(S),
-        0xA => NoteRetrigOperator::Sum(2.0 * S),
-        0xB => NoteRetrigOperator::Sum(4.0 * S),
-        0xC => NoteRetrigOperator::Sum(8.0 * S),
-        0xD => NoteRetrigOperator::Sum(16.0 * S),
-        0xE => NoteRetrigOperator::Mul(3.0 / 2.0),
-        0xF => NoteRetrigOperator::Mul(2.0),
+        1..=5 | 9..=0xD => NoteRetrigOperator::Sum(retrig_volume_delta_q15(nibble as u8)),
+        6 | 7 | 0xE | 0xF => NoteRetrigOperator::Mul(mul),
         _ => NoteRetrigOperator::None,
     }
 }
@@ -51,23 +42,24 @@ pub enum TrackImportEffect {
     /// F / XM0=0(0), XM=0(0)
     Arpeggio(usize, usize),
 
-    /// `value`, set the Channel Volume
-    /// Channel Volume
-    ChannelVolume(f32),
+    /// `value`, set the Channel Volume.
+    /// Was `f32` — Q1.15 in `[0, 1]`.
+    ChannelVolume(ChannelVolume),
 
-    /// `value`, slide the Channel Volume
+    /// Slide the Channel Volume. Speed is signed Q1.15
+    /// delta-per-tick (was `f32`).
     /// Channel Volume
-    ChannelVolumeSlide0(f32),
-    ChannelVolumeSlideN(f32),
+    ChannelVolumeSlide0(Q15),
+    ChannelVolumeSlideN(Q15),
 
     /// `bool`, round to the nearest halftone when using effects
     /// F / XM0=0xE3(E3)
     Glissando(bool),
 
     /// `tune`, this effet should be used together with a note.
-    /// It will cause another fine-tune value to be used
-    /// F / XM0=0xE5(E5)
-    InstrumentFineTune(f32),
+    /// It will cause another fine-tune value to be used.
+    /// F / XM0=0xE5(E5). Was `f32` — Q1.15 in `[-1, +1]`.
+    InstrumentFineTune(Finetune),
 
     /// `nna` Change Instrument New Note Action
     InstrumentNewNoteAction(NewNoteAction),
@@ -132,46 +124,51 @@ pub enum TrackImportEffect {
     /// format-specific constant out of the generic converter.
     NoteRetrigExtendedS3m(usize, usize),
 
-    /// `(speed, depth)`, set Panbrello
-    Panbrello(f32, f32),
+    /// `(speed, depth)`, set Panbrello.
+    /// `speed` Q8.8 cycles/tick, `depth` `Q15` signed amplitude
+    /// (was `f32`).
+    Panbrello(Q8_8, Q15),
 
     /// `(waveform, retrig)`, change Panbrello waveform.
     /// `retrig` to true to retrig when a new instrument is played.
     PanbrelloWaveform(Waveform, bool),
 
-    /// `position` [0.0..1.0], sets the panning position for the channel
-    /// 0.0 is the leftmost position and 1.0 the rightmost
-    /// P / XM0=8(8), XM0=v0xC(vP)
-    Panning(f32),
+    /// `position` Q1.15 in `[0, 1]`, sets the panning position
+    /// for the channel. `0` is fully left, `1` fully right.
+    /// P / XM0=8(8), XM0=v0xC(vP). Was `f32`.
+    Panning(Panning),
 
-    /// `speed`, this effect slide the panning position
+    /// Slide the panning position. Speed is signed Q1.15
+    /// delta-per-tick (was `f32`).
     /// P / XM0=0x19(P), XM=0x19(P), XM0=v0xD(L), XM0=v0xE(R)
-    PanningSlide0(f32),
-    PanningSlideN(f32),
+    PanningSlide0(Q15),
+    PanningSlideN(Q15),
 
-    /// `speed`
+    /// `speed` (signed period units per tick — was `f32`).
     /// F / XM0=1(1), XM=1(1), XM0=2(2), XM=2(2), XM0=0xE1(E1), XM0=0xE2(E2), XM0=0x21(X1), XM=0x21(X2)
-    PortamentoUp(f32),
-    PortamentoDown(f32),
+    PortamentoUp(i16),
+    PortamentoDown(i16),
 
     /// `speed`
     /// F / XM0=0xE1(E1), XM0=0xE2(E2)
-    PortamentoFineUp(f32),
-    PortamentoFineDown(f32),
+    PortamentoFineUp(i16),
+    PortamentoFineDown(i16),
 
     /// `speed`
     /// F / XM0=0x21(X1), XM=0x21(X2)
-    PortamentoExtraFineUp(f32),
-    PortamentoExtraFineDown(f32),
+    PortamentoExtraFineUp(i16),
+    PortamentoExtraFineDown(i16),
 
     /// `speed`, see `ControlChangeEffect::Glissando` to round to the nearest halftone
     /// F / XM0=3(3), XM=3(3), XM0=5x?(5), XM=5x?(5), XM0=v0xF(vM), XM=v0xF(vM)
-    TonePortamento(f32),
-    TonePortamentoFxVol(f32),
+    TonePortamento(i16),
+    TonePortamentoFxVol(i16),
 
-    /// `(speed, depth)`, see `ControlChangeEffect::Waveform` to change waveform
+    /// `(speed, depth)` Q8.8 cycles/tick, Q15 signed amplitude
+    /// (was `f32`). See `ControlChangeEffect::Waveform` to
+    /// change waveform.
     /// V / XM0=7(7), XM=7(7)
-    Tremolo(f32, f32),
+    Tremolo(Q8_8, Q15),
 
     /// `(waveform, retrig)`, change Tremolo waveform.
     /// `retrig` to true to retrig when a new instrument is played.
@@ -183,113 +180,116 @@ pub enum TrackImportEffect {
     /// V / XM0=0x1D(T), XM=0x1D(T)
     Tremor(usize, usize),
 
-    /// `(speed, depth)`, set Vibrato
+    /// `(speed, depth)`, set Vibrato. `speed` Q8.8 cycles/tick,
+    /// `depth` semitones (PitchDelta, Q8.8). Was `f32`.
     /// F / XM0=4(4), XM=4(4), XM0=6x?(6), XM=6x?(6), XM=v0xB(vV)
-    Vibrato(f32, f32),
+    Vibrato(Q8_8, PitchDelta),
 
     /// `(speed, depth)`, set Vibrato
     /// IT with memory
-    VibratoFine(f32, f32),
+    VibratoFine(Q8_8, PitchDelta),
 
-    /// `speed`, set Vibrato speed
+    /// `speed`, set Vibrato speed (Q8.8 cycles/tick).
     /// F / XM0=v0xA(S)
-    VibratoSpeed(f32),
+    VibratoSpeed(Q8_8),
 
-    /// `depth`, set Vibrato depth
+    /// `depth`, set Vibrato depth (PitchDelta, semitones Q8.8).
     /// F / XM0=v0xB(V)
-    VibratoDepth(f32),
-    VibratoDepthFxVol(f32),
+    VibratoDepth(PitchDelta),
+    VibratoDepthFxVol(PitchDelta),
 
     /// `(waveform, retrig)`, change Vibrato waveform.
     /// `retrig` to true to retrig when a new instrument is played.
     /// F / XM0=0xE4(E4)
     VibratoWaveform(Waveform, bool),
 
-    /// `(value, tick)`, sets the current volume at the current tick
-    /// V / XM0=C(C), XM0=vV1..5(V)
-    Volume(f32, usize),
+    /// `(value, tick)`, sets the current volume at the current tick.
+    /// V / XM0=C(C), XM0=vV1..5(V). `value` was `f32` — Q1.15
+    /// in `[0, 1]`.
+    Volume(Volume, usize),
 
-    /// `(speed, tick)`, slides the current volume up or down
+    /// Slide the current volume up or down. Speed is signed
+    /// Q1.15 delta-per-tick (was `f32`).
     /// V / XM0=5?y(5), XM=5?y(5), XM0=6?y(6), XM=6?y(6), XM=0xA(A), XM0=0xEA(EA), XM0=0xEB(EB), XM=v6(v6), XM=v7(v7), XM0=v8(v8), XM0=v9(v9)
-    VolumeSlide0(f32),
-    VolumeSlideN(f32),
+    VolumeSlide0(Q15),
+    VolumeSlideN(Q15),
 }
 
 impl TrackImportEffect {
     fn sum_vibrato_depth(effects: &[TrackImportEffect]) -> Option<TrackEffect> {
-        let s = effects
-            .iter()
-            .map(|effect| match effect {
+        let mut s = PitchDelta::ZERO;
+        let mut any = false;
+        for effect in effects {
+            match effect {
                 TrackImportEffect::VibratoDepth(depth)
-                | TrackImportEffect::VibratoDepthFxVol(depth) => *depth,
-                _ => 0.0, // Ignore other variants
-            })
-            .sum();
-
-        if s == 0.0 {
-            None
-        } else {
-            Some(TrackEffect::VibratoDepth(s))
+                | TrackImportEffect::VibratoDepthFxVol(depth) => {
+                    s = s + *depth;
+                    any = true;
+                }
+                _ => {}
+            }
         }
+        if any { Some(TrackEffect::VibratoDepth(s)) } else { None }
     }
 
     fn sum_vibratos(effects: &[TrackImportEffect]) -> Option<TrackEffect> {
-        let s = effects
-            .iter()
-            .map(|effect| match effect {
-                TrackImportEffect::Vibrato(speed, depth)
-                | TrackImportEffect::VibratoFine(speed, depth) => (*speed, *depth),
-                _ => (0.0, 0.0), // Ignore other variants
-            })
-            .fold((0.0, 0.0), |acc, (a, b)| (acc.0 + a, acc.1 + b));
-
-        if s.0 == 0.0 && s.1 == 0.0 {
-            None
+        let mut speed = Q8_8::ZERO;
+        let mut depth = PitchDelta::ZERO;
+        let mut any = false;
+        for effect in effects {
+            match effect {
+                TrackImportEffect::Vibrato(s, d)
+                | TrackImportEffect::VibratoFine(s, d) => {
+                    speed = speed + *s;
+                    depth = depth + *d;
+                    any = true;
+                }
+                _ => {}
+            }
+        }
+        if any {
+            Some(TrackEffect::Vibrato { speed, depth })
         } else {
-            Some(TrackEffect::Vibrato {
-                speed: s.0,
-                depth: s.1,
-            })
+            None
         }
     }
 
     fn sum_tone_portamento(effects: &[TrackImportEffect]) -> Option<TrackEffect> {
-        let s = effects
-            .iter()
-            .map(|effect| match effect {
+        let mut s: i16 = 0;
+        let mut any = false;
+        for effect in effects {
+            match effect {
                 TrackImportEffect::TonePortamento(speed)
-                | TrackImportEffect::TonePortamentoFxVol(speed) => *speed,
-                _ => 0.0, // Ignore other variants
-            })
-            .sum();
-
-        if s == 0.0 {
-            None
-        } else {
-            Some(TrackEffect::TonePortamento(s))
+                | TrackImportEffect::TonePortamentoFxVol(speed) => {
+                    s = s.saturating_add(*speed);
+                    any = true;
+                }
+                _ => {}
+            }
         }
+        if any { Some(TrackEffect::TonePortamento(s)) } else { None }
     }
 
     /// Sum all *regular* (tick > 0) pitch-slide speeds on the row.
     /// Returns `Some(Portamento { fine: false, ... })` if any regular
     /// slide is present, else `None`.
     fn sum_portamento_speeds_regular(effects: &[TrackImportEffect]) -> Option<TrackEffect> {
-        let s: f32 = effects
-            .iter()
-            .map(|effect| match effect {
+        let mut s: i16 = 0;
+        let mut any = false;
+        for effect in effects {
+            match effect {
                 TrackImportEffect::PortamentoUp(speed)
-                | TrackImportEffect::PortamentoDown(speed) => *speed,
-                _ => 0.0,
-            })
-            .sum();
-
-        if s == 0.0 {
-            None
+                | TrackImportEffect::PortamentoDown(speed) => {
+                    s = s.saturating_add(*speed);
+                    any = true;
+                }
+                _ => {}
+            }
+        }
+        if any {
+            Some(TrackEffect::Portamento { speed: s, fine: false })
         } else {
-            Some(TrackEffect::Portamento {
-                speed: s,
-                fine: false,
-            })
+            None
         }
     }
 
@@ -307,24 +307,24 @@ impl TrackImportEffect {
     /// into a single `Portamento` that fired at tick > 0 only, over-
     /// applying fine slides by `(speed − 1)×`.
     fn sum_portamento_speeds_fine(effects: &[TrackImportEffect]) -> Option<TrackEffect> {
-        let s: f32 = effects
-            .iter()
-            .map(|effect| match effect {
+        let mut s: i16 = 0;
+        let mut any = false;
+        for effect in effects {
+            match effect {
                 TrackImportEffect::PortamentoFineUp(speed)
                 | TrackImportEffect::PortamentoFineDown(speed)
                 | TrackImportEffect::PortamentoExtraFineUp(speed)
-                | TrackImportEffect::PortamentoExtraFineDown(speed) => *speed,
-                _ => 0.0,
-            })
-            .sum();
-
-        if s == 0.0 {
-            None
+                | TrackImportEffect::PortamentoExtraFineDown(speed) => {
+                    s = s.saturating_add(*speed);
+                    any = true;
+                }
+                _ => {}
+            }
+        }
+        if any {
+            Some(TrackEffect::Portamento { speed: s, fine: true })
         } else {
-            Some(TrackEffect::Portamento {
-                speed: s,
-                fine: true,
-            })
+            None
         }
     }
 
@@ -413,7 +413,7 @@ impl TrackImportEffect {
                 // is audible over a long Rxy passage; keep 11/16 here.
                 Some(TrackEffect::NoteRetrig {
                     speed: interval,
-                    volume_modifier: note_retrig_volume_modifier(vol, 11.0 / 16.0),
+                    volume_modifier: note_retrig_volume_modifier_ft2(vol),
                 })
             }
             TrackImportEffect::NoteRetrigExtendedS3m(interval, vol) => {
@@ -424,7 +424,7 @@ impl TrackImportEffect {
                 // a different nibble-6 constant.
                 Some(TrackEffect::NoteRetrig {
                     speed: interval,
-                    volume_modifier: note_retrig_volume_modifier(vol, 10.0 / 16.0),
+                    volume_modifier: note_retrig_volume_modifier_s3m(vol),
                 })
             }
             TrackImportEffect::Panbrello(speed, depth) => {

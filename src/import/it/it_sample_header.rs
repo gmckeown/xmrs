@@ -1,3 +1,5 @@
+use crate::fixed::fixed::Q8_8;
+use crate::fixed::units::{ChannelVolume, Finetune, Panning, PitchDelta, Volume};
 use crate::prelude::*;
 use alloc::string::String;
 
@@ -10,15 +12,6 @@ use serde::Deserialize;
 use super::bitreader::BitReader;
 use super::serde_helper::deserialize_string_12;
 use super::serde_helper::deserialize_string_26;
-
-// Float math backend (only needed when `std` is disabled).
-// Priority: std > libm > micromath.
-#[cfg(all(not(feature = "std"), not(feature = "libm"), feature = "micromath"))]
-#[allow(unused_imports)]
-use micromath::F32Ext;
-#[cfg(all(not(feature = "std"), feature = "libm"))]
-#[allow(unused_imports)]
-use num_traits::float::Float;
 
 /// Structure representing a sample header in the IMPS format.
 #[derive(Deserialize, Debug, Default)]
@@ -697,14 +690,50 @@ impl ItSampleHeader {
         Ok(output)
     }
 
-    fn c5_speed_to_finetune(&self) -> (i8, f32) {
+    fn c5_speed_to_finetune(&self) -> (i8, Finetune) {
         if self.c5_speed == 0 {
-            return (0, 0.0);
+            return (0, Finetune::ZERO);
         }
-        let ratio = self.c5_speed as f32 / 16726.0;
-        let semitones = 12.0 * ratio.log2();
-        let relative_pitch = semitones.round() as i8;
-        let finetune = semitones.fract();
+        // Pure-integer load-time math. The historical IT
+        // implementation computed `12 × log2(c5_speed / 16726)`
+        // in `f32`. That `16726` came from `8363 × 2` (the FT2
+        // C-4 reference doubled to anchor C-5), but the
+        // runtime's pitch tables are MIDI-aligned at
+        // `C4_FREQ_HZ = 8372 Hz`, so the float import was
+        // ~1.9 cents off the actual playback frequency anyway.
+        //
+        // We anchor the conversion to the same tables the runtime
+        // uses: `linear_frequency_to_period` (binary search,
+        // ≤13 iter, no float, no `log2`) gives the pitch grid
+        // position; `linear_period_to_pitch` then yields a
+        // Q8.8 semitone count from C0. Subtracting C5 (= note
+        // 60 = `60 × 256` in Q8.8) gives the relative pitch.
+        // This makes the load-time `(relative_pitch, finetune)`
+        // round-trip exactly through the playback path.
+        let f = crate::fixed::units::Frequency::from_hz(self.c5_speed);
+        let period = crate::fixed::tables::linear_frequency_to_period(f);
+        // `period ∈ [0, 7680]`, with `period = 0` ↔ B9
+        // (note 119) and `period = 7680` ↔ C0 (note 0).
+        // `pitch_q8_8_from_c0 = (7680 - period) × 4` (1 unit
+        // of period = 1/64 semitone; 256/64 = 4 to widen to
+        // Q8.8).
+        let pitch_q8_8_from_c0 = (7680 - period.raw() as i32) * 4;
+        // C5 = 60 semitones above C0 = `60 × 256 = 15360` in Q8.8.
+        let semitones_q8_8 = pitch_q8_8_from_c0 - 15360;
+
+        // Round-half-away-from-zero: `relative_pitch =
+        // round(semitones / 256)`.
+        let bias = if semitones_q8_8 >= 0 { 128 } else { -128 };
+        let rel_i32 = (semitones_q8_8 + bias) >> 8;
+        let relative_pitch = rel_i32.clamp(i8::MIN as i32, i8::MAX as i32) as i8;
+
+        // Residual fractional semitone, Q8.8 in `[-128, +127]`
+        // (max amplitude is one half-step). Convert Q8.8 → Q1.15
+        // by `<< 7` (256→32768 shift = 7 bits), result in
+        // `[-16384, +16256]` ⊂ `(-1, +1)` Q1.15.
+        let frac_q8_8 = semitones_q8_8 - (relative_pitch as i32) * 256;
+        let frac_q15 = frac_q8_8 << 7;
+        let finetune = Finetune::from_q15_i32_sat(frac_q15);
         (relative_pitch, finetune)
     }
 
@@ -734,9 +763,9 @@ impl ItSampleHeader {
         let (relative_pitch, finetune) = self.c5_speed_to_finetune();
 
         let panning = if self.default_pan & 0x80 != 0 {
-            (self.default_pan & 0x7F) as f32 / 64.0
+            Panning::from_byte_64(self.default_pan & 0x7F)
         } else {
-            0.5
+            Panning::CENTER
         };
 
         let llength = self.loop_end.saturating_sub(self.loop_beginning);
@@ -747,33 +776,23 @@ impl ItSampleHeader {
 
         // IT splits the sample's level into two registers:
         //   * GvL (`global_volume`, 0..64): always applies — a static
-        //     scale baked into the sample's playback level.
+        //     scale baked into the sample's playback level. Maps to
+        //     `Sample.volume` (a `ChannelVolume` semantically).
         //   * Vol (`default_volume`, 0..64): the default NOTE volume,
         //     used only when the pattern cell has no volume-column
-        //     override.
-        // xmrs's `Sample` has a single `volume` field. Putting GvL
-        // alone here is the correct call: it's the always-applies
-        // scalar. A pattern cell's `Vxx` column, when present,
-        // overrides the note's starting volume but must NOT clobber
-        // GvL — so they live in different layers. Vol (the default
-        // note volume) is not applied in this importer today; modules
-        // that rely on per-sample default-volume tuning for silent-
-        // cell notes will ignore it. Fixing this properly needs a
-        // `default_note_volume` field on xmrs's Sample or an
-        // instrument-trigger hook in the player; neither is worth
-        // the breaking change today.
-        let gvl_only = self.global_volume as f32 / 64.0;
-        // Default note volume (Vol): 0..64 → 0..1. Applied on top of
-        // `volume` (GvL) at note-trigger time unless a V-column
-        // override replaces it.
-        let default_note_vol = (self.default_volume.min(64) as f32) / 64.0;
+        //     override. Maps to `Sample.default_note_volume`.
+        // A pattern cell's `Vxx` column overrides the note's starting
+        // volume but does NOT clobber GvL — GvL keeps scaling the
+        // sample regardless.
+        let gvl = ChannelVolume::from_byte_64(self.global_volume);
+        let default_note_vol = Volume::from_byte_64(self.default_volume.min(64));
 
         Sample {
             name,
             relative_pitch,
             finetune,
-            volume: gvl_only.clamp(0.0, 1.0),
-            default_note_volume: default_note_vol.clamp(0.0, 1.0),
+            volume: gvl,
+            default_note_volume: default_note_vol,
             panning,
             loop_start: self.loop_beginning,
             loop_length: llength,
@@ -806,19 +825,20 @@ impl ItSampleHeader {
         // both are normalised by `/64`.
         //
         // `vibrato_sweep = 0` means "instant full depth" per IT2.14
-        // (and is what `StateAutoVibrato::tick` already short-
-        // circuits on `sweep <= 0`). Map to 0 explicitly to avoid
-        // the division by zero.
+        // (`Q8_8::from_ratio` returns saturating-positive on
+        // `den == 0`, so we map that to `Q8_8::ZERO` explicitly to
+        // get the "no ramp" path in `StateAutoVibrato::tick`, which
+        // short-circuits on `sweep <= 0`).
         let xmrs_sweep = if self.vibrato_sweep == 0 {
-            0.0
+            Q8_8::ZERO
         } else {
-            self.vibrato_speed as f32 / self.vibrato_sweep as f32
+            Q8_8::from_ratio(self.vibrato_speed as i16, self.vibrato_sweep as i16)
         };
 
         Vibrato {
             waveform: wf,
-            speed: self.vibrato_speed as f32 / 64.0,
-            depth: self.vibrato_depth as f32 / 64.0,
+            speed: Q8_8::from_ratio(self.vibrato_speed as i16, 64),
+            depth: PitchDelta::from_ratio(self.vibrato_depth as i16, 64),
             sweep: xmrs_sweep,
         }
     }

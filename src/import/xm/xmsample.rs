@@ -7,6 +7,7 @@ use alloc::{vec, vec::Vec};
 
 use super::helper::*;
 use super::serde_helper::{deserialize_string_22, serialize_string_22};
+use crate::fixed::units::{ChannelVolume, Finetune, Panning, Volume};
 use crate::instrument::{Instrument, InstrumentType};
 use crate::sample::{LoopType, Sample, SampleDataType};
 
@@ -132,12 +133,15 @@ impl XmSample {
         Sample {
             name: self.header.name.clone(),
             relative_pitch: self.header.relative_pitch,
-            finetune: (self.header.finetune as f32 / 127.0).clamp(-1.0, 1.0),
-            volume: self.header.volume as f32 / 64.0,
+            // XM finetune is `i8 / 127`; the previous f32
+            // `.clamp(-1.0, 1.0)` is folded into Finetune's
+            // saturating storage.
+            finetune: Finetune::from_ratio(self.header.finetune as i32, 127),
+            volume: ChannelVolume::from_byte_64(self.header.volume),
             // XM has no separate per-sample default note volume —
             // the sample's own `volume` scale is the only gain knob.
-            default_note_volume: 1.0,
-            panning: self.header.panning as f32 / 255.0,
+            default_note_volume: Volume::FULL,
+            panning: Panning::from_byte_255(self.header.panning),
             loop_flag: match self.header.flags & 0b0000_0011 {
                 1 => LoopType::Forward,
                 2 => LoopType::PingPong,
@@ -176,13 +180,13 @@ impl XmSample {
                 };
                 xms.header.loop_start = loop_start;
                 xms.header.loop_length = loop_length;
-                xms.header.volume = (s.volume * 64.0) as u8;
-                xms.header.finetune = (s.finetune * 127.0) as i8;
+                xms.header.volume = s.volume.to_byte_64();
+                xms.header.finetune = s.finetune.to_signed_byte(127);
                 xms.header.flags = s.loop_flag.into();
                 if let Some(SampleDataType::Mono16(_)) = &s.data {
                     xms.header.flags |= 0b0001_0000;
                 }
-                xms.header.panning = (s.panning * 255.0) as u8;
+                xms.header.panning = s.panning.to_byte_255();
                 xms.header.relative_pitch = s.relative_pitch;
                 xms.header.name = s.name.clone();
                 xms.data = s.data.clone();

@@ -1,16 +1,9 @@
+use crate::fixed::fixed::Q8_8;
+use crate::fixed::units::{ChannelVolume, EnvValue, Finetune, Panning, PitchDelta, Volume};
 use crate::{instr_sid::SidVoice, prelude::*};
 use alloc::format;
 use alloc::string::String;
 use alloc::{vec, vec::Vec};
-
-// Float math backend (only needed when `std` is disabled).
-// Priority: std > libm > micromath.
-#[cfg(all(not(feature = "std"), not(feature = "libm"), feature = "micromath"))]
-#[allow(unused_imports)]
-use micromath::F32Ext;
-#[cfg(all(not(feature = "std"), feature = "libm"))]
-#[allow(unused_imports)]
-use num_traits::float::Float;
 
 pub struct InstrHelper;
 
@@ -37,12 +30,12 @@ impl InstrHelper {
         Sample {
             name,
             relative_pitch: 0,
-            finetune: 0.0,
-            volume: 1.0,
+            finetune: Finetune::ZERO,
+            volume: ChannelVolume::FULL,
             // Synthesized SID waveforms don't carry a meaningful
             // default-note-volume — always triggers at full.
-            default_note_volume: 1.0,
-            panning: 0.5,
+            default_note_volume: Volume::FULL,
+            panning: Panning::CENTER,
             loop_flag,
             loop_start: 0,
             loop_length: 128,
@@ -69,7 +62,11 @@ impl InstrHelper {
 
     fn generate_pulse_sample(pw: u16) -> SampleDataType {
         let mut pulse_data: Vec<i8> = vec![0; 128];
-        let duty_cycle = (pw as f32 / 4095.0 * 128.0) as usize;
+        // PWM duty cycle: `pw / 4095 × 128`, exact in `u32` for
+        // any `pw ∈ [0, 4095]` (max product `524 160` fits u32,
+        // max result `128`). Replaces the f32 path
+        // `(pw as f32 / 4095.0 * 128.0) as usize`.
+        let duty_cycle = ((pw as u32) * 128 / 4095) as usize;
         for (i, v) in pulse_data.iter_mut().enumerate().take(128) {
             *v = if i < duty_cycle { 127 } else { -127 };
         }
@@ -132,18 +129,18 @@ impl InstrHelper {
             let attack_frame = adr_frames[attack as usize];
             point.push(EnvelopePoint {
                 frame: 0,
-                value: 0.0,
+                value: EnvValue::default(),
             });
             seek += attack_frame;
             point.push(EnvelopePoint {
                 frame: attack_frame,
-                value: 1.0,
+                value: EnvValue::VOLUME_DEFAULT,
             });
             seek_point = 1;
         } else {
             point.push(EnvelopePoint {
                 frame: 0,
-                value: 1.0,
+                value: EnvValue::VOLUME_DEFAULT,
             });
         }
 
@@ -154,7 +151,11 @@ impl InstrHelper {
         }
         point.push(EnvelopePoint {
             frame: seek,
-            value: 4.0 * sustain as f32 / 64.0,
+            // SID sustain nibble (`0..=15`) scaled by 4 into the
+            // standard `0..=64` envelope-byte range. So a max
+            // sustain of 15 lands at `60 / 64 ≈ 0.9375`, matching
+            // the previous `4.0 * sustain / 64.0`.
+            value: EnvValue::from_byte_64(4 * sustain),
         });
         seek_point += 1;
 
@@ -165,7 +166,7 @@ impl InstrHelper {
         }
         point.push(EnvelopePoint {
             frame: seek,
-            value: 0.0,
+            value: EnvValue::default(),
         });
 
         let volume_envelope = Envelope {
@@ -218,8 +219,8 @@ impl InstrHelper {
         } else {
             let mut xi = Self::sid_to_xi(&irs.sid.voice[0]);
             if irs.fx[0].vibrato {
-                xi.voice.vibrato.depth = irs.fx[0].vibrato_depth as f32 / 15.0;
-                xi.voice.vibrato.speed = 1.0 / irs.fx[0].vibrato_div as f32;
+                xi.voice.vibrato.depth = PitchDelta::from_ratio(irs.fx[0].vibrato_depth as i16, 15);
+                xi.voice.vibrato.speed = Q8_8::from_ratio(1, irs.fx[0].vibrato_div as i16);
             }
             idst.instr_type = InstrumentType::Default(xi);
         }

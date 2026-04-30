@@ -5,6 +5,9 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
+use crate::fixed::fixed::{Q15, Q8_8};
+use crate::fixed::from_tracker::lfo_speed_from_nibble_64;
+use crate::fixed::units::{ChannelVolume, Finetune, Panning, PitchDelta, Volume};
 use crate::import::import_memory::S3mImportFlags;
 use crate::import::patternslot::PatternSlot;
 use crate::import::track_import_effect::TrackImportEffect;
@@ -120,8 +123,8 @@ impl S3mEffect {
         let high = (param & 0xF0) >> 4;
         let low = param & 0x0F;
 
-        let speed = |v: u8| -(v as f32) / 64.0;
-        let speed_up = |v: u8| v as f32 / 64.0;
+        let speed = |v: u8| Q15::from_ratio(-(v as i32), 64);
+        let speed_up = |v: u8| Q15::from_ratio(v as i32, 64);
 
         match (high, low) {
             // D0F: slide down by 0xF every tick including tick 0.
@@ -188,8 +191,8 @@ impl S3mEffect {
         let high = (param & 0xF0) >> 4;
         let low = param & 0x0F;
 
-        let speed = |v: u8| -(v as f32) / 64.0;
-        let speed_up = |v: u8| v as f32 / 64.0;
+        let speed = |v: u8| Q15::from_ratio(-(v as i32), 64);
+        let speed_up = |v: u8| Q15::from_ratio(v as i32, 64);
 
         match (high, low) {
             (0, 0xF) => vec![
@@ -265,10 +268,20 @@ impl S3mEffect {
         let low = param & 0x0F;
 
         match (high, low) {
-            (0xF, f) => Some(TrackImportEffect::PanningSlide0(-(f as f32) / 16.0)),
-            (f, 0xF) => Some(TrackImportEffect::PanningSlide0(f as f32 / 16.0)),
-            (0, f) => Some(TrackImportEffect::PanningSlideN(-(f as f32) / 16.0)),
-            (f, 0) => Some(TrackImportEffect::PanningSlideN(f as f32 / 16.0)),
+            (0xF, f) => Some(TrackImportEffect::PanningSlide0(Q15::from_ratio(
+                -(f as i32),
+                16,
+            ))),
+            (f, 0xF) => Some(TrackImportEffect::PanningSlide0(Q15::from_ratio(
+                f as i32, 16,
+            ))),
+            (0, f) => Some(TrackImportEffect::PanningSlideN(Q15::from_ratio(
+                -(f as i32),
+                16,
+            ))),
+            (f, 0) => Some(TrackImportEffect::PanningSlideN(Q15::from_ratio(
+                f as i32, 16,
+            ))),
             _ => None,
         }
     }
@@ -289,16 +302,17 @@ impl S3mEffect {
         // fine sub-commands: previously only the main slide respected
         // it, which left E/F high-nibble-F fine slides 4× too fast
         // in Amiga mode.
-        let main_scale = match freq_type {
-            FrequencyType::LinearFrequencies => 4.0,
-            FrequencyType::AmigaFrequencies => 1.0,
+        let main_scale: i16 = match freq_type {
+            FrequencyType::LinearFrequencies => 4,
+            FrequencyType::AmigaFrequencies => 1,
         };
         // oldstvib (masterflags bit 1) doubles the vibrato depth —
         // ST3 uses a `>> 4` shift under this flag instead of the
         // regular `>> 5`, giving 2× the depth. The same applies to
         // the fine vibrato U (`>> 6` vs `>> 7`). Absorbed into the
-        // emitted depth so the player stays agnostic.
-        let vib_depth_scale: f32 = if flags.oldstvib { 2.0 } else { 1.0 };
+        // emitted depth (Q8.8 raw multiplier) so the player stays
+        // agnostic.
+        let vib_depth_scale: i16 = if flags.oldstvib { 2 } else { 1 };
         match current.effect_type {
             // D - Volume slide
             4 => {
@@ -320,15 +334,15 @@ impl S3mEffect {
                     // in ST3 units = `main_scale` in xmrs period
                     // units.
                     (0xE, f) => Some(vec![TrackImportEffect::PortamentoExtraFineDown(
-                        main_scale * f as f32,
+                        main_scale * f as i16,
                     )]),
                     // EFy: "extra" fine slide down (4x scale, once
                     // at tick 0).
                     (0xF, f) => Some(vec![TrackImportEffect::PortamentoFineDown(
-                        main_scale * 4.0 * f as f32,
+                        main_scale * 4 * f as i16,
                     )]),
                     _ => Some(vec![TrackImportEffect::PortamentoDown(
-                        main_scale * param as f32,
+                        main_scale * param as i16,
                     )]),
                 }
             }
@@ -339,27 +353,30 @@ impl S3mEffect {
                 let low = param & 0x0F;
                 match (high, low) {
                     (0xE, f) => Some(vec![TrackImportEffect::PortamentoExtraFineUp(
-                        -main_scale * f as f32,
+                        -main_scale * f as i16,
                     )]),
                     (0xF, f) => Some(vec![TrackImportEffect::PortamentoFineUp(
-                        -main_scale * 4.0 * f as f32,
+                        -main_scale * 4 * f as i16,
                     )]),
                     _ => Some(vec![TrackImportEffect::PortamentoUp(
-                        -main_scale * param as f32,
+                        -main_scale * param as i16,
                     )]),
                 }
             }
 
             // G - Tone portamento
             7 => {
-                let speed = main_scale * param as f32;
+                let speed: i16 = main_scale * param as i16;
                 Some(vec![TrackImportEffect::TonePortamento(speed)])
             }
 
-            // H - Vibrato
+            // H - Vibrato. depth in semitones: `y/16 * vib_depth_scale`.
+            // Q8.8 raw: `y * 16 * vib_depth_scale`.
             8 => {
-                let speed = ((param & 0xF0) >> 4) as f32 / 64.0;
-                let depth = (param & 0x0F) as f32 / 16.0 * vib_depth_scale;
+                let speed = lfo_speed_from_nibble_64((param & 0xF0) >> 4);
+                let l = (param & 0x0F) as i16;
+                let depth =
+                    PitchDelta::from_q8_8_i16(l * 16 * vib_depth_scale);
                 Some(vec![TrackImportEffect::Vibrato(speed, depth)])
             }
 
@@ -383,14 +400,14 @@ impl S3mEffect {
 
             // K - Vibrato + Volume slide
             11 => {
-                let mut v = vec![TrackImportEffect::Vibrato(0.0, 0.0)];
+                let mut v = vec![TrackImportEffect::Vibrato(Q8_8::ZERO, PitchDelta::ZERO)];
                 v.extend(Self::s3m_volume_slide(param, flags));
                 Some(v)
             }
 
             // L - Tone portamento + Volume slide
             //
-            // The emitted `TonePortamento(0.0)` is NOT a no-op — it
+            // The emitted `TonePortamento(0)` is NOT a no-op — it
             // signals "load from memory" in `ImportMemory`. Since G
             // writes to the same `TONE_PORTAMENTO` slot with its
             // speed (when `param > 0`) and L only reads from it, the
@@ -403,14 +420,14 @@ impl S3mEffect {
             // initial-zero `alasteff1` (no slide), which xmrs
             // reproduces via the zero-initialised slot.
             12 => {
-                let mut v = vec![TrackImportEffect::TonePortamento(0.0)];
+                let mut v = vec![TrackImportEffect::TonePortamento(0)];
                 v.extend(Self::s3m_volume_slide(param, flags));
                 Some(v)
             }
 
             // M - Set channel volume
             13 => Some(vec![TrackImportEffect::ChannelVolume(
-                param.min(64) as f32 / 64.0,
+                ChannelVolume::from_byte_64(param.min(64)),
             )]),
 
             // N - Channel volume slide
@@ -441,10 +458,13 @@ impl S3mEffect {
                 Some(vec![TrackImportEffect::NoteRetrigExtendedS3m(speed, vol)])
             }
 
-            // R - Tremolo
+            // R - Tremolo. depth in volume amplitude: `y/16 *
+            // vib_depth_scale`. Q15 raw: `y * 2048 *
+            // vib_depth_scale`, saturating at Q15 max.
             18 => {
-                let speed = ((param & 0xF0) >> 4) as f32 / 64.0;
-                let depth = (param & 0x0F) as f32 / 16.0 * vib_depth_scale;
+                let speed = lfo_speed_from_nibble_64((param & 0xF0) >> 4);
+                let l = (param & 0x0F) as i32;
+                let depth = Q15::from_i32_unsigned_sat(l * 2048 * vib_depth_scale as i32);
                 Some(vec![TrackImportEffect::Tremolo(speed, depth)])
             }
 
@@ -455,7 +475,10 @@ impl S3mEffect {
                 match sub {
                     0x1 => Some(vec![TrackImportEffect::Glissando(val != 0)]),
                     0x2 => Some(vec![TrackImportEffect::InstrumentFineTune(
-                        val as f32 / 8.0 - 1.0,
+                        // S2y: same FT2-style nibble-centred-at-8
+                        // mapping as XM's E5y. `(val - 8) / 8 →
+                        // [-1, +1]`.
+                        Finetune::from_ratio(val as i32 - 8, 8),
                     )]),
                     0x3 => {
                         let wf = match val & 3 {
@@ -473,7 +496,10 @@ impl S3mEffect {
                         };
                         Some(vec![TrackImportEffect::TremoloWaveform(wf, (val & 4) == 0)])
                     }
-                    0x8 => Some(vec![TrackImportEffect::Panning(val as f32 / 15.0)]),
+                    0x8 => Some(vec![TrackImportEffect::Panning(
+                        // S8y: 4-bit pan, `0..=15`. Was `val/15`.
+                        Panning::from_ratio(val as i32, 15),
+                    )]),
                     0x9 => Some(vec![TrackImportEffect::NoteRetrig(val as usize)]),
                     0xC => {
                         if val > 0 {
@@ -493,15 +519,20 @@ impl S3mEffect {
                 }
             }
 
-            // U - Fine vibrato (4x finer depth than H)
+            // U - Fine vibrato (4x finer depth than H). Q8.8 raw:
+            // `y/64 * 256 = y * 4 * vib_depth_scale`.
             21 => {
-                let speed = ((param & 0xF0) >> 4) as f32 / 64.0;
-                let depth = (param & 0x0F) as f32 / 64.0 * vib_depth_scale;
+                let speed = lfo_speed_from_nibble_64((param & 0xF0) >> 4);
+                let l = (param & 0x0F) as i16;
+                let depth =
+                    PitchDelta::from_q8_8_i16(l * 4 * vib_depth_scale);
                 Some(vec![TrackImportEffect::VibratoFine(speed, depth)])
             }
 
             // X - Set panning
-            24 => Some(vec![TrackImportEffect::Panning(param as f32 / 255.0)]),
+            24 => Some(vec![TrackImportEffect::Panning(Panning::from_byte_255(
+                param,
+            ))]),
 
             _ => None,
         }
@@ -511,12 +542,12 @@ impl S3mEffect {
 
     fn s3m_walk_volume(current: &PatternSlot) -> Option<TrackImportEffect> {
         match current.volume {
-            v if v <= 64 => Some(TrackImportEffect::Volume(v as f32 / 64.0, 0)),
+            v if v <= 64 => Some(TrackImportEffect::Volume(Volume::from_byte_64(v), 0)),
             // MPT-style S3M panning via the volume column. 0x80 = hard left,
             // 0xC0 = hard right; 65 discrete steps in between. We scale to
-            // the [0.0, 1.0] range used by TrackImportEffect::Panning.
+            // Q1.15 panning via [`Panning::from_byte_64`].
             v if (0x80..=0xC0).contains(&v) => {
-                Some(TrackImportEffect::Panning((v - 0x80) as f32 / 64.0))
+                Some(TrackImportEffect::Panning(Panning::from_byte_64(v - 0x80)))
             }
             _ => None,
         }
@@ -563,7 +594,7 @@ impl S3mEffect {
             // V - Set global volume
             22 => {
                 if param <= 0x40 {
-                    Some(GlobalEffect::Volume(param as f32 / 64.0))
+                    Some(GlobalEffect::Volume(Volume::from_byte_64(param)))
                 } else {
                     None
                 }
@@ -574,19 +605,19 @@ impl S3mEffect {
                 let low = param & 0x0F;
                 match (high, low) {
                     (0xF, f) => Some(GlobalEffect::VolumeSlide {
-                        speed: -(f as f32) / 64.0,
+                        speed: Q15::from_ratio(-(f as i32), 64),
                         fine: true,
                     }),
                     (f, 0xF) => Some(GlobalEffect::VolumeSlide {
-                        speed: f as f32 / 64.0,
+                        speed: Q15::from_ratio(f as i32, 64),
                         fine: true,
                     }),
                     (0, f) => Some(GlobalEffect::VolumeSlide {
-                        speed: -(f as f32) / 64.0,
+                        speed: Q15::from_ratio(-(f as i32), 64),
                         fine: false,
                     }),
                     (f, 0) => Some(GlobalEffect::VolumeSlide {
-                        speed: f as f32 / 64.0,
+                        speed: Q15::from_ratio(f as i32, 64),
                         fine: false,
                     }),
                     _ => None,

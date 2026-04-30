@@ -5,6 +5,7 @@ use serde::Deserialize;
 use alloc::string::String;
 use core::fmt;
 
+use crate::fixed::units::{ChannelVolume, Finetune, Panning, Volume};
 use crate::prelude::*;
 
 #[derive(Default, Deserialize)]
@@ -50,7 +51,11 @@ impl AmigaSample {
     }
 
     pub fn to_sample(&self) -> Sample {
-        let f = (((self.finetune << 4) as i8) as f32 / 127.0).clamp(-1.0, 1.0);
+        // Amiga finetune: 4-bit signed nibble (`finetune << 4` to
+        // sign-extend through `i8`), normalised by `/127`. The
+        // old `.clamp(-1.0, 1.0)` is folded into `Finetune`'s
+        // saturating storage.
+        let f = Finetune::from_ratio((self.finetune << 4) as i8 as i32, 127);
         let ro = if 2 * (self.repeat_offset_div2 as usize) < 2 * (self.length_div2 as usize) {
             2 * self.repeat_offset_div2 as usize
         } else {
@@ -71,11 +76,11 @@ impl AmigaSample {
             name: self.name.clone(),
             relative_pitch: 0,
             finetune: f,
-            volume: self.volume as f32 / 64.0,
+            volume: ChannelVolume::from_byte_64(self.volume),
             // MOD has no concept of a per-sample default note
             // volume — the sample always triggers at full.
-            default_note_volume: 1.0,
-            panning: 0.5,
+            default_note_volume: Volume::FULL,
+            panning: Panning::CENTER,
             loop_flag: flag,
             loop_start: ro as u32,
             loop_length: rl as u32,

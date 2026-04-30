@@ -10,6 +10,7 @@ use super::xminstrument::XmInstrument;
 use super::xmpattern::XmPattern;
 
 use crate::compatibility_profile::CompatibilityProfile;
+use crate::fixed::units::Volume;
 use crate::import::import_memory::{ImportMemory, MemoryType};
 use crate::import::orders_helper;
 use crate::import::patternslot::PatternSlot;
@@ -111,7 +112,7 @@ impl XmModule {
             // applies the same headroom for XM as for IT — the same
             // engine-side `MIXING_ATTENUATION` shift expects this
             // pre-attenuation as input.
-            mix_volume: 48.0 / 128.0,
+            mix_volume: Volume::from_ratio(48, 128),
         };
 
         let patterns: Vec<Vec<Vec<PatternSlot>>> =

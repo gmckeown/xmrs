@@ -100,6 +100,12 @@ CommandS7Table (see `IT_M_EFF.INC`):
 */
 
 use crate::effect::MidiMacroType;
+use crate::fixed::fixed::{Q15, Q8_8};
+use crate::fixed::from_tracker::{
+    it_panbrello_depth_from_nibble_4, it_vibrato_depth_from_nibble_4, lfo_depth_from_nibble_16,
+    lfo_speed_from_nibble_64, vibrato_depth_from_nibble_16,
+};
+use crate::fixed::units::{ChannelVolume, Panning, PitchDelta, Volume};
 use crate::import::patternslot::PatternSlot;
 use crate::import::track_import_effect::TrackImportEffect;
 use crate::import::track_import_unit::TrackImportUnit;
@@ -130,10 +136,20 @@ impl ItEffect {
         let nibble_low = fx & 0x0F;
 
         match (nibble_high, nibble_low) {
-            (f, 0) => Some(TrackImportEffect::VolumeSlideN(f as f32 / 64.0)),
-            (0, f) => Some(TrackImportEffect::VolumeSlideN(-(f as f32) / 64.0)),
-            (f, 0xF) => Some(TrackImportEffect::VolumeSlide0(f as f32 / 64.0)),
-            (0xF, f) => Some(TrackImportEffect::VolumeSlide0(-(f as f32) / 64.0)),
+            (f, 0) => Some(TrackImportEffect::VolumeSlideN(Q15::from_ratio(
+                f as i32, 64,
+            ))),
+            (0, f) => Some(TrackImportEffect::VolumeSlideN(Q15::from_ratio(
+                -(f as i32),
+                64,
+            ))),
+            (f, 0xF) => Some(TrackImportEffect::VolumeSlide0(Q15::from_ratio(
+                f as i32, 64,
+            ))),
+            (0xF, f) => Some(TrackImportEffect::VolumeSlide0(Q15::from_ratio(
+                -(f as i32),
+                64,
+            ))),
             _ => None,
         }
     }
@@ -155,13 +171,15 @@ impl ItEffect {
                 let nibble_low = fx & 0x0F;
 
                 match (nibble_high, nibble_low) {
-                    (0xE, low) => {
-                        Some(vec![TrackImportEffect::PortamentoExtraFineDown(low as f32)])
-                    }
-                    (0xF, low) => Some(vec![TrackImportEffect::PortamentoFineDown(
-                        4.0 * low as f32,
+                    (0xE, low) => Some(vec![TrackImportEffect::PortamentoExtraFineDown(
+                        low as i16,
                     )]),
-                    (_high, _low) => Some(vec![TrackImportEffect::PortamentoDown(4.0 * fx as f32)]),
+                    (0xF, low) => Some(vec![TrackImportEffect::PortamentoFineDown(
+                        4 * low as i16,
+                    )]),
+                    (_high, _low) => {
+                        Some(vec![TrackImportEffect::PortamentoDown(4 * fx as i16)])
+                    }
                 }
             }
 
@@ -176,30 +194,33 @@ impl ItEffect {
 
                 match (nibble_high, nibble_low) {
                     (0xE, low) => Some(vec![TrackImportEffect::PortamentoExtraFineUp(
-                        -(low as f32),
+                        -(low as i16),
                     )]),
-                    (0xF, low) => {
-                        Some(vec![TrackImportEffect::PortamentoFineUp(-4.0 * low as f32)])
+                    (0xF, low) => Some(vec![TrackImportEffect::PortamentoFineUp(
+                        -4 * low as i16,
+                    )]),
+                    (_high, _low) => {
+                        Some(vec![TrackImportEffect::PortamentoUp(-4 * fx as i16)])
                     }
-                    (_high, _low) => Some(vec![TrackImportEffect::PortamentoUp(-4.0 * fx as f32)]),
                 }
             }
 
             // Slide to note (Gxx)
             0x07 => {
-                let param = current.effect_parameter as f32;
-                let speed = match freq_type {
-                    FrequencyType::LinearFrequencies => 4.0 * param,
+                let param = current.effect_parameter as i16;
+                let speed: i16 = match freq_type {
+                    FrequencyType::LinearFrequencies => 4 * param,
                     FrequencyType::AmigaFrequencies => param,
                 };
                 Some(vec![TrackImportEffect::TonePortamento(speed)])
             }
 
-            // Effect Vibrato (Hxy)
+            // Effect Vibrato (Hxy). IT uses 4× finer depth than XM
+            // (`y/4` semitones vs XM's `y/16`).
             0x08 => {
                 let param = current.effect_parameter;
-                let speed = ((param & 0xF0) >> 4) as f32 / 64.0;
-                let depth = (param & 0x0F) as f32 * 4.0 / 16.0;
+                let speed = lfo_speed_from_nibble_64((param & 0xF0) >> 4);
+                let depth = it_vibrato_depth_from_nibble_4(param & 0x0F);
                 Some(vec![TrackImportEffect::Vibrato(speed, depth)])
             }
 
@@ -229,11 +250,14 @@ impl ItEffect {
             // Kxy = H00 Vibrato + Dxy Volume Slide
             0x0B => {
                 if let Some(vste) = Self::it_volume_slide(current.effect_parameter) {
-                    Some(vec![TrackImportEffect::Vibrato(0.0, 0.0), vste])
+                    Some(vec![
+                        TrackImportEffect::Vibrato(Q8_8::ZERO, PitchDelta::ZERO),
+                        vste,
+                    ])
                 } else {
                     Some(vec![
-                        TrackImportEffect::Vibrato(0.0, 0.0),
-                        TrackImportEffect::VolumeSlideN(0.0),
+                        TrackImportEffect::Vibrato(Q8_8::ZERO, PitchDelta::ZERO),
+                        TrackImportEffect::VolumeSlideN(Q15::ZERO),
                     ])
                 }
             }
@@ -241,18 +265,18 @@ impl ItEffect {
             // Lxy = G00 Portamento + Dxy Volume slide
             0x0C => {
                 if let Some(vste) = Self::it_volume_slide(current.effect_parameter) {
-                    Some(vec![TrackImportEffect::TonePortamento(0.0), vste])
+                    Some(vec![TrackImportEffect::TonePortamento(0), vste])
                 } else {
                     Some(vec![
-                        TrackImportEffect::TonePortamento(0.0),
-                        TrackImportEffect::VolumeSlideN(0.0),
+                        TrackImportEffect::TonePortamento(0),
+                        TrackImportEffect::VolumeSlideN(Q15::ZERO),
                     ])
                 }
             }
 
             // Set Channel Volume (Mxx)
             0x0D => {
-                let volume = current.effect_parameter.min(64) as f32 / 64.0;
+                let volume = ChannelVolume::from_byte_64(current.effect_parameter.min(64));
                 Some(vec![TrackImportEffect::ChannelVolume(volume)])
             }
 
@@ -270,16 +294,16 @@ impl ItEffect {
 
                 match (nibble_high, nibble_low) {
                     (f, 0) => Some(vec![TrackImportEffect::ChannelVolumeSlideN(
-                        f as f32 / 64.0,
+                        Q15::from_ratio(f as i32, 64),
                     )]),
                     (0, low) => Some(vec![TrackImportEffect::ChannelVolumeSlideN(
-                        -(low as f32) / 64.0,
+                        Q15::from_ratio(-(low as i32), 64),
                     )]),
                     (f, 0xF) => Some(vec![TrackImportEffect::ChannelVolumeSlide0(
-                        f as f32 / 64.0,
+                        Q15::from_ratio(f as i32, 64),
                     )]),
                     (0xF, low) => Some(vec![TrackImportEffect::ChannelVolumeSlide0(
-                        -(low as f32) / 64.0,
+                        Q15::from_ratio(-(low as i32), 64),
                     )]),
                     _ => None,
                 }
@@ -307,10 +331,20 @@ impl ItEffect {
                 let nibble_low = fx & 0x0F;
 
                 match (nibble_high, nibble_low) {
-                    (f, 0) => Some(vec![TrackImportEffect::PanningSlideN(f as f32 / 16.0)]),
-                    (0, f) => Some(vec![TrackImportEffect::PanningSlideN(-(f as f32) / 16.0)]),
-                    (f, 0xF) => Some(vec![TrackImportEffect::PanningSlide0(f as f32 / 16.0)]),
-                    (0xF, f) => Some(vec![TrackImportEffect::PanningSlide0(-(f as f32) / 16.0)]),
+                    (f, 0) => Some(vec![TrackImportEffect::PanningSlideN(Q15::from_ratio(
+                        f as i32, 16,
+                    ))]),
+                    (0, f) => Some(vec![TrackImportEffect::PanningSlideN(Q15::from_ratio(
+                        -(f as i32),
+                        16,
+                    ))]),
+                    (f, 0xF) => Some(vec![TrackImportEffect::PanningSlide0(Q15::from_ratio(
+                        f as i32, 16,
+                    ))]),
+                    (0xF, f) => Some(vec![TrackImportEffect::PanningSlide0(Q15::from_ratio(
+                        -(f as i32),
+                        16,
+                    ))]),
                     _ => None,
                 }
             }
@@ -334,8 +368,8 @@ impl ItEffect {
             // Effect Tremolo (Rxy)
             0x12 => {
                 let param = current.effect_parameter;
-                let speed = ((param & 0xF0) >> 4) as f32 / 64.0;
-                let depth = (param & 0x0F) as f32 / 16.0;
+                let speed = lfo_speed_from_nibble_64((param & 0xF0) >> 4);
+                let depth = lfo_depth_from_nibble_16(param & 0x0F);
                 Some(vec![TrackImportEffect::Tremolo(speed, depth)])
             }
 
@@ -416,7 +450,10 @@ impl ItEffect {
                             _ => None,
                         }
                     }
-                    0x8 => Some(vec![TrackImportEffect::Panning((param as f32) / 15.0)]),
+                    0x8 => Some(vec![TrackImportEffect::Panning(Panning::from_ratio(
+                        param as i32,
+                        15,
+                    ))]),
                     0x9 => Some(vec![TrackImportEffect::InstrumentSurround(param == 1)]),
                     0xA => Some(vec![TrackImportEffect::InstrumentSampleOffsetAddHigh(
                         param as usize * 65536,
@@ -434,24 +471,28 @@ impl ItEffect {
             // as Hxy — 4x/256-entry-table = x/64 per tick, not x/256.
             0x15 => {
                 let param = current.effect_parameter;
-                let speed = ((param & 0xF0) >> 4) as f32 / 64.0;
-                let depth = (param & 0x0F) as f32 / 16.0;
+                let speed = lfo_speed_from_nibble_64((param & 0xF0) >> 4);
+                let depth = vibrato_depth_from_nibble_16(param & 0x0F);
                 Some(vec![TrackImportEffect::Vibrato(speed, depth)])
             }
 
             // Effect Set panning position (Xxx)
-            // Full 8-bit range 0..=255 maps to [0.0, 1.0]; divide by
-            // 255, not 256, otherwise 0xFF (full right) renders as
-            // 0.9961 and true full-right becomes unreachable.
-            0x18 => Some(vec![TrackImportEffect::Panning(
-                (current.effect_parameter as f32) / 255.0,
-            )]),
+            // Full 8-bit range `0..=255` maps to Q1.15 panning
+            // via [`Panning::from_byte_255`].
+            0x18 => Some(vec![TrackImportEffect::Panning(Panning::from_byte_255(
+                current.effect_parameter,
+            ))]),
 
-            // Effect Panbrello (Yxy)
+            // Effect Panbrello (Yxy). Speed nibble x is `x/256`
+            // cycles/tick — slower than Hxy/Rxy by a factor of 4
+            // because IT's panbrello uses a 256-entry phase table
+            // instead of the 64-entry table used elsewhere.
+            // Depth uses [`it_panbrello_depth_from_nibble_4`]
+            // which saturates at Q15 ONE for `y ≥ 4`.
             0x19 => {
                 let param = current.effect_parameter;
-                let speed = ((param & 0xF0) >> 4) as f32 / 256.0;
-                let depth = (param & 0x0F) as f32 * 4.0 / 16.0;
+                let speed = Q8_8::from_raw(((param & 0xF0) >> 4) as i16);
+                let depth = it_panbrello_depth_from_nibble_4(param & 0x0F);
                 Some(vec![TrackImportEffect::Panbrello(speed, depth)])
             }
 
@@ -538,9 +579,10 @@ impl ItEffect {
             // Per ITTECH GV ranges 0–128 (not 0–64 like the MOD/XM/S3M
             // families). Clamping to 64 would cap every IT module at
             // half global volume.
-            0x16 => Some(GlobalEffect::Volume(
-                (current.effect_parameter.min(128) as f32) / 128.0,
-            )),
+            0x16 => Some(GlobalEffect::Volume(Volume::from_ratio(
+                current.effect_parameter.min(128) as i32,
+                128,
+            ))),
 
             // Effect Global Volume Slide (Wxy)
             // W0x Global volume slide down
@@ -560,19 +602,19 @@ impl ItEffect {
 
                 match (nibble_high, nibble_low) {
                     (f, 0) => Some(GlobalEffect::VolumeSlide {
-                        speed: f as f32 / 128.0,
+                        speed: Q15::from_ratio(f as i32, 128),
                         fine: false,
                     }),
                     (0, f) => Some(GlobalEffect::VolumeSlide {
-                        speed: -(f as f32) / 128.0,
+                        speed: Q15::from_ratio(-(f as i32), 128),
                         fine: false,
                     }),
                     (f, 0xF) => Some(GlobalEffect::VolumeSlide {
-                        speed: f as f32 / 128.0,
+                        speed: Q15::from_ratio(f as i32, 128),
                         fine: true,
                     }),
                     (0xF, f) => Some(GlobalEffect::VolumeSlide {
-                        speed: -(f as f32) / 128.0,
+                        speed: Q15::from_ratio(-(f as i32), 128),
                         fine: true,
                     }),
                     _ => None,
@@ -617,12 +659,15 @@ impl ItEffect {
         // would let every vNN clobber the channel-volume register
         // and silence the channel on empty cells.
         if slot.volume <= 64 {
-            return Some(TrackImportEffect::Volume(slot.volume as f32 / 64.0, 0));
+            return Some(TrackImportEffect::Volume(
+                Volume::from_byte_64(slot.volume),
+                0,
+            ));
         }
 
         // Set Panning (pxx)
         if (slot.volume & 0x7F) <= 64 {
-            let p = (slot.volume & 0x7F) as f32 / 64.0;
+            let p = Panning::from_byte_64(slot.volume & 0x7F);
             return Some(TrackImportEffect::Panning(p));
         }
 
@@ -643,21 +688,41 @@ impl ItEffect {
             // a 0..256 chan->volume — i.e. param/64 in the 0..1
             // normalised scale this importer uses. Same as the
             // effect-column Dxy.
-            0x0 => return Some(TrackImportEffect::VolumeSlide0(param as f32 / 64.0)), // Ax
-            0x1 => return Some(TrackImportEffect::VolumeSlide0(-(param as f32) / 64.0)), // Bx
-            0x2 => return Some(TrackImportEffect::VolumeSlideN(param as f32 / 64.0)), // Cx
-            0x3 => return Some(TrackImportEffect::VolumeSlideN(-(param as f32) / 64.0)), // Dx
+            0x0 => {
+                return Some(TrackImportEffect::VolumeSlide0(Q15::from_ratio(
+                    param as i32,
+                    64,
+                )))
+            } // Ax
+            0x1 => {
+                return Some(TrackImportEffect::VolumeSlide0(Q15::from_ratio(
+                    -(param as i32),
+                    64,
+                )))
+            } // Bx
+            0x2 => {
+                return Some(TrackImportEffect::VolumeSlideN(Q15::from_ratio(
+                    param as i32,
+                    64,
+                )))
+            } // Cx
+            0x3 => {
+                return Some(TrackImportEffect::VolumeSlideN(Q15::from_ratio(
+                    -(param as i32),
+                    64,
+                )))
+            } // Dx
 
             // vol-col porta scales by 16*param, not param/16.
             // Schism stores `mem_pitchslide = 4 * vol` then slides
             // by `mem_pitchslide * 4` per tick → 16 * vol per tick
             // in linear-period units (which is xmrs's `Portamento`
             // input).
-            0x4 => return Some(TrackImportEffect::PortamentoDown(16.0 * param as f32)), // Ex
-            0x5 => return Some(TrackImportEffect::PortamentoUp(-16.0 * param as f32)),  // Fx
+            0x4 => return Some(TrackImportEffect::PortamentoDown(16 * param as i16)), // Ex
+            0x5 => return Some(TrackImportEffect::PortamentoUp(-16 * param as i16)),  // Fx
             // Tone Portamento (g0x)
             0x6 => {
-                let param = match param {
+                let param: i16 = match param {
                     1 => 1,
                     2 => 4,
                     3 => 8,
@@ -668,17 +733,18 @@ impl ItEffect {
                     8 => 128,
                     9 => 255,
                     _ => 0,
-                } as f32;
-                let speed = match freq_type {
-                    FrequencyType::LinearFrequencies => 4.0 * param,
+                };
+                let speed: i16 = match freq_type {
+                    FrequencyType::LinearFrequencies => 4 * param,
                     FrequencyType::AmigaFrequencies => param,
                 };
                 return Some(TrackImportEffect::TonePortamento(speed));
             }
-            // Vibrato Depth (h0x)
+            // Vibrato Depth (h0x). IT scaling: y/4 semitones (4×
+            // finer than XM's y/16).
             0x7 => {
-                let depth = (param & 0x0F) as f32 * 4.0 / 16.0;
-                return Some(TrackImportEffect::Vibrato(0.0, depth));
+                let depth = it_vibrato_depth_from_nibble_4(param & 0x0F);
+                return Some(TrackImportEffect::Vibrato(Q8_8::ZERO, depth));
             }
             _ => {}
         }

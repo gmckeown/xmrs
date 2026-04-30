@@ -12,6 +12,7 @@ pub use crate::{
     compatibility_profile::CompatibilityProfile,
     effect::{GlobalEffect, MidiMacroType, NoteRetrigOperator, TrackEffect},
     envelope::{Envelope, EnvelopePoint},
+    fixed::units::{Amplification, Amp, ChannelVolume, Finetune, Panning, Period, Pitch as PitchQ, PitchDelta, SampleRate, Volume},
     instr_default::{DuplicateCheckAction, DuplicateCheckType, InstrDefault, NewNoteAction},
     instr_ekn::InstrEkn,
     instr_midi::InstrMidi,

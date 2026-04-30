@@ -1,6 +1,6 @@
 [package]
 name = "xmrs"
-version = "0.10.3"
+version = "0.11.0"
 edition = "2021"
 description = "A library to edit SoundTracker data with pleasure "
 license = "MIT"
@@ -13,14 +13,14 @@ keywords = ["xm", "mod", "s3m", "it", "soundtracker"]
 categories = ["multimedia::audio", "embedded", "no-std"]
 
 [dependencies]
-bincode = { version = "2.0", features = ["alloc", "derive", "serde"], default-features = false }
+bincode = { version = "2.0", features = ["alloc", "derive", "serde"], default-features = false, optional = true }
 clap = { version = "4.5", optional = true, features = ["cargo", "derive"] }
 num_enum = { version = "0.7", default-features = false }
 serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
+# Required by `keyboard.rs` (and by the XM / IT loaders): serde
+# supports `[T; N]` natively only for `N ≤ 32`; our `[Option<_>; 120]`
+# tables need `#[serde(with = "BigArray")]`.
 serde-big-array = "0.5"
-# Float math backends for `no_std` builds (ignored when `std` is enabled).
-num-traits = { version = "0.2.17", default-features = false, optional = true } # libm wrapper
-micromath = { version = "2.1.0", optional = true }
 
 [features]
 # `std` and `import` are on by default: the common case is a
@@ -31,21 +31,34 @@ micromath = { version = "2.1.0", optional = true }
 # etc.
 default = ["std", "import"]
 
-# Enable the standard library. When on, `f32` inherent methods are used
-# for float math and no extra math dependency is pulled in.
-std = ["bincode/std", "num_enum/std", "serde/std"]
+# Enable the standard library. The crate compiles fully `no_std`
+# without any extra math backend — every former `f32` site has
+# been folded to integer Q-format arithmetic, including the LFO
+# (`waveform.rs`), the IT importer's `c5_speed_to_finetune`
+# (binary search via `linear_frequency_to_period`), and the
+# pitch / period / frequency tables. `std` here only forwards
+# the corresponding feature flag to dependencies that have one
+# (and `bincode?/std` only fires if `bincode` was pulled in by
+# an importer feature).
+std = ["bincode?/std", "num_enum/std", "serde/std"]
 
 # `demo` gates the example binaries/tools. It is a convenience feature
 # that also turns on `std` and all importers so that
 # `--no-default-features --features demo` still builds.
 demo = ["std", "clap", "import"]
 
-# ---- Float math backends (only needed when `std` is disabled) ----
-# Pick exactly one of `libm` or `micromath` in `no_std` builds.
-libm = ["num-traits/libm"]
-micromath = ["dep:micromath"]
+# Enable `f32 ↔ Q` conversions on every fixed-point and domain
+# type in `crate::fixed`. Intended for the editor / desktop
+# side; never enabled on the embedded build. Self-contained: it
+# only uses `core`-stable `f32` operations, no math backend.
+float-helpers = []
 
 # ---- Historical-format importers ----
+# Each importer pulls in `bincode` for parsing fixed-layout
+# binary structs. The `dep:` syntax keeps `bincode` from being
+# exposed as a standalone user-facing feature (it's an
+# implementation detail).
+#
 # `import` is an umbrella for all importers. Downstreams that want a
 # smaller binary can disable it and pick only the formats they need:
 #   default-features = false, features = ["std", "import_xm"]
@@ -58,15 +71,15 @@ import = [
 ]
 # ProTracker-style Amiga MOD. Shares effect-parsing code with XM
 # (via `import::xm::mod_xm_effect`), which is pulled in as needed.
-import_mod = []
+import_mod = ["dep:bincode"]
 # Fasttracker II XM.
-import_xm = []
+import_xm  = ["dep:bincode"]
 # ScreamTracker 3 S3M.
-import_s3m = []
+import_s3m = ["dep:bincode"]
 # Impulse Tracker IT.
-import_it = []
+import_it  = ["dep:bincode"]
 # Commodore 64 SID (MOS6581).
-import_sid = []
+import_sid = ["dep:bincode"]
 
 # ---- xorshift RNG widths (rand32 is always enabled) ----
 rand8 = []

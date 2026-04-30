@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::fixed::units::{ChannelVolume, Panning, Period, Volume};
 use crate::instrument::Instrument;
 use crate::mix_plugin::MixPlugins;
 use crate::period_helper::FrequencyType;
@@ -116,7 +117,9 @@ pub struct PlaybackQuirks {
     /// `[453, 3424]` / 4). Leave `None` for the default
     /// `[1 or 0 .. 31999]` fallback. S3M sets it when masterflag
     /// bit 0x10 is on. dig.c:setmasterflags.
-    pub period_clamp: Option<(f32, f32)>,
+    /// Period clamp `(min, max)` in xmrs Amiga period units,
+    /// stored as [`Period`] (Q-typed `u16` raw).
+    pub period_clamp: Option<(Period, Period)>,
 
     /// When a pitch slide tries to make the period go below 1,
     /// allow it to reach 0 ("infinitely high note") instead of
@@ -270,15 +273,15 @@ pub enum PanResetPolicy {
 /// corresponding field is set.
 #[derive(Default, Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
 pub struct ChannelDefault {
-    /// Initial pan in `[0..1]` (left..right). `None` keeps the
-    /// channel at its centre default.
-    pub panning: Option<f32>,
+    /// Initial pan in `[0, 1]` (left..right) as Q1.15. `None`
+    /// keeps the channel at its centre default.
+    pub panning: Option<Panning>,
 
-    /// Initial channel volume in `[0..1]`. `None` keeps the
-    /// channel at full volume (1.0). Mirrors IT's `Mxx` register
+    /// Initial channel volume in `[0, 1]` as Q1.15. `None` keeps
+    /// the channel at full volume. Mirrors IT's `Mxx` register
     /// state at song start (header byte
     /// `initial_channel_volume[ch]`, 0..64 normalised here).
-    pub volume: Option<f32>,
+    pub volume: Option<ChannelVolume>,
 
     /// Channel starts muted. S3M's `channel_settings & 0x80` and
     /// IT's `initial_channel_pan & 0x80` both set this. The player
@@ -413,11 +416,17 @@ pub struct Module {
     /// effect chain — authors set it once to reserve dynamic range
     /// for resonant-filter peaks and multi-voice summing.
     ///
-    /// Non-IT formats leave this at `1.0` (identity). The player
-    /// reads it once at construction and applies it as a final
-    /// constant multiplier separate from both `global_volume` and
-    /// user-facing `amplification`.
-    pub mix_volume: f32,
+    /// Mix master amplifier, Q1.15 in `[0, 1]`. Multiplies the
+    /// final mixed audio. Was `f32` — see [`Volume`] for the
+    /// conversion convention.
+    ///
+    /// IT-specific (the IT importer reads it from the file
+    /// header). Non-IT formats leave this at [`Volume::FULL`]
+    /// (identity). The player reads it once at construction
+    /// and applies it as a final constant multiplier separate
+    /// from both `global_volume` and user-facing
+    /// `amplification`.
+    pub mix_volume: Volume,
 }
 
 /// A module's MIDI macro table. IT-specific in practice but the
@@ -463,7 +472,7 @@ impl Default for Module {
             pattern_highlight: PatternHighlight::default(),
             mix_plugins: None,
             pitch_wheel_depth: 2,
-            mix_volume: 1.0,
+            mix_volume: Volume::FULL,
         }
     }
 }

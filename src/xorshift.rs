@@ -38,11 +38,6 @@ impl XorShift8 {
         self.state
     }
 
-    /// Next f32 random number using next rand8
-    pub fn next_f32(&mut self) -> f32 {
-        let max = u8::MAX as f32;
-        self.next().unwrap() as f32 / max
-    }
 }
 
 /// Next rand8 number using an Iterator
@@ -93,11 +88,6 @@ impl XorShift16 {
         self.state
     }
 
-    /// Next f32 random number using next rand16
-    pub fn next_f32(&mut self) -> f32 {
-        let max = u16::MAX as f32;
-        self.next().unwrap() as f32 / max
-    }
 }
 
 /// Next rand16 number using an Iterator
@@ -145,10 +135,15 @@ impl XorShift32 {
         self.state
     }
 
-    /// Next f32 random number using next rand32
-    pub fn next_f32(&mut self) -> f32 {
-        let max = u32::MAX as f32;
-        self.next().unwrap() as f32 / max
+    /// Next signed Q1.15 random in `[-1, +1)`. Reinterprets
+    /// the low 16 bits of the next `u32` as a signed `i16`,
+    /// giving a uniform bipolar Q1.15 with no float math.
+    /// Used by IT humanisation (`random_volume_variation` /
+    /// `random_pan_variation`) on the channel's per-trigger
+    /// PRNG path.
+    pub fn next_q15_bipolar(&mut self) -> crate::fixed::fixed::Q15 {
+        let n = self.next().unwrap();
+        crate::fixed::fixed::Q15::from_raw(n as i16)
     }
 }
 
@@ -239,15 +234,6 @@ mod tests {
         assert_ne!(a, b);
         assert_ne!(b, c);
         assert_ne!(a, 0);
-    }
-
-    #[test]
-    fn xorshift32_next_f32_in_range() {
-        let mut rng = XorShift32::default();
-        for _ in 0..100 {
-            let v = rng.next_f32();
-            assert!(v >= 0.0 && v <= 1.0, "next_f32() = {} out of range", v);
-        }
     }
 
     #[test]
