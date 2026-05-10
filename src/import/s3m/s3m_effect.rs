@@ -375,8 +375,7 @@ impl S3mEffect {
             8 => {
                 let speed = lfo_speed_from_nibble_64((param & 0xF0) >> 4);
                 let l = (param & 0x0F) as i16;
-                let depth =
-                    PitchDelta::from_q8_8_i16(l * 16 * vib_depth_scale);
+                let depth = PitchDelta::from_q8_8_i16(l * 16 * vib_depth_scale);
                 Some(vec![TrackImportEffect::Vibrato(speed, depth)])
             }
 
@@ -524,8 +523,7 @@ impl S3mEffect {
             21 => {
                 let speed = lfo_speed_from_nibble_64((param & 0xF0) >> 4);
                 let l = (param & 0x0F) as i16;
-                let depth =
-                    PitchDelta::from_q8_8_i16(l * 4 * vib_depth_scale);
+                let depth = PitchDelta::from_q8_8_i16(l * 4 * vib_depth_scale);
                 Some(vec![TrackImportEffect::VibratoFine(speed, depth)])
             }
 

@@ -300,8 +300,7 @@ impl S3mOplInstr {
         // by the splitting convention, well inside Q1.15 range.
         let f = Frequency::from_hz(self.c2spd);
         let rn = ph.c4freq_to_relative_pitch(f);
-        i_opl.finetune =
-            crate::fixed::units::Finetune::from_q15_i32_sat((rn.1.as_q8_8_i32()) << 7);
+        i_opl.finetune = crate::fixed::units::Finetune::from_q15_i32_sat((rn.1.as_q8_8_i32()) << 7);
         i_opl.relative_pitch = rn.0;
 
         i_opl
@@ -840,8 +839,7 @@ impl S3mModule {
                 // (was `(113.25, 856.0)`). The lost 0.25 sub-period
                 // precision is well below an audible cent of pitch
                 // and matches the typed `Period` storage.
-                p.quirks.period_clamp =
-                    Some((Period::from_raw(113), Period::from_raw(856)));
+                p.quirks.period_clamp = Some((Period::from_raw(113), Period::from_raw(856)));
             }
             p
         };

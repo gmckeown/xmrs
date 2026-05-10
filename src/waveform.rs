@@ -34,29 +34,27 @@ impl Waveform {
             //   = (cos(τ · step) + 1) / 2
             // `cos = sin(· + π/2)` → quarter-cycle phase shift.
             // Halve the cosine, re-centre to `[0, 1]`.
-            Waveform::TranslatedSine => {
-                sine(phase.shifted(Phase::QUARTER)).halved() + Q15::HALF
-            }
+            Waveform::TranslatedSine => sine(phase.shifted(Phase::QUARTER)).halved() + Q15::HALF,
 
             // Half-cycle high then half-cycle low.
             Waveform::TranslatedSquare => {
-                if phase.is_first_half() { Q15::ONE } else { Q15::ZERO }
+                if phase.is_first_half() {
+                    Q15::ONE
+                } else {
+                    Q15::ZERO
+                }
             }
 
             // Sawtooth in `[0, 1]`. A half-cycle phase shift moves
             // the discontinuity from the cycle boundary to the
             // mid-point — that's the envelope LFO convention.
-            Waveform::TranslatedRampUp => {
-                phase.shifted(Phase::HALF).to_q15_unsigned()
-            }
+            Waveform::TranslatedRampUp => phase.shifted(Phase::HALF).to_q15_unsigned(),
 
             // Mirror of `TranslatedRampUp` about `Q15::HALF`:
             // `down(p) = 1 − up(p)`. (Off by 1 LSB at the
             // saturation boundary, well below the quantisation
             // floor — within the existing test tolerance.)
-            Waveform::TranslatedRampDown => {
-                Q15::ONE - Waveform::TranslatedRampUp.value_q15(phase)
-            }
+            Waveform::TranslatedRampDown => Q15::ONE - Waveform::TranslatedRampUp.value_q15(phase),
 
             // `−sin(τ · step)` — invert the LUT result. The
             // saturating `Neg` impl on `Q15` clips the single
@@ -75,7 +73,11 @@ impl Waveform {
             Waveform::RampDown => Q15::from_raw(phase.raw_as_i16().wrapping_neg()),
 
             Waveform::Square => {
-                if phase.is_first_half() { Q15::NEG_ONE } else { Q15::ONE }
+                if phase.is_first_half() {
+                    Q15::NEG_ONE
+                } else {
+                    Q15::ONE
+                }
             }
 
             Waveform::Random => Q15::ZERO,
@@ -150,7 +152,11 @@ mod tests {
         assert!(approx_eq_q15(wf.value_q15(Phase::ZERO), Q15::ONE, 4));
         assert!(approx_eq_q15(wf.value_q15(Phase::QUARTER), Q15::HALF, 4));
         assert!(approx_eq_q15(wf.value_q15(Phase::HALF), Q15::ZERO, 4));
-        assert!(approx_eq_q15(wf.value_q15(Phase::THREE_QUARTERS), Q15::HALF, 4));
+        assert!(approx_eq_q15(
+            wf.value_q15(Phase::THREE_QUARTERS),
+            Q15::HALF,
+            4
+        ));
     }
 
     #[test]

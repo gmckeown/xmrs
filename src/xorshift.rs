@@ -37,7 +37,6 @@ impl XorShift8 {
     pub fn get_seed(&self) -> u8 {
         self.state
     }
-
 }
 
 /// Next rand8 number using an Iterator
@@ -87,7 +86,6 @@ impl XorShift16 {
     pub fn get_seed(&self) -> u16 {
         self.state
     }
-
 }
 
 /// Next rand16 number using an Iterator

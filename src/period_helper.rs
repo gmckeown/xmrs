@@ -221,7 +221,11 @@ impl PeriodHelper {
         semitone: bool,
     ) -> Period {
         let raw_pitch = self.period_to_pitch(period);
-        let mut pitch = if semitone { raw_pitch.quantized() } else { raw_pitch };
+        let mut pitch = if semitone {
+            raw_pitch.quantized()
+        } else {
+            raw_pitch
+        };
 
         if self.legacy_arpeggio_clamp && arp_pitch.as_q8_8_i16() != 0 {
             // FT2's arpeggio period lookup walks the 0..95 note

@@ -49,10 +49,10 @@ const fn sine_q15_step(x: u32) -> Q15 {
     // Reduce x into [0, 256), with sign and quadrant.
     let x = x & 0xFF;
     let (q, t) = match x / 64 {
-        0 => (1, x),       // [0, π/2)
-        1 => (1, 128 - x), // [π/2, π)
-        2 => (-1, x - 128),// [π, 3π/2)
-        _ => (-1, 256 - x),// [3π/2, 2π)
+        0 => (1, x),        // [0, π/2)
+        1 => (1, 128 - x),  // [π/2, π)
+        2 => (-1, x - 128), // [π, 3π/2)
+        _ => (-1, 256 - x), // [3π/2, 2π)
     };
     // t in [0, 64], representing angle in [0, π/2].
     // Bhaskara: sin(θ) ≈ 16θ(π - θ) / (5π² - 4θ(π - θ))
@@ -312,7 +312,7 @@ pub fn linear_period_to_frequency(p: Period) -> Frequency {
     let octave = exp_768.div_euclid(768) as i8;
     let in_oct = exp_768.rem_euclid(768) as usize; // [0, 767]
     let semi = in_oct >> 6; // / 64, in [0, 11]
-    let sub = in_oct & 63;  // % 64, in [0, 63]
+    let sub = in_oct & 63; // % 64, in [0, 63]
 
     // Compose sub-octave multiplier (Q16.16, in [1, 2)).
     let mul = SEMITONE_FROM_C_Q16_16[semi].mul_q16_16(SUBSEMITONE_Q16_16[sub]);
@@ -468,8 +468,8 @@ pub fn amiga_period(note_semitone: i16, finetune_idx: u8) -> Period {
     // Decompose into integer octaves and a non-negative residue.
     let octave = p.div_euclid(96);
     let in_oct = p.rem_euclid(96) as usize; // [0, 95]
-    let semi = in_oct / 8;          // [0, 11]
-    let sub = (in_oct % 8) * 8;     // 0, 8, 16, …, 56 — index into SUBSEMITONE
+    let semi = in_oct / 8; // [0, 11]
+    let sub = (in_oct % 8) * 8; // 0, 8, 16, …, 56 — index into SUBSEMITONE
 
     // Multiplier 2^(in_oct/96) in Q16.16, in [1, 2).
     let mul = SEMITONE_FROM_C_Q16_16[semi].mul_q16_16(SUBSEMITONE_Q16_16[sub]);
@@ -523,8 +523,8 @@ pub fn amiga_period_from_pitch(pitch: crate::fixed::units::Pitch) -> Period {
     // `sub ∈ [0, 63]`.
     let octave = p / 768;
     let in_oct = (p % 768) as usize;
-    let semi = in_oct >> 6;          // / 64
-    let sub = in_oct & 0x3F;         // % 64
+    let semi = in_oct >> 6; // / 64
+    let sub = in_oct & 0x3F; // % 64
 
     // Multiplier 2^(in_oct/768) in Q16.16, in [1, 2).
     let mul = SEMITONE_FROM_C_Q16_16[semi].mul_q16_16(SUBSEMITONE_Q16_16[sub]);
@@ -915,7 +915,7 @@ mod tests {
         let mut cache = PeriodCache::new();
         let f1 = cache.lookup(Period::from_raw(4608));
         let f2 = cache.lookup(Period::from_raw(3840)); // C-5
-        // Different period → different frequency
+                                                       // Different period → different frequency
         assert_ne!(f1, f2);
         // f2 should be ≈ 2 × f1
         let r1 = f1.raw_q24_8() as u64;

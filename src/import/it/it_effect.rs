@@ -171,15 +171,11 @@ impl ItEffect {
                 let nibble_low = fx & 0x0F;
 
                 match (nibble_high, nibble_low) {
-                    (0xE, low) => Some(vec![TrackImportEffect::PortamentoExtraFineDown(
-                        low as i16,
-                    )]),
-                    (0xF, low) => Some(vec![TrackImportEffect::PortamentoFineDown(
-                        4 * low as i16,
-                    )]),
-                    (_high, _low) => {
-                        Some(vec![TrackImportEffect::PortamentoDown(4 * fx as i16)])
+                    (0xE, low) => {
+                        Some(vec![TrackImportEffect::PortamentoExtraFineDown(low as i16)])
                     }
+                    (0xF, low) => Some(vec![TrackImportEffect::PortamentoFineDown(4 * low as i16)]),
+                    (_high, _low) => Some(vec![TrackImportEffect::PortamentoDown(4 * fx as i16)]),
                 }
             }
 
@@ -196,12 +192,8 @@ impl ItEffect {
                     (0xE, low) => Some(vec![TrackImportEffect::PortamentoExtraFineUp(
                         -(low as i16),
                     )]),
-                    (0xF, low) => Some(vec![TrackImportEffect::PortamentoFineUp(
-                        -4 * low as i16,
-                    )]),
-                    (_high, _low) => {
-                        Some(vec![TrackImportEffect::PortamentoUp(-4 * fx as i16)])
-                    }
+                    (0xF, low) => Some(vec![TrackImportEffect::PortamentoFineUp(-4 * low as i16)]),
+                    (_high, _low) => Some(vec![TrackImportEffect::PortamentoUp(-4 * fx as i16)]),
                 }
             }
 

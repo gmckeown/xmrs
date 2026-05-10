@@ -412,7 +412,8 @@ impl XmInstrument {
                 id.voice.pan_envelope =
                     Self::envelope_from_slice(&xmi.panning_envelope[0..num_pan_pt])
                         .unwrap_or_default();
-                id.voice.volume_fadeout = Volume::from_ratio(xmi.volume_fadeout as i32, 4095 * 4 * 2);
+                id.voice.volume_fadeout =
+                    Volume::from_ratio(xmi.volume_fadeout as i32, 4095 * 4 * 2);
                 id.sample = sample;
 
                 // copy volume envelope data

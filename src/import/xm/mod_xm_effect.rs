@@ -119,9 +119,9 @@ impl ModXmEffect {
                 let depth = lfo_depth_from_nibble_16(param & 0x0F);
                 Some(vec![TrackImportEffect::Tremolo(speed, depth)])
             }
-            0x08 => Some(vec![TrackImportEffect::Panning(
-                Panning::from_byte_255(current.effect_parameter),
-            )]),
+            0x08 => Some(vec![TrackImportEffect::Panning(Panning::from_byte_255(
+                current.effect_parameter,
+            ))]),
             0x09 => Some(vec![TrackImportEffect::InstrumentSampleOffset(
                 current.effect_parameter as usize * 256,
             )]),

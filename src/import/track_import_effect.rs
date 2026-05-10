@@ -229,7 +229,11 @@ impl TrackImportEffect {
                 _ => {}
             }
         }
-        if any { Some(TrackEffect::VibratoDepth(s)) } else { None }
+        if any {
+            Some(TrackEffect::VibratoDepth(s))
+        } else {
+            None
+        }
     }
 
     fn sum_vibratos(effects: &[TrackImportEffect]) -> Option<TrackEffect> {
@@ -238,8 +242,7 @@ impl TrackImportEffect {
         let mut any = false;
         for effect in effects {
             match effect {
-                TrackImportEffect::Vibrato(s, d)
-                | TrackImportEffect::VibratoFine(s, d) => {
+                TrackImportEffect::Vibrato(s, d) | TrackImportEffect::VibratoFine(s, d) => {
                     speed = speed + *s;
                     depth = depth + *d;
                     any = true;
@@ -267,7 +270,11 @@ impl TrackImportEffect {
                 _ => {}
             }
         }
-        if any { Some(TrackEffect::TonePortamento(s)) } else { None }
+        if any {
+            Some(TrackEffect::TonePortamento(s))
+        } else {
+            None
+        }
     }
 
     /// Sum all *regular* (tick > 0) pitch-slide speeds on the row.
@@ -287,7 +294,10 @@ impl TrackImportEffect {
             }
         }
         if any {
-            Some(TrackEffect::Portamento { speed: s, fine: false })
+            Some(TrackEffect::Portamento {
+                speed: s,
+                fine: false,
+            })
         } else {
             None
         }
@@ -322,7 +332,10 @@ impl TrackImportEffect {
             }
         }
         if any {
-            Some(TrackEffect::Portamento { speed: s, fine: true })
+            Some(TrackEffect::Portamento {
+                speed: s,
+                fine: true,
+            })
         } else {
             None
         }

@@ -176,9 +176,7 @@ impl Sample {
                 // and out-of-range values saturate to the
                 // bounds — which is exactly the semantic we
                 // want at this audio input boundary.
-                let to_amp = |x: f32| -> Amp {
-                    Amp::from_q15_i16((x * 32768.0) as i16)
-                };
+                let to_amp = |x: f32| -> Amp { Amp::from_q15_i16((x * 32768.0) as i16) };
                 (to_amp(v[seek * 2]), to_amp(v[seek * 2 + 1]))
             }
             None => (Amp::SILENCE, Amp::SILENCE),

@@ -576,6 +576,21 @@ impl EnvValue {
         self.0
     }
 
+    /// `true` when this envelope value is exactly the Q1.15 zero,
+    /// i.e. the envelope is producing absolute silence (volume) or
+    /// hard-left (panning). Used by `Voice::is_alive()` to detect
+    /// the schism reap condition where a voice's envelope has
+    /// settled at zero past its last point — at which point the
+    /// voice's contribution is permanently silent regardless of
+    /// the fadeout register, so it can be reaped even if the
+    /// register itself is stuck at full (the IT-legal
+    /// `fadeout = 0 && NNA != Cut` combination, which would
+    /// otherwise leak ghosts indefinitely).
+    #[inline(always)]
+    pub const fn is_silent(self) -> bool {
+        self.0.raw() == 0
+    }
+
     /// Linear interpolation between two envelope values by a
     /// Q1.15 weight `t`, where `t = 0` returns `self` and
     /// `t = Q15::ONE` returns (almost) `other`. Mirrors
@@ -1165,7 +1180,11 @@ impl Period {
     /// from the sign of `goal − self`.
     #[inline]
     pub const fn slide_towards(self, goal: Self, incr: i16) -> Self {
-        let step = if incr < 0 { -(incr as i32) } else { incr as i32 };
+        let step = if incr < 0 {
+            -(incr as i32)
+        } else {
+            incr as i32
+        };
         if step == 0 {
             return goal;
         }
@@ -1689,15 +1708,13 @@ mod tests {
 
     #[test]
     fn pitch_acc_clamps_low() {
-        let acc = PitchAcc::from_pitch(Pitch::C0)
-            .add_delta(PitchDelta::from_semitones(-50));
+        let acc = PitchAcc::from_pitch(Pitch::C0).add_delta(PitchDelta::from_semitones(-50));
         assert_eq!(acc.into_pitch(), Pitch::C0);
     }
 
     #[test]
     fn pitch_acc_clamps_high() {
-        let acc = PitchAcc::from_pitch(Pitch::B9)
-            .add_delta(PitchDelta::from_semitones(50));
+        let acc = PitchAcc::from_pitch(Pitch::B9).add_delta(PitchDelta::from_semitones(50));
         assert_eq!(acc.into_pitch(), Pitch::B9);
     }
 

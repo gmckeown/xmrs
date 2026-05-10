@@ -320,7 +320,9 @@ impl Amplification {
     #[inline]
     pub fn from_f32(x: f32) -> Self {
         let scaled = x * 4096.0;
-        Amplification::from_raw_q4_12(f32_to_i32_sat(scaled, i16::MIN as i32, i16::MAX as i32) as i16)
+        Amplification::from_raw_q4_12(
+            f32_to_i32_sat(scaled, i16::MIN as i32, i16::MAX as i32) as i16
+        )
     }
 }
 
@@ -487,7 +489,12 @@ mod tests {
         for raw in [-32768, -16384, -1, 0, 1, 16384, 32767] {
             let q = Q15::from_raw(raw);
             let q2 = Q15::from_f32(q.to_f32());
-            assert!((q2.raw() - q.raw()).abs() <= 1, "raw {} drifted to {}", raw, q2.raw());
+            assert!(
+                (q2.raw() - q.raw()).abs() <= 1,
+                "raw {} drifted to {}",
+                raw,
+                q2.raw()
+            );
         }
     }
 

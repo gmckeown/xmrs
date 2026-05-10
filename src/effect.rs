@@ -334,8 +334,7 @@ impl TrackEffect {
             (TrackEffect::ChannelVolume(value1), TrackEffect::ChannelVolume(value2)) => {
                 // Two `ChannelVolume` events on one row: cumulative
                 // sum (saturating in `+`), then clamped to `[0, 1]`.
-                let sum = (*value1 + *value2)
-                    .clamp(ChannelVolume::SILENT, ChannelVolume::FULL);
+                let sum = (*value1 + *value2).clamp(ChannelVolume::SILENT, ChannelVolume::FULL);
                 Some(TrackEffect::ChannelVolume(sum))
             }
             (
@@ -572,8 +571,7 @@ impl TrackEffect {
             ) => {
                 // Two `Volume` events on one row → cumulative
                 // sum, clamped to `[0, 1]`.
-                let sum = (*value1 + *value2)
-                    .clamp(Volume::SILENT, Volume::FULL);
+                let sum = (*value1 + *value2).clamp(Volume::SILENT, Volume::FULL);
                 Some(TrackEffect::Volume {
                     value: sum,
                     tick: tick1 + tick2,
