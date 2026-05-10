@@ -232,6 +232,21 @@ pub struct PlaybackQuirks {
     /// path takes precedence. IT-only — set by `it214()` /
     /// `it215()`; off elsewhere.
     pub it_vibrato_ticks_at_row_zero: bool,
+
+    /// `Sample.volume` (IT's "GvL", Global Volume per sample) stays
+    /// a static per-sample gain applied on every mixer tick inside
+    /// the voice's `get_volume` chain. For MOD/XM/S3M, `Sample.
+    /// volume` is consumed ONCE at note-trigger time as the
+    /// channel's initial volume — subsequent V-column / tremolo
+    /// updates overwrite it and it must NOT re-scale the voice
+    /// downstream. Without this flag the player would apply
+    /// `Sample.volume` twice for non-IT formats (once at trigger,
+    /// once per tick), squaring it and pulling every reduced-
+    /// volume sample down by an extra few dB.
+    /// IT on; MOD/XM/S3M off. schism `sndmix.c` keeps GvL in the
+    /// running gain chain; ft2_replayer.c / Protracker consume
+    /// `vol` at `triggerNote` only.
+    pub sample_volume_is_static_gain: bool,
 }
 
 /// Per-format policy for the channel's pan when a note retriggers.

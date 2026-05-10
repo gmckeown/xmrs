@@ -101,6 +101,7 @@ impl CompatibilityProfile {
                 tremor_state_persists: true,
                 pan_reset_policy: PanResetPolicy::OnInstrumentChange,
                 it_vibrato_ticks_at_row_zero: true,
+                sample_volume_is_static_gain: true,
                 ..PlaybackQuirks::default()
             },
         }
