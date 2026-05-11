@@ -34,6 +34,8 @@ extern crate alloc;
 pub mod cell_note;
 /// Compatibility profile (named bundles of format + playback quirks).
 pub mod compatibility_profile;
+/// Playback-duration estimator (walks the row scheduler).
+pub mod duration;
 /// All effects
 pub mod effect;
 /// Envelope with Steroid
