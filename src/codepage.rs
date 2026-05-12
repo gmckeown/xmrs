@@ -395,10 +395,7 @@ mod tests {
         // ordinary German prose, must stay Latin1.
         let a: &[u8] = b"Stra\xdfe";
         let b: &[u8] = b"Gr\xf6\xdfe";
-        assert_eq!(
-            Codepage::detect_from_fields(&[a, b]),
-            Codepage::Latin1
-        );
+        assert_eq!(Codepage::detect_from_fields(&[a, b]), Codepage::Latin1);
 
         // 'MÜLLER' — one byte in the block range (Ü = 0xDC) with
         // ordinary ASCII context, must stay Latin1.
