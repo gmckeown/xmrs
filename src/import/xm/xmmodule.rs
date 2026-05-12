@@ -8,7 +8,9 @@ use alloc::{vec, vec::Vec};
 use super::xmheader::{XmFlagType, XmHeader};
 use super::xminstrument::XmInstrument;
 use super::xmpattern::XmPattern;
+use super::xmsample::XMSAMPLE_HEADER_SIZE;
 
+use crate::codepage::Codepage;
 use crate::compatibility_profile::CompatibilityProfile;
 use crate::fixed::units::Volume;
 use crate::import::import_memory::{ImportMemory, MemoryType};
@@ -27,13 +29,22 @@ pub struct XmModule {
 
 impl XmModule {
     pub fn load(data: &[u8]) -> Result<Self, DecodeError> {
-        let (data, header, pattern_order) = XmHeader::load(data)?;
-        let mut data = data;
+        // Keep the original slice for the post-load codepage pass —
+        // we need byte-accurate offsets back into the file to
+        // re-decode every name field under the detected codepage.
+        let original_data = data;
+
+        let (data_after_header, header, pattern_order) = XmHeader::load(data)?;
+        // Track absolute byte offset within `original_data` as we
+        // walk the variable-length records.
+        let mut cursor = original_data.len() - data_after_header.len();
+        let mut data = data_after_header;
 
         // Create patterns from xm
         let mut pattern: Vec<XmPattern> = vec![];
         for _i in 0..header.number_of_patterns {
             let (d2, xmp) = XmPattern::load(data, header.number_of_channels)?;
+            cursor += data.len() - d2.len();
             data = d2;
             pattern.push(xmp);
         }
@@ -45,20 +56,109 @@ impl XmModule {
             pattern.extend(core::iter::repeat_n(empty, empty_ones));
         }
 
+        // Track the file-relative start offset of each instrument
+        // record. Needed by the codepage pass to find the
+        // instrument name (at `+4`, 22 bytes) and each sample's
+        // name (at `instrument_header_len + i * XMSAMPLE_HEADER_SIZE
+        // + 18`, 22 bytes — the layout of `XmSampleHeader`).
+        let mut instrument_starts: Vec<usize> =
+            Vec::with_capacity(header.number_of_instruments as usize);
         let mut instrument: Vec<XmInstrument> = vec![];
         for _i in 0..header.number_of_instruments {
+            instrument_starts.push(cursor);
             // Create instruments form xm
             let (d2, xmi) = XmInstrument::load(data)?;
+            cursor += data.len() - d2.len();
             data = d2;
             instrument.push(xmi);
         }
 
-        Ok(XmModule {
+        let mut xm = XmModule {
             header,
             pattern_order,
             pattern,
             instrument,
-        })
+        };
+
+        // ---- codepage detection + re-decode ----
+        //
+        // XM was authored on Fasttracker II (DOS/CP437), and
+        // every text field on disk is an 8-bit fixed-width
+        // slot. The detector pools every name in the file —
+        // header `name` (20 bytes @ offset 17), header
+        // `tracker_name` (20 @ 38), every instrument name (22 @
+        // `instr_start + 4`), and every sample name (22 @
+        // `instr_start + instrument_header_len + sample_i * 40
+        // + 18`) — and picks the single codepage that best
+        // fits the aggregate byte distribution. The constants
+        // below come from the bincode-serialised layouts of
+        // `XmHeader`, `XmInstrumentHeader`, and `XmSampleHeader`.
+        const HEADER_NAME_OFF: usize = 17;
+        const HEADER_NAME_LEN: usize = 20;
+        const HEADER_TRACKER_NAME_OFF: usize = 38;
+        const HEADER_TRACKER_NAME_LEN: usize = 20;
+        const INSTR_NAME_OFF_IN_RECORD: usize = 4; // 4-byte length prefix
+        const INSTR_NAME_LEN: usize = 22;
+        const SAMPLE_NAME_OFF_IN_HEADER: usize = 18; // 4+4+4+1+1+1+1+1+1 = 18
+        const SAMPLE_NAME_LEN: usize = 22;
+
+        let n = original_data.len();
+        let mut text_fields: Vec<&[u8]> = Vec::new();
+        if n >= HEADER_NAME_OFF + HEADER_NAME_LEN {
+            text_fields.push(&original_data[HEADER_NAME_OFF..HEADER_NAME_OFF + HEADER_NAME_LEN]);
+        }
+        if n >= HEADER_TRACKER_NAME_OFF + HEADER_TRACKER_NAME_LEN {
+            text_fields.push(
+                &original_data
+                    [HEADER_TRACKER_NAME_OFF..HEADER_TRACKER_NAME_OFF + HEADER_TRACKER_NAME_LEN],
+            );
+        }
+        for (i, &start) in instrument_starts.iter().enumerate() {
+            let name_start = start + INSTR_NAME_OFF_IN_RECORD;
+            if name_start + INSTR_NAME_LEN <= n {
+                text_fields.push(&original_data[name_start..name_start + INSTR_NAME_LEN]);
+            }
+            let xmih_len = xm.instrument[i].instrument_header_len as usize;
+            for s_i in 0..xm.instrument[i].sample.len() {
+                let sample_header_start = start + xmih_len + s_i * XMSAMPLE_HEADER_SIZE;
+                let name_start = sample_header_start + SAMPLE_NAME_OFF_IN_HEADER;
+                if name_start + SAMPLE_NAME_LEN <= n {
+                    text_fields.push(&original_data[name_start..name_start + SAMPLE_NAME_LEN]);
+                }
+            }
+        }
+        let codepage = Codepage::detect_from_fields(&text_fields);
+
+        // Re-decode every field with the detected codepage.
+        if n >= HEADER_NAME_OFF + HEADER_NAME_LEN {
+            xm.header.name = codepage
+                .decode_name(&original_data[HEADER_NAME_OFF..HEADER_NAME_OFF + HEADER_NAME_LEN]);
+        }
+        if n >= HEADER_TRACKER_NAME_OFF + HEADER_TRACKER_NAME_LEN {
+            xm.header.tracker_name = codepage.decode_name(
+                &original_data
+                    [HEADER_TRACKER_NAME_OFF..HEADER_TRACKER_NAME_OFF + HEADER_TRACKER_NAME_LEN],
+            );
+        }
+        for (i, &start) in instrument_starts.iter().enumerate() {
+            let name_start = start + INSTR_NAME_OFF_IN_RECORD;
+            if name_start + INSTR_NAME_LEN <= n {
+                xm.instrument[i].header.name =
+                    codepage.decode_name(&original_data[name_start..name_start + INSTR_NAME_LEN]);
+            }
+            let xmih_len = xm.instrument[i].instrument_header_len as usize;
+            for s_i in 0..xm.instrument[i].sample.len() {
+                let sample_header_start = start + xmih_len + s_i * XMSAMPLE_HEADER_SIZE;
+                let name_start = sample_header_start + SAMPLE_NAME_OFF_IN_HEADER;
+                if name_start + SAMPLE_NAME_LEN <= n {
+                    let name = codepage
+                        .decode_name(&original_data[name_start..name_start + SAMPLE_NAME_LEN]);
+                    xm.instrument[i].sample[s_i].set_name(name);
+                }
+            }
+        }
+
+        Ok(xm)
     }
 
     pub fn to_module(&self) -> Module {

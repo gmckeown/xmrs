@@ -73,13 +73,61 @@ impl Default for DurationOptions {
 /// Extension trait that adds duration-estimation methods to
 /// [`Module`]. Brought into scope with
 /// `use xmrs::duration::ModuleDuration;`.
+///
+/// # Example
+///
+/// ```ignore
+/// use xmrs::prelude::*;
+/// use xmrs::duration::ModuleDuration;
+///
+/// let module = Module::load(&bytes)?;
+/// let d = module.duration(0); // first sub-song
+/// println!("{}:{:02}", d.as_secs() / 60, d.as_secs() % 60);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 pub trait ModuleDuration {
     /// Duration of one play-through of sub-song `song`, with default
     /// options. Returns [`Duration::ZERO`] for out-of-range / empty
     /// inputs.
+    ///
+    /// "One play-through" means: from the start of the order list
+    /// until the first state revisit (the song's natural loop point)
+    /// or the end of the order list, whichever comes first.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use xmrs::prelude::*;
+    /// use xmrs::duration::ModuleDuration;
+    ///
+    /// let module = Module::load(&bytes)?;
+    /// let secs = module.duration(0).as_secs_f64();
+    /// println!("{secs:.2}s");
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     fn duration(&self, song: usize) -> Duration;
 
-    /// Same as [`Self::duration`] but with explicit options.
+    /// Same as [`Self::duration`] but with explicit options. Useful
+    /// to measure several consecutive plays (set `stop_on_loop:
+    /// false`) or to tighten the runaway cap on memory-constrained
+    /// targets.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use xmrs::prelude::*;
+    /// use xmrs::duration::{ModuleDuration, DurationOptions};
+    ///
+    /// let module = Module::load(&bytes)?;
+    ///
+    /// // Total time of the song playing through to a hard cap of
+    /// // 10 000 rows, ignoring natural loop points.
+    /// let d = module.duration_with(0, DurationOptions {
+    ///     max_rows: 10_000,
+    ///     stop_on_loop: false,
+    /// });
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     fn duration_with(&self, song: usize, opts: DurationOptions) -> Duration;
 }
 
@@ -179,6 +227,7 @@ pub fn compute_duration(module: &Module, song: usize, opts: DurationOptions) -> 
         let mut do_jump: Option<usize> = None;
         let mut loop_param: Option<usize> = None;
         let mut row_repeats: usize = 1;
+        let mut song_end_requested: bool = false;
 
         for unit in row.iter() {
             for ge in unit.global_effects.iter() {
@@ -186,6 +235,14 @@ pub fn compute_duration(module: &Module, song: usize, opts: DurationOptions) -> 
                     GlobalEffect::Speed(n) => {
                         if *n > 0 {
                             new_speed = Some(*n);
+                        } else if module.profile.quirks.speed_zero_ends_song {
+                            // MOD-style `F00` = end of song. Mark
+                            // for termination after this row's
+                            // tick run completes — matches the
+                            // sequencer's "row plays, then
+                            // SongEnd before the next row would
+                            // start" behaviour.
+                            song_end_requested = true;
                         }
                     }
                     GlobalEffect::Bpm(n) => {
@@ -235,6 +292,20 @@ pub fn compute_duration(module: &Module, song: usize, opts: DurationOptions) -> 
                 }
                 total_secs += 2.5 / bpm;
             }
+        }
+
+        // -- F00 / Speed(0) under the MOD quirk: stop after this
+        //    row completes its tick run. Tie-break order is
+        //    deliberate: a `PositionJump` or `PatternBreak` on the
+        //    same row could otherwise stay queued forever — by
+        //    placing the end check here, between the timing
+        //    accumulation and the flow-control resolution, the
+        //    song-end signal wins. ProTracker behaves the same
+        //    way: the `mt_PosJumpAssert` test fires later in the
+        //    same tick chain than the `mt_fxx` speed setter that
+        //    clears the playback flag.
+        if song_end_requested {
+            break;
         }
 
         // -- flow control: jump > break > loop > advance --
@@ -544,6 +615,66 @@ mod tests {
             d_capped - cap_expected
         } else {
             cap_expected - d_capped
+        };
+        assert!(delta < Duration::from_millis(1));
+    }
+
+    #[test]
+    fn speed_zero_ends_song_when_quirk_on() {
+        // 4-row pattern with `F00` on row 2. With the MOD quirk
+        // active the simulation must terminate after row 2 plays
+        // its tick run — so total duration = 3 rows × speed × tick
+        // time (1 = row 0, 2 = row 1, 3 = row 2 with F00).
+        let mut pat: Pattern = vec![empty_row(4); 4];
+        pat[2] = row_with(4, vec![GlobalEffect::Speed(0)]);
+        let mut m = make_module(pat, vec![0]);
+        // Default profile has the quirk off — the song should
+        // simply play all 4 rows.
+        let d_no_quirk = m.duration(0);
+        let four_rows = Duration::from_secs_f64(4.0 * 6.0 * 2.5 / 125.0);
+        let delta = if d_no_quirk > four_rows {
+            d_no_quirk - four_rows
+        } else {
+            four_rows - d_no_quirk
+        };
+        assert!(
+            delta < Duration::from_millis(1),
+            "no-quirk: got {d_no_quirk:?}, expected {four_rows:?}",
+        );
+
+        // With the MOD quirk on, the song stops after row 2.
+        m.profile = CompatibilityProfile::pt();
+        let d_quirk = m.duration(0);
+        let three_rows = Duration::from_secs_f64(3.0 * 6.0 * 2.5 / 125.0);
+        let delta = if d_quirk > three_rows {
+            d_quirk - three_rows
+        } else {
+            three_rows - d_quirk
+        };
+        assert!(
+            delta < Duration::from_millis(1),
+            "with-quirk: got {d_quirk:?}, expected {three_rows:?}",
+        );
+    }
+
+    #[test]
+    fn speed_zero_with_quirk_off_keeps_old_speed() {
+        // When the quirk is OFF, `Speed(0)` is silently ignored
+        // (defensive guard at the parsing site) and the song
+        // continues at its existing speed. This regression-tests
+        // the pre-quirk behaviour so we don't change it on
+        // non-MOD formats.
+        let mut pat: Pattern = vec![empty_row(4); 3];
+        pat[1] = row_with(4, vec![GlobalEffect::Speed(0)]);
+        let m = make_module(pat, vec![0]);
+        // Default Module (no quirks): three rows at speed 6,
+        // BPM 125.
+        let d = m.duration(0);
+        let three_rows = Duration::from_secs_f64(3.0 * 6.0 * 2.5 / 125.0);
+        let delta = if d > three_rows {
+            d - three_rows
+        } else {
+            three_rows - d
         };
         assert!(delta < Duration::from_millis(1));
     }

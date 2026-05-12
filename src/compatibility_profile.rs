@@ -83,6 +83,17 @@ impl CompatibilityProfile {
                 volcol_b_advances_vibrato: true,
                 e60_leaks_to_next_pattern: true,
                 pan_reset_policy: PanResetPolicy::Always,
+                // FT2 itself sets `song.speed = 0` on `F00` and
+                // then freezes (no song-end concept). Every
+                // modern XM player (OpenMPT, MilkyTracker,
+                // XMPlay, Schism) interprets `F00` as
+                // end-of-song instead, and the scene composers
+                // who actually used `F00` did so *with that
+                // intent* — the song was finished. We follow
+                // the modern convention here over strict-FT2
+                // freeze, because the strict behaviour is
+                // useless to a listener.
+                speed_zero_ends_song: true,
                 ..PlaybackQuirks::default()
             },
         }
@@ -143,7 +154,13 @@ impl CompatibilityProfile {
     pub fn pt() -> Self {
         Self {
             format: ModuleFormat::Mod,
-            quirks: PlaybackQuirks::default(),
+            quirks: PlaybackQuirks {
+                // F00 = "stop song" is canonical MOD/ProTracker
+                // behaviour. Every other knob stays at its
+                // default value.
+                speed_zero_ends_song: true,
+                ..PlaybackQuirks::default()
+            },
         }
     }
 

@@ -1,3 +1,4 @@
+use crate::codepage::Codepage;
 use crate::fixed::units::{ChannelVolume, Panning, Volume};
 use crate::import::import_memory::{ImportMemory, MemoryType};
 use crate::import::orders_helper;
@@ -138,9 +139,21 @@ impl ItModule {
         };
 
         // === Pattern names ================================================
-
+        //
+        // Save the file-relative byte range of the raw name data
+        // (`Some((start, len))`) so the codepage pass at the
+        // bottom of `load` can re-decode every 32-byte slot
+        // under the detected codepage. Naming chunks live inline
+        // in the file at this point in the parse, so the offset
+        // is the current cursor.
+        let mut pattern_names_bytes: Option<(usize, usize)> = None;
         let pattern_names = if ItXNames::is_pnam(data) {
-            data = &data[4..];
+            let chunk_start = ser_it_module.len() - data.len();
+            data = &data[4..]; // skip "PNAM"
+                               // After the 4-byte tag, the next 4 bytes are the
+                               // length; the actual name data starts at `+8`.
+            let length = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
+            pattern_names_bytes = Some((chunk_start + 8, length));
             let (pattern_names, l) = ItXNames::load(data, 32)?;
             data = &data[l..];
             pattern_names
@@ -150,8 +163,12 @@ impl ItModule {
 
         // === Channel names ================================================
 
+        let mut channel_names_bytes: Option<(usize, usize)> = None;
         let channel_names = if ItXNames::is_cnam(data) {
-            data = &data[4..];
+            let chunk_start = ser_it_module.len() - data.len();
+            data = &data[4..]; // skip "CNAM"
+            let length = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
+            channel_names_bytes = Some((chunk_start + 8, length));
             let (channel_names, l) = ItXNames::load(data, 20)?;
             data = &data[l..];
             channel_names
@@ -169,21 +186,27 @@ impl ItModule {
         // data = &data[l..];
 
         // === Message ======================================================
-
-        let message = if header.0.is_song_message_attached() && header.0.message_length != 0 {
-            let start = header.0.message_offset as usize;
-            let end = start + header.0.message_length as usize;
-            if ser_it_module[start..].len() < header.0.message_length as usize {
-                return Err(DecodeError::ArrayLengthMismatch {
-                    required: header.0.message_length as usize,
-                    found: ser_it_module[start..].len(),
-                });
-            }
-            let src = &ser_it_module[start..end];
-            String::from_utf8_lossy(src).trim().to_string()
-        } else {
-            String::new()
-        };
+        //
+        // Store the raw byte range now; decoding is deferred to
+        // the codepage pass at the end of `load` so the message
+        // gets the same encoding as every other text field.
+        let message_bytes_range: Option<(usize, usize)> =
+            if header.0.is_song_message_attached() && header.0.message_length != 0 {
+                let start = header.0.message_offset as usize;
+                let end = start + header.0.message_length as usize;
+                if end <= ser_it_module.len() {
+                    Some((start, header.0.message_length as usize))
+                } else {
+                    return Err(DecodeError::ArrayLengthMismatch {
+                        required: header.0.message_length as usize,
+                        found: ser_it_module[start..].len(),
+                    });
+                }
+            } else {
+                None
+            };
+        // Placeholder; filled in by the codepage pass below.
+        let message = String::new();
 
         // === Instruments ==================================================
 
@@ -263,7 +286,7 @@ impl ItModule {
 
         // === All in ItModule ==============================================
 
-        let it = Self {
+        let mut it = Self {
             header: header.0,
             orders: orders.to_vec(),
             edit_history,
@@ -277,6 +300,180 @@ impl ItModule {
             patterns,
             samples,
         };
+
+        // ---- codepage detection + re-decode of every text field ----
+        //
+        // IT was authored on Impulse Tracker (DOS/CP437); Schism
+        // and OpenMPT inherit the same on-disk convention. The
+        // detector pools every text field — header `song_name`,
+        // every instrument's `dos_filename` and
+        // `instrument_name`, every sample-header's `dos_filename`
+        // and `sample_name`, every pattern name (32-byte slots
+        // from the OpenMPT `PNAM` chunk) and every channel name
+        // (20-byte slots from `CNAM`), plus the optional song
+        // message — and picks the single codepage that best
+        // fits the aggregate. Constants below come from the
+        // bincode layout of `ItHeader`,
+        // `ItInstrumentHeaderPre2` / `ItInstrumentHeaderPost2`
+        // (which agree on the offsets used here), and
+        // `ItSampleHeader`.
+        const HEADER_SONG_NAME_OFF: usize = 4;
+        const HEADER_SONG_NAME_LEN: usize = 26;
+        const INSTR_DOS_OFF: usize = 4;
+        const INSTR_DOS_LEN: usize = 12;
+        const INSTR_NAME_OFF: usize = 32;
+        const INSTR_NAME_LEN: usize = 26;
+        const SAMPLE_DOS_OFF: usize = 4;
+        const SAMPLE_DOS_LEN: usize = 12;
+        const SAMPLE_NAME_OFF: usize = 20;
+        const SAMPLE_NAME_LEN: usize = 26;
+        const PNAM_SLOT_LEN: usize = 32;
+        const CNAM_SLOT_LEN: usize = 20;
+
+        let n = ser_it_module.len();
+        let mut text_fields: Vec<&[u8]> = Vec::new();
+
+        // Header song_name
+        if HEADER_SONG_NAME_OFF + HEADER_SONG_NAME_LEN <= n {
+            text_fields.push(
+                &ser_it_module[HEADER_SONG_NAME_OFF..HEADER_SONG_NAME_OFF + HEADER_SONG_NAME_LEN],
+            );
+        }
+        // Each instrument's two name fields
+        for &offset in &instrument_offsets {
+            let off = offset as usize;
+            if off + INSTR_DOS_OFF + INSTR_DOS_LEN <= n {
+                text_fields
+                    .push(&ser_it_module[off + INSTR_DOS_OFF..off + INSTR_DOS_OFF + INSTR_DOS_LEN]);
+            }
+            if off + INSTR_NAME_OFF + INSTR_NAME_LEN <= n {
+                text_fields.push(
+                    &ser_it_module[off + INSTR_NAME_OFF..off + INSTR_NAME_OFF + INSTR_NAME_LEN],
+                );
+            }
+        }
+        // Each sample header's two name fields
+        for &offset in &sample_header_offsets {
+            let off = offset as usize;
+            if off + SAMPLE_DOS_OFF + SAMPLE_DOS_LEN <= n {
+                text_fields.push(
+                    &ser_it_module[off + SAMPLE_DOS_OFF..off + SAMPLE_DOS_OFF + SAMPLE_DOS_LEN],
+                );
+            }
+            if off + SAMPLE_NAME_OFF + SAMPLE_NAME_LEN <= n {
+                text_fields.push(
+                    &ser_it_module[off + SAMPLE_NAME_OFF..off + SAMPLE_NAME_OFF + SAMPLE_NAME_LEN],
+                );
+            }
+        }
+        // PNAM / CNAM chunk bodies (added as-is — already a
+        // concatenation of fixed-width name slots)
+        if let Some((start, len)) = pattern_names_bytes {
+            if start + len <= n {
+                text_fields.push(&ser_it_module[start..start + len]);
+            }
+        }
+        if let Some((start, len)) = channel_names_bytes {
+            if start + len <= n {
+                text_fields.push(&ser_it_module[start..start + len]);
+            }
+        }
+        // Optional song message
+        if let Some((start, len)) = message_bytes_range {
+            if start + len <= n {
+                text_fields.push(&ser_it_module[start..start + len]);
+            }
+        }
+
+        let codepage = Codepage::detect_from_fields(&text_fields);
+
+        // Overwrite each field with a codepage-aware decode.
+        if HEADER_SONG_NAME_OFF + HEADER_SONG_NAME_LEN <= n {
+            it.header.song_name = codepage.decode_name(
+                &ser_it_module[HEADER_SONG_NAME_OFF..HEADER_SONG_NAME_OFF + HEADER_SONG_NAME_LEN],
+            );
+        }
+        for (i, &offset) in instrument_offsets.iter().enumerate() {
+            let off = offset as usize;
+            if i >= it.instruments.len() {
+                break;
+            }
+            let dos_filename = if off + INSTR_DOS_OFF + INSTR_DOS_LEN <= n {
+                Some(codepage.decode_name(
+                    &ser_it_module[off + INSTR_DOS_OFF..off + INSTR_DOS_OFF + INSTR_DOS_LEN],
+                ))
+            } else {
+                None
+            };
+            let instrument_name = if off + INSTR_NAME_OFF + INSTR_NAME_LEN <= n {
+                Some(codepage.decode_name(
+                    &ser_it_module[off + INSTR_NAME_OFF..off + INSTR_NAME_OFF + INSTR_NAME_LEN],
+                ))
+            } else {
+                None
+            };
+            // Pre2 and Post2 have the same string-field shape on
+            // `.instr` — overwrite the same two fields on
+            // whichever variant we actually have.
+            match &mut it.instruments[i] {
+                ItInstrument::Pre2(p) => {
+                    if let Some(s) = dos_filename {
+                        p.instr.dos_filename = s;
+                    }
+                    if let Some(s) = instrument_name {
+                        p.instr.instrument_name = s;
+                    }
+                }
+                ItInstrument::Post2(p) => {
+                    if let Some(s) = dos_filename {
+                        p.instr.dos_filename = s;
+                    }
+                    if let Some(s) = instrument_name {
+                        p.instr.instrument_name = s;
+                    }
+                }
+            }
+        }
+        for (i, &offset) in sample_header_offsets.iter().enumerate() {
+            let off = offset as usize;
+            if i >= it.samples_header.len() {
+                break;
+            }
+            if off + SAMPLE_DOS_OFF + SAMPLE_DOS_LEN <= n {
+                it.samples_header[i].dos_filename = codepage.decode_name(
+                    &ser_it_module[off + SAMPLE_DOS_OFF..off + SAMPLE_DOS_OFF + SAMPLE_DOS_LEN],
+                );
+            }
+            if off + SAMPLE_NAME_OFF + SAMPLE_NAME_LEN <= n {
+                it.samples_header[i].sample_name = codepage.decode_name(
+                    &ser_it_module[off + SAMPLE_NAME_OFF..off + SAMPLE_NAME_OFF + SAMPLE_NAME_LEN],
+                );
+            }
+        }
+        if let Some((start, len)) = pattern_names_bytes {
+            if start + len <= n {
+                it.pattern_names = ser_it_module[start..start + len]
+                    .chunks(PNAM_SLOT_LEN)
+                    .map(|chunk| codepage.decode_name(chunk))
+                    .collect();
+            }
+        }
+        if let Some((start, len)) = channel_names_bytes {
+            if start + len <= n {
+                it.channel_names = ser_it_module[start..start + len]
+                    .chunks(CNAM_SLOT_LEN)
+                    .map(|chunk| codepage.decode_name(chunk))
+                    .collect();
+            }
+        }
+        if let Some((start, len)) = message_bytes_range {
+            if start + len <= n {
+                it.message = codepage
+                    .decode(&ser_it_module[start..start + len])
+                    .trim()
+                    .into();
+            }
+        }
 
         Ok(it)
     }

@@ -2,6 +2,7 @@ use super::amiga_sample::AmigaSample;
 use super::patternslot::PatternSlot;
 use bincode::error::DecodeError;
 
+use crate::codepage::Codepage;
 use crate::fixed::units::Volume;
 use crate::import::import_memory::ImportMemory;
 use crate::import::import_memory::MemoryType;
@@ -61,12 +62,34 @@ fn tag_bytes_to_num_tracks(tag: &[u8]) -> Option<u8> {
     tag_str_to_num_tracks(s)
 }
 
-/// True when every byte is either NUL or in the printable-ASCII
-/// range. Used to reject random binary as a candidate title or
-/// sample name; a uniform-random 20-byte slice has a ~4e-9
-/// chance of passing.
+/// True when every byte is plausibly part of a fixed-width name
+/// field (title or sample name).
+///
+/// MOD files in the wild carry names in any of several 8-bit
+/// encodings — plain ASCII most often, but scene composers
+/// routinely embed **CP437 box-drawing and block glyphs**
+/// (`0xB0..=0xDF`) for ASCII-art logos in the sample-name area,
+/// and European authors use **Latin-1 / ISO-8859-* accented
+/// letters** (`0x80..=0xFF`). The original "NUL or printable
+/// ASCII" rule rejected all of those, so legitimate files like
+/// GURU.MOD (Scorpik / Surprise! Productions) were misidentified
+/// as non-MOD.
+///
+/// Since the file has no encoding declaration, we can't tell
+/// CP437 from Latin-1 from MacRoman — so we accept every high
+/// byte and reject only what's certainly not text:
+///
+/// * **C0 control bytes** `0x01..=0x1F` (NUL is allowed as
+///   padding),
+/// * **DEL** `0x7F`.
+///
+/// Per-byte pass rate against a uniform-random blob is
+/// `224/256 ≈ 87.5 %`; over the 31×22 = 682 bytes of sample
+/// names in a 31-sample MOD that's `~10⁻⁴⁰`, still vastly
+/// overshadowed (and complemented) by the `volume ≤ 64` and
+/// `finetune ≤ 15` range checks that follow.
 fn is_clean_text(bytes: &[u8]) -> bool {
-    bytes.iter().all(|&b| b == 0 || (0x20..=0x7E).contains(&b))
+    bytes.iter().all(|&b| !matches!(b, 0x01..=0x1F | 0x7F))
 }
 
 /// Which MOD layout the file matches.
@@ -223,14 +246,37 @@ impl AmigaModule {
             ..Default::default()
         };
 
-        amiga.title = String::from_utf8_lossy(&ser_amiga_module[0..22]).to_string();
-        amiga.title = amiga
-            .title
-            .split('\0')
-            .next()
-            .unwrap_or("")
-            .trim()
-            .to_string();
+        // ---- codepage detection ----------------------------
+        //
+        // MOD has no encoding declaration; the same byte (`0xDF`)
+        // can be the CP437 block glyph `▀` or the Latin-1 letter
+        // `ß` depending on which tracker authored the file. We
+        // pool every text field on the file — the 20-byte title
+        // plus all 15 or 31 22-byte sample names — and run the
+        // detector once over the whole pool. Pooling gives a far
+        // more reliable verdict than per-field detection because
+        // a single 22-byte slot rarely carries enough signal to
+        // commit on its own. The format tag at `0x438` is always
+        // pure ASCII (`M.K.`, `FLT8`, `OCTA`, …) so it
+        // contributes no signal and we leave it out of the pool.
+        let num_samples = match variant {
+            AmigaVariant::Fifteen => 15,
+            AmigaVariant::ThirtyOne { .. } => 31,
+        };
+        let title_bytes = &ser_amiga_module[0..20];
+        let mut text_fields: Vec<&[u8]> = Vec::with_capacity(1 + num_samples);
+        text_fields.push(title_bytes);
+        for i in 0..num_samples {
+            let off = 0x14 + i * 30;
+            text_fields.push(&ser_amiga_module[off..off + 22]);
+        }
+        let codepage = Codepage::detect_from_fields(&text_fields);
+
+        // Decode title with the detected codepage. (Note: the
+        // previous implementation read 22 bytes here, which
+        // included the first 2 bytes of the next field — the
+        // first sample's name. Corrected to the spec's 20.)
+        amiga.title = codepage.decode_name(title_bytes);
 
         // Tag only exists in the 31-sample layout. For the 15-sample
         // layout offset 0x438 is inside the first pattern's data, so
@@ -238,20 +284,29 @@ impl AmigaModule {
         // `tag_str_to_num_tracks` if we ever fed it back through the
         // existing match arms. Leave the tag empty so
         // `get_number_of_samples` returns 15 by the `None` arm.
+        // The tag bytes are always pure ASCII, so the codepage
+        // choice doesn't matter — we still route through the
+        // detected codepage for consistency.
         amiga.tag = match variant {
             AmigaVariant::ThirtyOne { .. } => {
-                String::from_utf8_lossy(&ser_amiga_module[0x438..0x438 + 4]).to_string()
+                codepage.decode_name(&ser_amiga_module[0x438..0x438 + 4])
             }
             AmigaVariant::Fifteen => String::new(),
         };
 
         let mut data = &ser_amiga_module[0x14..];
 
-        // samples struct
-        for _i in 0..amiga.get_number_of_samples() {
+        // samples struct. AmigaSample::load runs the bincode helper
+        // which fills `sample.name` via the legacy lossy decode; we
+        // overwrite it immediately afterwards with a codepage-aware
+        // decode of the same byte range so CP437 art and Latin-1
+        // accents both survive intact.
+        for i in 0..num_samples {
             let (d2, sample) = AmigaSample::load(data)?;
             data = d2;
             amiga.samples.push(sample);
+            let off = 0x14 + i * 30;
+            amiga.samples[i].name = codepage.decode_name(&ser_amiga_module[off..off + 22]);
         }
 
         amiga.song_length = data[0];
@@ -376,5 +431,86 @@ impl AmigaModule {
         }
 
         module
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clean_text_accepts_plain_ascii() {
+        assert!(is_clean_text(b"hello world"));
+        assert!(is_clean_text(b"=======[AMiGA]======="));
+        assert!(is_clean_text(b"Composed and performe"));
+    }
+
+    #[test]
+    fn clean_text_accepts_nul_padding() {
+        // 22-byte slot half-filled, rest NUL — the common case.
+        let name = b"hello\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
+        assert_eq!(name.len(), 22);
+        assert!(is_clean_text(name));
+        // Pure NUL is fine too (unused slot).
+        assert!(is_clean_text(&[0u8; 22]));
+    }
+
+    #[test]
+    fn clean_text_accepts_cp437_box_art() {
+        // GURU.MOD sample #0: 'guru' drawn in CP437 block glyphs
+        // (0xDC ▄, 0xDB █, 0xDF ▀).
+        let name: &[u8] = &[
+            0xdc, 0xdb, 0xdb, 0xdb, 0xdf, 0xdb, 0xdb, 0xdc, 0x20, 0xdc, 0xdb, 0xdb, 0xdc, 0x20,
+            0xdc, 0xdb, 0xdb, 0xdb, 0xdf, 0xdb, 0xdb, 0x00,
+        ];
+        assert_eq!(name.len(), 22);
+        assert!(is_clean_text(name));
+        // Long horizontal CP437 rule, 0xC4 ─.
+        let rule = [0xc4u8; 22];
+        assert!(is_clean_text(&rule));
+    }
+
+    #[test]
+    fn clean_text_accepts_latin1_accents() {
+        // "Café au lait" in Latin-1: é = 0xE9.
+        let name: &[u8] = b"Caf\xe9 au lait\0\0\0\0\0\0\0\0\0\0";
+        assert_eq!(name.len(), 22);
+        assert!(is_clean_text(name));
+        // Mixed CP437 / accented bytes.
+        let name: &[u8] = b"\xc4\xc4 Fran\xe7ois \xc4\xc4\0\0\0\0\0\0\0\0";
+        assert_eq!(name.len(), 22);
+        assert!(is_clean_text(name));
+    }
+
+    #[test]
+    fn clean_text_rejects_c0_controls() {
+        // Tab, LF, CR, escape, etc. — never appear in name fields,
+        // common in random binary.
+        assert!(!is_clean_text(b"hello\tworld"));
+        assert!(!is_clean_text(b"line\nbreak"));
+        assert!(!is_clean_text(b"line\rbreak"));
+        assert!(!is_clean_text(&[0x1b, b'a', b'b']));
+        assert!(!is_clean_text(&[0x01]));
+        assert!(!is_clean_text(&[0x1f]));
+    }
+
+    #[test]
+    fn clean_text_rejects_del() {
+        assert!(!is_clean_text(b"hello\x7fworld"));
+    }
+
+    #[test]
+    fn clean_text_accepts_full_byte_range_minus_controls() {
+        // Every byte from 0x20 upward (printable ASCII + every
+        // high byte) must pass; the only rejections are C0 and
+        // DEL. Exhaustive single-byte check.
+        for b in 0u8..=255 {
+            let expected = !matches!(b, 0x01..=0x1F | 0x7F);
+            assert_eq!(
+                is_clean_text(&[b]),
+                expected,
+                "byte 0x{b:02x} should be {}",
+                if expected { "accepted" } else { "rejected" }
+            );
+        }
     }
 }

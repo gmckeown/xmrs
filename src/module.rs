@@ -247,6 +247,34 @@ pub struct PlaybackQuirks {
     /// running gain chain; ft2_replayer.c / Protracker consume
     /// `vol` at `triggerNote` only.
     pub sample_volume_is_static_gain: bool,
+
+    /// `Fxx` with `xx == 0` is the historical ProTracker / MOD
+    /// "stop song" marker — the engine halts playback when it
+    /// hits this row. XM reuses the same `Fxx` encoding and
+    /// although strict FT2 actually freezes on `F00` (it sets
+    /// `song.speed = 0` and the main loop stops advancing),
+    /// every modern XM player (OpenMPT, MilkyTracker, XMPlay,
+    /// Schism) treats it as end-of-song — matching the
+    /// composer's intent when the marker is placed at the end
+    /// of the order table. S3M and IT route speed and BPM
+    /// through *separate* effects (`Axx` / `Txx`), and
+    /// `Axx` with `xx == 0` is documented as "ignored" in both
+    /// ScreamTracker 3 and Impulse Tracker — there's no
+    /// end-of-song convention to honour there.
+    ///
+    /// When this quirk is ON, a `GlobalEffect::Speed(0)` on a
+    /// row signals end-of-song to the player (the row plays
+    /// through its natural tick run, then `SongEnd` fires
+    /// before the next row would start) and to the
+    /// [`crate::duration`] estimator (the simulator breaks out
+    /// of its order-walk loop at the same point).
+    ///
+    /// MOD on (`pt`), XM on (`ft2`), S3M off (`st3`), IT off
+    /// (`it214` / `it215`), modern off (`modern`). The MOD-
+    /// format reference is ProTracker's `mt_fxx` (set_speed) —
+    /// when `xx == 0`, PT's playback flag is cleared and the
+    /// song is considered finished.
+    pub speed_zero_ends_song: bool,
 }
 
 /// Per-format policy for the channel's pan when a note retriggers.

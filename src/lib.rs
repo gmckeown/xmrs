@@ -32,6 +32,9 @@ extern crate alloc;
 
 /// A typical Note
 pub mod cell_note;
+/// Detect the legacy 8-bit codepage of a name field and decode it
+/// to UTF-8 (CP437 vs Latin-1 vs ASCII).
+pub mod codepage;
 /// Compatibility profile (named bundles of format + playback quirks).
 pub mod compatibility_profile;
 /// Playback-duration estimator (walks the row scheduler).

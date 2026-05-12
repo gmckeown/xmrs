@@ -3,6 +3,7 @@ use bincode;
 use bincode::error::DecodeError;
 use serde::Deserialize;
 
+use crate::codepage::Codepage;
 use crate::fixed::units::{ChannelVolume, Finetune, Frequency, Panning, Period, Volume};
 use crate::import::import_memory::ImportMemory;
 use crate::import::import_memory::MemoryType;
@@ -468,7 +469,7 @@ impl S3mModule {
         // so empty slots (parapointer == 0) MUST be kept as placeholders
         // to preserve the mapping.
 
-        for offset in sample_offsets {
+        for &offset in &sample_offsets {
             if offset == 0 {
                 s3m.instruments.push(S3mMetaInstrument::empty());
                 continue;
@@ -502,37 +503,137 @@ impl S3mModule {
             s3m.patterns.push(pattern);
         }
 
-        // Optional song message via the `ptr_special` parapointer.
-        // Triggered by flag bit 0x80 in the masterflags. The format
-        // is poorly standardised — most files that use it write
-        // null-terminated CR-separated ASCII at `ptr_special * 16`
-        // — so the extractor is best-effort: trim at the first NUL,
-        // require the result to be mostly printable, and bail
-        // silently otherwise. Failure here never aborts the load,
-        // because most S3M files don't have a usable message at
-        // all and we don't want to reject them for that.
-        if s3m.header.flags & 0x80 != 0 && s3m.header.ptr_special != 0 {
-            s3m.message = Self::extract_song_message(ser_s3m_module, s3m.header.ptr_special)
-                .unwrap_or_default();
+        // === codepage detection + re-decode of every text field
+        //
+        // S3M has no encoding declaration. Although ScreamTracker
+        // 3 was a DOS-only tool and authors used CP437 in
+        // practice — including for ASCII-art sample names — the
+        // format is also written today by cross-platform editors
+        // (OpenMPT, Schism) running on systems that default to
+        // UTF-8 / Latin-1. The detector reads the byte
+        // distribution and decides per-file, so all paths are
+        // covered without hard-coding CP437.
+        //
+        // The byte offsets used below match the bincode layout
+        // of `S3mHeader`, `S3mPcmInstr`, and `S3mOplInstr`. In
+        // every PCM/OPL instrument record the title is 28 bytes
+        // at offset `+48` past the parapointer (`13` for the
+        // record's discriminator + filename + `35` of fixed
+        // fields before the title), filename is 12 bytes at
+        // offset `+1`.
+        const HEADER_TITLE_LEN: usize = 28;
+        const FILENAME_OFFSET: usize = 1;
+        const FILENAME_LEN: usize = 12;
+        const INSTR_TITLE_OFFSET: usize = 48;
+        const INSTR_TITLE_LEN: usize = 28;
+
+        // Raw bytes of the optional song message — extracted now
+        // so they can participate in codepage detection along
+        // with every other text field. `None` when there's no
+        // valid message; we still pool nothing in that case.
+        let message_bytes: Option<Vec<u8>> =
+            if s3m.header.flags & 0x80 != 0 && s3m.header.ptr_special != 0 {
+                Self::extract_song_message_bytes(ser_s3m_module, s3m.header.ptr_special)
+            } else {
+                None
+            };
+
+        // Pool every text field. References borrow from
+        // `ser_s3m_module` / `message_bytes` and live only until
+        // the codepage verdict is reached.
+        //
+        // Filename bytes are always part of the instrument
+        // record regardless of discriminator. Title bytes are
+        // only meaningful when the discriminator declares a PCM
+        // (`0` placeholder / `1`) or AdLib (`2..=7`) instrument;
+        // anything past that, the existing loader returns a
+        // default-empty instrument and the bytes at
+        // `offset + 48` are not a title — including them would
+        // pollute the codepage histogram with random binary.
+        let mut text_fields: Vec<&[u8]> = Vec::new();
+        text_fields.push(&ser_s3m_module[0..HEADER_TITLE_LEN]);
+        for (i, &offset) in sample_offsets.iter().enumerate() {
+            if offset == 0 {
+                continue;
+            }
+            let off = offset as usize;
+            if off + FILENAME_OFFSET + FILENAME_LEN <= ser_s3m_module.len() {
+                text_fields.push(
+                    &ser_s3m_module[off + FILENAME_OFFSET..off + FILENAME_OFFSET + FILENAME_LEN],
+                );
+            }
+            let disc = s3m.instruments[i].discriminator;
+            if disc <= 7 && off + INSTR_TITLE_OFFSET + INSTR_TITLE_LEN <= ser_s3m_module.len() {
+                text_fields.push(
+                    &ser_s3m_module
+                        [off + INSTR_TITLE_OFFSET..off + INSTR_TITLE_OFFSET + INSTR_TITLE_LEN],
+                );
+            }
+        }
+        if let Some(ref msg) = message_bytes {
+            text_fields.push(msg);
+        }
+        let codepage = Codepage::detect_from_fields(&text_fields);
+
+        // Overwrite every text field with a codepage-aware
+        // decode of the same byte range. Same discriminator gate
+        // as above for the title field.
+        s3m.header.title = codepage.decode_name(&ser_s3m_module[0..HEADER_TITLE_LEN]);
+        for (i, &offset) in sample_offsets.iter().enumerate() {
+            if offset == 0 {
+                continue;
+            }
+            let off = offset as usize;
+            if off + FILENAME_OFFSET + FILENAME_LEN <= ser_s3m_module.len() {
+                s3m.instruments[i].filename = codepage.decode_name(
+                    &ser_s3m_module[off + FILENAME_OFFSET..off + FILENAME_OFFSET + FILENAME_LEN],
+                );
+            }
+            let disc = s3m.instruments[i].discriminator;
+            if disc <= 7 && off + INSTR_TITLE_OFFSET + INSTR_TITLE_LEN <= ser_s3m_module.len() {
+                let title = codepage.decode_name(
+                    &ser_s3m_module
+                        [off + INSTR_TITLE_OFFSET..off + INSTR_TITLE_OFFSET + INSTR_TITLE_LEN],
+                );
+                match &mut s3m.instruments[i].value {
+                    S3mInstrument::PcmInstrument(p) => p.title = title,
+                    S3mInstrument::OplInstrument(o) => o.title = title,
+                }
+            }
+        }
+        if let Some(msg_bytes) = message_bytes {
+            // Decode the cleaned message bytes (CR already
+            // normalised to LF by `extract_song_message_bytes`)
+            // through the detected codepage and trim trailing
+            // whitespace.
+            s3m.message = codepage.decode(&msg_bytes).trim().into();
         }
 
         Ok(s3m)
     }
 
-    /// Read up to 1024 bytes of null-terminated text at the
-    /// parapointer offset. Returns `None` when the data doesn't
-    /// look like text (less than ~75% printable bytes), so we
-    /// silently fall back to "no message" instead of polluting
+    /// Read up to 1024 bytes of NUL-terminated text at the
+    /// parapointer offset, returning the raw bytes (CR
+    /// normalised to LF) without committing to any encoding.
+    /// Encoding is selected later by the file-wide codepage
+    /// detector.
+    ///
+    /// Returns `None` when the data doesn't look like text
+    /// (less than ~75 % "plausibly-text" bytes), so we silently
+    /// fall back to "no message" instead of polluting
     /// `Module.comment` with binary noise from a tracker that
     /// repurposed `ptr_special` for something else.
-    fn extract_song_message(data: &[u8], ptr_special: u16) -> Option<String> {
+    ///
+    /// The "plausibly-text" gate now accepts every byte
+    /// `≥ 0x20` plus CR / LF / TAB. The previous strict
+    /// `0x20..=0x7E` rule rejected legitimate CP437/Latin-1
+    /// messages outright.
+    fn extract_song_message_bytes(data: &[u8], ptr_special: u16) -> Option<Vec<u8>> {
         let offset = (ptr_special as usize).checked_mul(16)?;
         if offset >= data.len() {
             return None;
         }
         let raw = &data[offset..];
-        // Cap the scan to avoid running over the file when no NUL
-        // appears (some files store fixed-width unterminated text).
         let scan_len = raw.len().min(1024);
         let scanned = &raw[..scan_len];
         let end = scanned.iter().position(|&b| b == 0).unwrap_or(scan_len);
@@ -540,26 +641,25 @@ impl S3mModule {
         if text_bytes.is_empty() {
             return None;
         }
-        // Sanity gate: at least 75% of bytes must be either
-        // printable ASCII, common whitespace, or the CR/LF that
-        // S3M uses as line separator. Pure binary fails this and
-        // is rejected outright.
-        let printable = text_bytes
+        // Sanity gate: at least 75 % of bytes must be plausibly
+        // text — ASCII printable / high-bit / CR / LF / TAB.
+        // Pure binary fails this and is rejected outright.
+        let plausible = text_bytes
             .iter()
-            .filter(|&&b| b == b'\r' || b == b'\n' || b == b'\t' || (0x20..=0x7E).contains(&b))
+            .filter(|&&b| b == b'\r' || b == b'\n' || b == b'\t' || b >= 0x20)
             .count();
-        if printable * 4 < text_bytes.len() * 3 {
+        if plausible * 4 < text_bytes.len() * 3 {
             return None;
         }
         // Normalise: CR → LF (S3M's native line separator is CR;
-        // editors / terminals expect LF). `from_utf8_lossy`
-        // substitutes U+FFFD for any stray non-ASCII byte that
-        // slipped past the gate above.
-        let normalised: Vec<u8> = text_bytes
-            .iter()
-            .map(|&b| if b == b'\r' { b'\n' } else { b })
-            .collect();
-        Some(String::from_utf8_lossy(&normalised).trim().to_string())
+        // editors / terminals expect LF). The actual
+        // byte → char decoding is deferred to the codepage pass.
+        Some(
+            text_bytes
+                .iter()
+                .map(|&b| if b == b'\r' { b'\n' } else { b })
+                .collect(),
+        )
     }
 
     // load one pattern row

@@ -53,6 +53,14 @@ impl XmSample {
         Ok((&data[XMSAMPLE_HEADER_SIZE..], xms))
     }
 
+    /// Replace the sample name (used by the codepage post-load
+    /// pass in `XmModule::load`; bincode produces the field as
+    /// a `from_utf8_lossy` string, which we re-decode under the
+    /// file-wide detected codepage).
+    pub fn set_name(&mut self, name: String) {
+        self.header.name = name;
+    }
+
     pub fn add_sample<'a>(&mut self, data: &'a [u8]) -> Result<&'a [u8], DecodeError> {
         let data_len: usize = self.header.length as usize;
         if data.len() < data_len {
