@@ -6,8 +6,8 @@ use crate::waveform::Waveform;
 
 /// Instrument auto-vibrato.
 ///
-/// All three numeric fields used to be `f32`. They moved to
-/// fixed-point in Phase 2 of the no-FPU port:
+/// Numeric fields are stored in fixed-point so the engine runs
+/// without an FPU:
 ///
 /// * [`speed`](Self::speed) — fractional cycles per tick. The
 ///   XM range, after `byte / 252` normalisation, is `[0, ~1.012]`.

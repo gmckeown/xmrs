@@ -1,9 +1,9 @@
 use crate::{instr_robsid::RobEffects, instr_sid::SidVoice, prelude::*};
 use alloc::{vec, vec::Vec};
 
-use super::pattern_helper::PatternHelper;
 use super::sid_module::SidModule;
 use super::sound_fx::SoundFx;
+use super::voices::Voices;
 
 #[derive(Clone, Debug)]
 pub struct OneSid {
@@ -224,7 +224,7 @@ impl OneSid {
 
         SidModule {
             sid: self.clone(),
-            pattern_helper: PatternHelper::new(self.version, songs, channels, tracks),
+            voices: Voices::new(self.version, songs, channels, tracks),
             instruments,
             soundfx: sfxs,
         }

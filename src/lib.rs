@@ -11,14 +11,17 @@
 //!       |              |                +--->Keyboard (sample_for_pitch, note_for_pitch)
 //!       |              |                +--->InstrMidi
 //!       |              |                +--->Sample (Loop, Sustain Loop)
-//!       |              +--->InstrEkn (Euclidian Rythm Instrument)
+//!       |              +--->InstrEkn (Euclidean Rhythm Instrument, wraps another Instrument)
 //!       |              +--->InstrMidi
 //!       |              +--->InstrOpl (Yamaha OPL)
 //!       |              +--->InstrSid (MOS6581 SID Voices)
 //!       |              +-+->InstrRobSid+--->InstrSid
-//!       +--->Pattern--->Row--->TrackUnit+--->CellNote (Empty, Play(Pitch), KeyOff, NoteCut, NoteFade)
-//!                                       +--->TrackEffect
-//!                                       +--->GlobalEffect
+//!       +--->Track+--->TrackUnit+--->CellNote (Empty, Play(Pitch), KeyOff, NoteCut, NoteFade)
+//!       |          +--->TrackEffect
+//!       |          +--->GlobalEffect
+//!       +--->Clip (placement of a Track on the timeline)
+//!       +--->AutomationLane (continuous parameter curves)
+//!       +--->TimelineMap (linearised playback order)
 //! ```
 //!
 //! You can load historical IT, S3M, SID, MOD, XM files using `import` (see `README.md`)
@@ -51,7 +54,7 @@ pub mod envelope;
 pub mod fixed;
 /// Instrument handling samples
 pub mod instr_default;
-/// Euclidian Rythm Instrument
+/// Euclidean Rhythm Instrument
 pub mod instr_ekn;
 /// Midi Instrument
 pub mod instr_midi;
@@ -74,6 +77,11 @@ pub mod module;
 /// Period Helper
 pub mod period_helper;
 
+/// DAW layer: tracks, clips, automation lanes, timeline cache,
+/// build pipeline, and Euclidean detection.
+pub mod daw;
+/// Edit command API (atomic, undoable mutations of `Module`)
+pub mod edit;
 pub mod pitch;
 /// Sample with Steroid
 pub mod sample;
@@ -131,11 +139,48 @@ mod tests {
     fn load_note_xm() {
         let data = include_bytes!("../examples/note.xm");
         let module = crate::module::Module::load_xm(data).expect("Failed to load note.xm");
-        assert!(!module.pattern.is_empty(), "Module should have patterns");
         assert!(
             !module.instrument.is_empty(),
             "Module should have instruments"
         );
+        assert!(
+            !module.timeline_map.entries.is_empty(),
+            "timeline_map should be populated"
+        );
+        assert!(!module.tracks.is_empty(), "tracks should be populated");
+        module
+            .verify_layers_consistent()
+            .expect("DAW layer should be consistent after import");
+    }
+
+    #[cfg(feature = "import_sid")]
+    #[test]
+    fn load_sid_commando_has_consistent_layer() {
+        let sid = crate::import::sid::sid_module::SidModule::get_sid_commando();
+        let modules = sid.to_modules(false);
+        assert!(
+            !modules.is_empty(),
+            "SID should produce at least one Module"
+        );
+        for (i, m) in modules.iter().enumerate() {
+            assert!(
+                !m.tracks.is_empty(),
+                "SID module {} should have tracks after build_timeline_layer",
+                i
+            );
+            m.verify_layers_consistent()
+                .unwrap_or_else(|e| panic!("SID module {} inconsistent: {:?}", i, e));
+        }
+    }
+
+    #[cfg(feature = "import_xm")]
+    #[test]
+    fn load_empty_xm_has_consistent_layer() {
+        let data = include_bytes!("../examples/empty.xm");
+        let module = crate::module::Module::load_xm(data).expect("load");
+        module
+            .verify_layers_consistent()
+            .expect("DAW layer should be consistent on empty.xm");
     }
 
     #[cfg(feature = "import_xm")]

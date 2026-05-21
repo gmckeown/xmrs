@@ -618,12 +618,8 @@ impl ItModule {
             } else {
                 FrequencyType::AmigaFrequencies
             },
-            restart_position: 0,
             default_tempo: self.header.initial_speed as usize,
             default_bpm: self.header.initial_bpm as usize,
-            pattern_order: orders_helper::parse_orders(&self.orders),
-            pattern: vec![],
-            pattern_names: self.pattern_names.clone(),
             channel_names: self.channel_names.clone(),
             // Per-channel pan / volume / mute / surround defaults
             // built from the IT header. Replaces the previous
@@ -672,6 +668,11 @@ impl ItModule {
             // multiplier by the player, separate from the Vxx-
             // animated global volume.
             mix_volume: Volume::from_ratio(self.header.mix_volume.min(128) as i32, 128),
+            // DAW layer is filled below by `build_timeline_layer`.
+            tracks: vec![],
+            clips: crate::daw::sorted_clips::SortedClips::new(),
+            automation: vec![],
+            timeline_map: crate::daw::timeline::TimelineMap::default(),
         };
 
         let mut im = ImportMemory::default();
@@ -684,10 +685,11 @@ impl ItModule {
         // unpack, so they pass through the normal IT effect parser.
         let mut patterns_for_unpack = self.patterns.clone();
         self.inject_header_defaults(&mut patterns_for_unpack);
-        module.pattern = im.unpack_patterns(
+        let pattern_order = orders_helper::parse_orders(&self.orders);
+        let pattern = im.unpack_patterns(
             module.frequency_type,
             MemoryType::It,
-            &module.pattern_order,
+            &pattern_order,
             &patterns_for_unpack,
         );
 
@@ -749,6 +751,7 @@ impl ItModule {
                 module.instrument.push(instrument);
             }
         }
+        crate::daw::build_timeline::build_timeline_layer(&mut module, &pattern_order, &pattern);
         module
     }
 }

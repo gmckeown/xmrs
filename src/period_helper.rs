@@ -3,33 +3,38 @@
 //! Tracker note pitch is described in two equivalent but
 //! distinct systems:
 //!
-//! - **Linear** ([`FrequencyType::LinearFrequencies`]): a
-//!   logarithmic note → period mapping pivoted on a chosen
+//! - **Linear**
+//!   ([`FrequencyType::LinearFrequencies`](crate::period_helper::FrequencyType::LinearFrequencies)):
+//!   a logarithmic note → period mapping pivoted on a chosen
 //!   reference C-4 frequency. Hardware-independent; period
 //!   is a unit on a pitch axis with 768 units per octave.
 //!   Used by FT2's "linear frequencies" mode and natively
 //!   by S3M / IT.
 //!
-//! - **Amiga** ([`FrequencyType::AmigaFrequencies`]): period
-//!   directly drives the Paula chip via
+//! - **Amiga**
+//!   ([`FrequencyType::AmigaFrequencies`](crate::period_helper::FrequencyType::AmigaFrequencies)):
+//!   period directly drives the Paula chip via
 //!   `freq = 7093789.2 / (period × 2)` (PAL clock). The
 //!   note → period mapping is exponential
 //!   (`period = K × 2⁻ⁿᐟ¹²`). Used by FT2's "Amiga
 //!   frequencies" mode and natively by `.mod`.
 //!
 //! Both modes share the same triangle pitch ↔ period ↔ freq,
-//! dispatched by [`PeriodHelper`].
+//! dispatched by [`PeriodHelper`](crate::period_helper::PeriodHelper).
 //!
 //! ## Q-format pitch chain
 //!
 //! All conversions use typed fixed-point values from
 //! [`crate::fixed::units`]:
 //!
-//! - [`Pitch`] (Q8.8): semitones from C-0, fractional.
-//! - [`PitchDelta`] (Q8.8): signed pitch offset (arpeggio,
-//!   portamento, vibrato, finetune).
-//! - [`Period`] (u16): tracker period (linear or Amiga).
-//! - [`Frequency`] (Q16.16): Hz, output of the conversion.
+//! - [`Pitch`](crate::fixed::units::Pitch) (Q8.8): semitones from
+//!   C-0, fractional.
+//! - [`PitchDelta`](crate::fixed::units::PitchDelta) (Q8.8): signed
+//!   pitch offset (arpeggio, portamento, vibrato, finetune).
+//! - [`Period`](crate::fixed::units::Period) (u16): tracker period
+//!   (linear or Amiga).
+//! - [`Frequency`](crate::fixed::units::Frequency) (Q16.16): Hz,
+//!   output of the conversion.
 //!
 //! No `f32` enters the pitch chain — every conversion is an
 //! exact-integer table lookup or short binary search. The

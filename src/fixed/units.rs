@@ -16,12 +16,17 @@
 //! * **Audio sample** ([`Amp`]): Q1.15 in `[-1, 1)`. Distinct
 //!   from gains so we don't accidentally pass an audio sample
 //!   where a coefficient is expected.
-//! * **Pitch chain** ([`Pitch`], [`PitchDelta`], [`PitchAcc`],
-//!   [`Finetune`]): Q8.8 stored, Q24.8 in flight. Conversions
-//!   between them are explicit method calls.
-//! * **Frequency / period / step** ([`Frequency`], [`Period`],
-//!   [`SampleStep`]): three views of the same thing, converted
-//!   by [`crate::fixed::tables`] (no float, no transcendental).
+//! * **Pitch chain**: [`crate::fixed::units::Pitch`],
+//!   [`crate::fixed::units::PitchDelta`],
+//!   [`crate::fixed::units::PitchAcc`],
+//!   [`crate::fixed::units::Finetune`] — Q8.8 stored, Q24.8 in
+//!   flight. Conversions between them are explicit method calls.
+//! * **Frequency / period / step**:
+//!   [`crate::fixed::units::Frequency`],
+//!   [`crate::fixed::units::Period`],
+//!   [`crate::fixed::units::SampleStep`] — three views of the same
+//!   thing, converted by [`crate::fixed::tables`] (no float, no
+//!   transcendental).
 
 use crate::fixed::fixed::{Q15, Q24_8, Q7_25, Q8_8};
 use serde::{Deserialize, Serialize};

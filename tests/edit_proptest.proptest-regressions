@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc b15551e9a5ff07e1dea9f2646df0d26ddc6cb04bff02565a5c8be9a49120b3a3 # shrinks to commands = [CloneTrack { track: 0 }]
+cc 20d27de1ed576d66b576dbeda95ae47d8e252d527a2c4f5cfea5b9fca321562c # shrinks to commands = [CreateTrack { instrument: 0, name: "a", length_rows: 1 }, CreateClip { track: 0, song: 0, target_channel: 0, position_tick: 1579 }, CreateClip { track: 0, song: 0, target_channel: 0, position_tick: 1627 }, MoveClip { clip: 1, new_position_tick: 0 }]

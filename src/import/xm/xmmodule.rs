@@ -181,12 +181,8 @@ impl XmModule {
                 XmFlagType::XmAmigaFrequencies => FrequencyType::AmigaFrequencies,
                 XmFlagType::XmLinearFrequencies => FrequencyType::LinearFrequencies,
             },
-            restart_position: self.header.restart_position as usize,
             default_tempo: self.header.default_tempo as usize,
             default_bpm: self.header.default_bpm as usize,
-            pattern_order: orders_helper::parse_orders(&self.pattern_order),
-            pattern: vec![],
-            pattern_names: vec![],
             channel_names: vec![],
             // XM has no per-channel defaults in its header — every
             // channel starts centred and unmuted.
@@ -213,21 +209,45 @@ impl XmModule {
             // engine-side `MIXING_ATTENUATION` shift expects this
             // pre-attenuation as input.
             mix_volume: Volume::from_ratio(48, 128),
+            // DAW layer is filled below by `build_timeline_layer`.
+            tracks: vec![],
+            clips: crate::daw::sorted_clips::SortedClips::new(),
+            automation: vec![],
+            timeline_map: crate::daw::timeline::TimelineMap::default(),
         };
 
-        let patterns: Vec<Vec<Vec<PatternSlot>>> =
+        let raw_patterns: Vec<Vec<Vec<PatternSlot>>> =
             self.pattern.iter().map(|p| p.pattern.clone()).collect();
+        let pattern_order = orders_helper::parse_orders(&self.pattern_order);
         let mut im = ImportMemory::default();
-        module.pattern = im.unpack_patterns(
+        let pattern = im.unpack_patterns(
             module.frequency_type,
             MemoryType::Xm,
-            &module.pattern_order,
-            &patterns,
+            &pattern_order,
+            &raw_patterns,
         );
 
         for i in &self.instrument {
             module.instrument.push(i.to_instrument())
         }
+
+        // FastTracker's restart_position: order index to jump to
+        // when the song reaches the end. Realised below as a
+        // synthetic `GlobalEffect::PositionJump` on the last played
+        // row, so the existing position-jump pipeline handles it.
+        let mut pattern_order_owned = pattern_order;
+        let mut pattern_owned = pattern;
+        crate::daw::build_timeline::inject_restart_position_jump(
+            &mut pattern_order_owned[0],
+            &mut pattern_owned,
+            self.header.restart_position as usize,
+        );
+
+        crate::daw::build_timeline::build_timeline_layer(
+            &mut module,
+            &pattern_order_owned,
+            &pattern_owned,
+        );
 
         module
     }

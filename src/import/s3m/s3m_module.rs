@@ -957,14 +957,14 @@ impl S3mModule {
 
         module.channel_defaults = self.header_channel_defaults();
 
-        module.pattern_order = orders_helper::parse_orders(&self.positions);
+        let pattern_order = orders_helper::parse_orders(&self.positions);
 
         let mut im = ImportMemory::default();
         im.s3m_flags = import_flags;
-        module.pattern = im.unpack_patterns(
+        let pattern = im.unpack_patterns(
             module.frequency_type,
             MemoryType::S3m,
-            &module.pattern_order,
+            &pattern_order,
             &patterns_for_unpack,
         );
 
@@ -1042,6 +1042,8 @@ impl S3mModule {
                 }
             }
         }
+
+        crate::daw::build_timeline::build_timeline_layer(&mut module, &pattern_order, &pattern);
 
         module
     }

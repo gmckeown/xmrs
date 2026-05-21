@@ -10,6 +10,10 @@
 pub use crate::{
     cell_note::CellNote,
     compatibility_profile::CompatibilityProfile,
+    daw::automation::{AutomationLane, AutomationPoint, AutomationTarget, AutomationValue},
+    daw::clip::Clip,
+    daw::timeline::{TimelineEntry, TimelineMap},
+    daw::track::Track,
     effect::{GlobalEffect, MidiMacroType, NoteRetrigOperator, TrackEffect},
     envelope::{Envelope, EnvelopePoint},
     fixed::units::{

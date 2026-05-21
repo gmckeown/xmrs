@@ -1,58 +1,58 @@
 //! Fixed-point primitives for the xmrs ecosystem.
 //!
-//! This module is the substrate on which `xmrs` and
-//! `xmrsplayer` run without `f32` arithmetic, so they ship to
-//! processors without an FPU (Cortex-M0, classic 68000,
-//! eventually Z80 / 6502 with the right toolchain).
-//!
-//! It originally lived in a separate crate (`xmfixed`); folding
-//! it back into `xmrs` let the domain types defined here
-//! (`Sample`, `EnvelopePoint`, `Vibrato`, …) move to Q-format
-//! incrementally, without an external dependency for half the
-//! transition. The migration is now complete.
+//! Substrate on which `xmrs` and `xmrsplayer` run without `f32`
+//! arithmetic, so they ship to processors without an FPU
+//! (Cortex-M0, classic 68000, eventually Z80 / 6502 with the
+//! right toolchain).
 //!
 //! The module is split into four layers:
 //!
-//! * [`fixed`] — generic `Q<T, FRAC>` types. All arithmetic
+//! * [`crate::fixed::fixed`] — generic `Q<T, FRAC>` types. All arithmetic
 //!   primitives, rounding rules and saturation rules live here.
 //!   No domain knowledge.
 //!
-//! * [`units`] — newtypes for the player's domain concepts:
-//!   [`Volume`](units::Volume), [`Panning`](units::Panning),
-//!   [`Pitch`](units::Pitch), [`Frequency`](units::Frequency),
-//!   etc. These wrap the [`fixed`] types and only expose
+//! * [`crate::fixed::units`] — newtypes for the player's domain concepts:
+//!   [`Volume`](crate::fixed::units::Volume), [`Panning`](crate::fixed::units::Panning),
+//!   [`Pitch`](crate::fixed::units::Pitch), [`Frequency`](crate::fixed::units::Frequency),
+//!   etc. These wrap the [`crate::fixed::fixed`] types and only expose
 //!   operations that make musical sense, so mixing them up
 //!   is a compile error.
 //!
-//! * [`tables`] — compile-time lookup tables built with
+//! * [`crate::fixed::tables`] — compile-time lookup tables built with
 //!   `const fn` (sine, equal-power-pan sqrt, period→frequency,
 //!   Amiga period). These replace `sin`, `sqrt`, `powf`, `exp`,
 //!   `log2` calls; the module has no dependency on `libm`,
 //!   `micromath`, or any soft-float runtime.
 //!
-//! * [`from_tracker`] — a small helper module that converts the
-//!   raw bytes / nibbles found in `.mod` / `.xm` / `.s3m` /
+//! * [`crate::fixed::from_tracker`] — a small helper module that converts
+//!   the raw bytes / nibbles found in `.mod` / `.xm` / `.s3m` /
 //!   `.it` files directly into the domain newtypes, without
 //!   ever constructing an intermediate `f32`.
 //!
-//! Plus the optional [`float_helpers`] module, gated behind the
+//! Plus the optional `float_helpers` module, gated behind the
 //! `float-helpers` cargo feature: `f32 ↔ Q` conversions for the
 //! editor / desktop side. Never enabled on embedded builds.
 //!
 //! ## Discipline
 //!
-//! Outside the [`fixed`] submodule, code should never write
+//! Outside the [`crate::fixed::fixed`] submodule, code should never write
 //! `as i16`, `>> 15`, `<< 9` and similar bit hacks against
 //! Q-formatted values. If you find yourself wanting to, the
-//! corresponding method is missing from [`units`] and should be
-//! added there. This is what keeps the rest of the player
+//! corresponding method is missing from [`crate::fixed::units`] and should
+//! be added there. This is what keeps the rest of the player
 //! readable.
 //!
-//! Outside [`from_tracker`] (load-time only), code should never
-//! see an `f32` either. The audio hot path is integer-only.
+//! Outside [`crate::fixed::from_tracker`] (load-time only), code should
+//! never see an `f32` either. The audio hot path is integer-only.
 
 #![warn(missing_docs)]
 
+// `crate::fixed::fixed::*` holds the raw Q-format newtypes (Q15,
+// Q8_8, etc.); the outer `fixed` module groups them with the
+// domain newtypes in `units`, the LUTs in `tables`, and the
+// load-time converters in `from_tracker`. Renaming would churn
+// 28 import sites for no functional gain.
+#[allow(clippy::module_inception)]
 pub mod fixed;
 pub mod from_tracker;
 pub mod tables;

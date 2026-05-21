@@ -1,6 +1,6 @@
 [package]
 name = "xmrs"
-version = "0.11.3"
+version = "0.12.0"
 edition = "2021"
 description = "A library to edit SoundTracker data with pleasure "
 license = "MIT"
@@ -86,6 +86,11 @@ rand8 = []
 rand16 = []
 rand64 = []
 
+
+[dev-dependencies]
+# Property-based testing for the phase-4 EditCommand round-trip
+# invariants (§8.10 of `xmrs-daw-evolution-plan.md`).
+proptest = "1"
 
 [lib]
 name = "xmrs"

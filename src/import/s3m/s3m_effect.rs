@@ -249,7 +249,7 @@ impl S3mEffect {
     /// * `Px0` → regular slide right by `x/16` per tick > 0
     /// * `PxF` → fine slide right by `x/16` at tick 0
     /// * `PFy` → fine slide left by `y/16` at tick 0
-    /// * `P00` → no-op (memory handled at [`super::import_memory`])
+    /// * `P00` → no-op (memory handled at [`crate::import::import_memory`])
     /// * `P0F` / `PF0` → no-op (fine slide with amount 0 — legitimate
     ///   under FT2 semantics, see below)
     ///

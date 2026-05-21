@@ -16,7 +16,7 @@ fn main() -> Result<(), EncodeError> {
     //
     // Commented-out entries are known-broken and tracked as TODOs:
     //   - get_sid_commando: parsing works but nothing notable to show here.
-    //   - get_sid_delta: v30 panics in src/sid/pattern_helper.rs:186:42.
+    //   - get_sid_delta: v30 panics in src/sid/voices.rs phrase decoder.
     //   - get_sid_international_karate: data layout looks wrong, likely
     //     an upstream parser bug.
     // let _ = SidModule::get_sid_commando();

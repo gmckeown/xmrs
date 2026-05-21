@@ -437,7 +437,7 @@ mod tests {
         assert_eq!(s.seek(8, false), Some(4));
         assert_eq!(s.seek(9, false), Some(5));
         // Forward loop never ends.
-        assert_eq!(s.seek(1000, false), Some(4 + (1000 - 4) % 4));
+        assert_eq!(s.seek(1000, false), Some(4));
     }
 
     #[test]
@@ -460,7 +460,7 @@ mod tests {
         s.sustain_loop_length = 4;
         // Sustained: sustain loop wraps within [4, 8).
         assert_eq!(s.seek(8, true), Some(4));
-        assert_eq!(s.seek(100, true), Some(4 + (100 - 4) % 4));
+        assert_eq!(s.seek(100, true), Some(4));
         // Released: falls back to the (No) loop, so past-end → None.
         assert_eq!(s.seek(100, false), None);
     }

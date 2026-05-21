@@ -272,8 +272,8 @@ impl ModXmEffect {
                         // (loss of 0.25/0.5/0.75 sub-period steps).
                         // Practical impact is limited — extra-fine
                         // amiga sliding is rare in MOD modules — and
-                        // honest integer truncation matches the
-                        // post-migration storage of `Period` as `u16`.
+                        // honest integer truncation matches `Period`'s
+                        // current `u16` storage.
                         let p = param as i16;
                         let speed: i16 = match freq_type {
                             FrequencyType::LinearFrequencies => -p,

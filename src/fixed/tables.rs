@@ -88,7 +88,7 @@ pub const SINE_Q15: [Q15; 256] = {
     t
 };
 
-/// Sine lookup at a given cycle [`Phase`]. Linear interpolation
+/// Sine lookup at a given cycle [`Phase`](crate::fixed::units::Phase). Linear interpolation
 /// between the two nearest 8-bit table entries.
 #[inline]
 pub fn sine(phase: crate::fixed::units::Phase) -> Q15 {
@@ -635,9 +635,9 @@ pub fn linear_frequency_to_period(f: Frequency) -> Period {
 /// `[C0, B9]` in 1/64-semitone steps — exactly the LUT
 /// resolution. ≈ 13 iterations max.
 ///
-/// Used both at import time (e.g. S3M `c4freq → relative_pitch
-/// + finetune` decomposition) and per-tick in `adjust_period`,
-/// so accuracy beats nibble-grain quantization.
+/// Used both at import time (e.g. S3M `c4freq` →
+/// `relative_pitch / finetune` decomposition) and per-tick in
+/// `adjust_period`, so accuracy beats nibble-grain quantization.
 pub fn amiga_period_to_pitch(p: Period) -> crate::fixed::units::Pitch {
     use crate::fixed::units::Pitch;
     let target = p.raw();
@@ -654,7 +654,7 @@ pub fn amiga_period_to_pitch(p: Period) -> crate::fixed::units::Pitch {
     let mut lo: u32 = 0;
     let mut hi: u32 = MAX_UNIT;
     while lo < hi {
-        let mid = (lo + hi + 1) / 2;
+        let mid = (lo + hi).div_ceil(2);
         // Pitch at `mid` units of 1/64 semitone, in Q8.8.
         let mid_pitch = Pitch::from_q8_8_i16((mid * 4) as i16);
         let p_mid = amiga_period_from_pitch(mid_pitch).raw();
@@ -989,7 +989,7 @@ mod tests {
         for (note, expected) in cases {
             let p = amiga_period(note, 8);
             assert!(
-                (p.raw() as i32 - expected as i32).abs() <= 2,
+                (p.raw() as i32 - expected).abs() <= 2,
                 "amiga_period({}, 8) = {:?}, expected {} ± 2",
                 note,
                 p,
@@ -1032,7 +1032,7 @@ mod tests {
         for (note, ft, expected) in cases {
             let p = amiga_period(note, ft);
             assert!(
-                (p.raw() as i32 - expected as i32).abs() <= 2,
+                (p.raw() as i32 - expected).abs() <= 2,
                 "amiga_period({}, {}) = {:?}, expected {} ± 2",
                 note,
                 ft,
@@ -1051,7 +1051,11 @@ mod tests {
         // And our default is the MIDI-aligned value.
         assert_eq!(AMIGA_C0_PERIOD, 6779);
         // The two differ by ≈ 17 cents (1200 × log2(6848/6779) ≈ 17.5).
-        assert!(AMIGA_C0_PERIOD < AMIGA_C0_PERIOD_LEGACY);
+        // The assertion is constant on purpose — it documents the
+        // sign convention statically; if either constant changes,
+        // this test catches it at the next build.
+        #[allow(clippy::assertions_on_constants)]
+        const _: () = assert!(AMIGA_C0_PERIOD < AMIGA_C0_PERIOD_LEGACY);
     }
 
     #[test]

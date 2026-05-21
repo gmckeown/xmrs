@@ -1,5 +1,10 @@
 use serde::{Deserialize, Serialize};
 
+use crate::daw::automation::AutomationLane;
+use crate::daw::clip::Clip;
+use crate::daw::sorted_clips::SortedClips;
+use crate::daw::timeline::TimelineMap;
+use crate::daw::track::Track;
 use crate::fixed::units::{ChannelVolume, Panning, Period, Volume};
 use crate::instrument::Instrument;
 use crate::mix_plugin::MixPlugins;
@@ -388,15 +393,8 @@ pub struct Module {
     /// playback.
     pub profile: crate::compatibility_profile::CompatibilityProfile,
     pub frequency_type: FrequencyType,
-    /// Restart index in `pattern_order`
-    pub restart_position: usize,
     pub default_tempo: usize,
     pub default_bpm: usize,
-    /// Defines the exact order for the patterns playback
-    /// It is possible to have several music in the same Module
-    pub pattern_order: Vec<Vec<usize>>,
-    pub pattern: Vec<Pattern>,
-    pub pattern_names: Vec<String>,
     pub channel_names: Vec<String>,
     /// Per-channel initial state, applied at song start before any
     /// pattern row plays. Each entry bundles every property a
@@ -470,6 +468,36 @@ pub struct Module {
     /// from both `global_volume` and user-facing
     /// `amplification`.
     pub mix_volume: Volume,
+
+    // ---- DAW layer ----
+    //
+    // Filled by importers via
+    // [`crate::daw::build_timeline::build_timeline_layer`] and consumed
+    // by the player.
+    /// Library of reusable tracks (DAW layer).
+    #[serde(default)]
+    pub tracks: Vec<Track>,
+
+    /// Placement of tracks on the timeline. The
+    /// [`crate::daw::sorted_clips::SortedClips`] wrapper keeps the
+    /// `(song, target_channel, position_tick)` ascending invariant
+    /// — every `(song, target_channel)` lane is a contiguous slice
+    /// suitable for binary search.
+    #[serde(default)]
+    pub clips: SortedClips,
+
+    /// Automation lanes. Empty at import; mutated only through the
+    /// [`crate::edit`] API.
+    #[serde(default)]
+    pub automation: Vec<AutomationLane>,
+
+    /// Linearised playback order: maps each visited `(song,
+    /// pattern_idx, row_idx)` to its absolute tick + per-row speed
+    /// and BPM. The DAW layer's authoritative bridge between the
+    /// navigation coordinates effects refer to (`PositionJump`,
+    /// `PatternBreak`) and the tick-aligned [`Clip`] timeline.
+    #[serde(default)]
+    pub timeline_map: TimelineMap,
 }
 
 /// A module's MIDI macro table. IT-specific in practice but the
@@ -502,12 +530,8 @@ impl Default for Module {
             comment: "".to_string(),
             profile: crate::compatibility_profile::CompatibilityProfile::default(),
             frequency_type: FrequencyType::LinearFrequencies,
-            restart_position: 0,
             default_tempo: 6,
             default_bpm: 125,
-            pattern_order: vec![],
-            pattern: vec![],
-            pattern_names: vec![],
             channel_names: vec![],
             channel_defaults: vec![],
             instrument: vec![],
@@ -516,31 +540,337 @@ impl Default for Module {
             mix_plugins: None,
             pitch_wheel_depth: 2,
             mix_volume: Volume::FULL,
+            tracks: vec![],
+            clips: SortedClips::new(),
+            automation: vec![],
+            timeline_map: TimelineMap::default(),
         }
     }
 }
 
 impl Module {
-    /// get song length
-    pub fn get_song_length(&self, song: usize) -> usize {
-        self.pattern_order[song].len()
-    }
-
-    /// get number of channels
+    /// Number of channels visible to the player: the smallest
+    /// envelope that holds every clip's `target_channel`. Channels
+    /// past the rightmost clip are silent by construction and
+    /// don't need to be materialised.
     pub fn get_num_channels(&self) -> usize {
-        if let Some(first_row) = self.pattern.first().and_then(|p| p.first()) {
-            first_row.len()
-        } else {
-            0
-        }
+        // Max over every song — the player allocates one set of
+        // voices that covers all sub-songs the module carries. The
+        // sort groups by song first so we can't read this off the
+        // last entry; a full pass is the simplest correct answer.
+        self.clips
+            .iter()
+            .map(|c| c.target_channel as usize + 1)
+            .max()
+            .unwrap_or(0)
     }
 
-    /// get number of rows
-    pub fn get_num_rows(&self, pat_idx: usize) -> usize {
-        if pat_idx < self.pattern.len() {
-            self.pattern[pat_idx].len()
-        } else {
-            0
-        }
+    // ---- Derived accessors over the DAW layer ----
+    //
+    // Resolve queries about song shape (length, pattern index at
+    // an order position, pattern length) from `timeline_map.entries`.
+    // O(n) but called at most once per row by the sequencer — well
+    // under the cost of the audio mixing loop.
+
+    /// Number of order entries for `song`. Derived from the
+    /// timeline_map.
+    pub fn song_length(&self, song: usize) -> usize {
+        self.timeline_map.order_count(song)
     }
+
+    /// Pattern index referenced at `(song, order_idx)`. Returns `None`
+    /// if out of range.
+    pub fn order_pattern_idx(&self, song: usize, order_idx: usize) -> Option<usize> {
+        self.timeline_map
+            .find_order_entry(song, order_idx)
+            .map(|e| e.pattern_idx as usize)
+    }
+
+    /// Maximum row index + 1 ever played for `pat_idx`, derived from
+    /// the timeline_map entries that target this pattern.
+    pub fn pattern_row_count(&self, pat_idx: usize) -> usize {
+        self.timeline_map.row_count_in_pattern(pat_idx)
+    }
+
+    /// First clip whose `[position_tick, end_tick)` collides with
+    /// `candidate`'s on its `(song, target_channel)` lane. Indices
+    /// listed in `ignore` are skipped (typically the index of a clip
+    /// being moved or resized in place).
+    ///
+    /// Operates on the contiguous lane slice rather than the full
+    /// clip vector — `O(log N + lane_size)` instead of `O(N)`.
+    pub fn find_overlapping_clip(&self, candidate: &Clip, ignore: &[u32]) -> Option<u32> {
+        let range = self
+            .clips
+            .lane_range(candidate.song, candidate.target_channel);
+        let lane_start = range.start;
+        let cand_end = candidate.end_tick(self);
+        for (offset, existing) in self.clips.as_slice()[range].iter().enumerate() {
+            let global_idx = (lane_start + offset) as u32;
+            if ignore.contains(&global_idx) {
+                continue;
+            }
+            let existing_end = existing.end_tick(self);
+            let disjoint =
+                cand_end <= existing.position_tick || existing_end <= candidate.position_tick;
+            if !disjoint {
+                return Some(global_idx);
+            }
+        }
+        None
+    }
+
+    /// Materialise one row of cells for playback, resolved through
+    /// the DAW timeline. Returns a fresh `Vec<TrackUnit>` of length
+    /// `num_channels`; channels with no active clip get
+    /// `TrackUnit::default()`.
+    ///
+    /// # Per-channel resolution
+    ///
+    /// For each channel, find the active clip via binary search on
+    /// `module.clips` (sorted by `(song, target_channel,
+    /// position_tick)`), then map the source row to a track row
+    /// via `row_in_track = row_idx - clip.source_start_row`.
+    ///
+    /// The active clip is the one with the greatest
+    /// `position_tick ≤ abs_tick`. Its `[position_tick, end_tick)`
+    /// containment is then checked — a clip that just ended at
+    /// exactly `abs_tick` is *not* active and must not leak into
+    /// the next pattern's first row.
+    ///
+    /// # Two dispatch paths
+    ///
+    /// 1. **Standard track** (`Track.instrument` references a
+    ///    sample-based / wrapped instrument): the cell at
+    ///    `track.rows[row_in_track]` is cloned into the output.
+    ///
+    /// 2. **Euclidean track** (`Track.instrument` references an
+    ///    [`InstrumentType::Euclidean`](crate::instrument::InstrumentType::Euclidean)
+    ///    wrapper): the track has been collapsed to a single
+    ///    prototype cell at import; the per-row content is
+    ///    *generated* from the wrapper's
+    ///    `(events, steps, rotation)`. The prototype is emitted on
+    ///    Bjorklund pulse positions, `Empty` elsewhere. The
+    ///    rhythm's duration is bounded by the clip's
+    ///    `[position_tick, end_tick)`, looping every `steps` rows
+    ///    if the clip outlives a single cycle.
+    ///
+    /// # Complexity
+    ///
+    /// Per-channel cost is `O(log N_clips)` thanks to the
+    /// canonical clip sort; the Bresenham Bjorklund recompute on
+    /// the Euclidean path is `O(steps)` (≤ 255 in practice).
+    pub fn row_at(
+        &self,
+        song: usize,
+        pat_idx: usize,
+        row_idx: usize,
+    ) -> alloc::vec::Vec<TrackUnit> {
+        let num_channels = self.get_num_channels();
+        let mut out: alloc::vec::Vec<TrackUnit> =
+            (0..num_channels).map(|_| TrackUnit::default()).collect();
+
+        let abs_tick = match self.timeline_map.find_entry(song, pat_idx, row_idx) {
+            Some(e) => e.tick,
+            None => return out,
+        };
+
+        let song_u16 = song as u16;
+        let row_u32 = row_idx as u32;
+        for (ch_idx, out_cell) in out.iter_mut().enumerate() {
+            let Some((_, clip)) = self.clips.active_at(song_u16, ch_idx as u8, abs_tick) else {
+                continue;
+            };
+            // `active_at` returns the clip with the greatest
+            // `position_tick ≤ abs_tick` on this lane; it can
+            // legitimately have ended already, so the half-open
+            // `[position_tick, end_tick)` containment must be
+            // checked here. Without it, the cells of the clip that
+            // *just ended* leak into the next pattern's first row.
+            if abs_tick >= clip.end_tick {
+                continue;
+            }
+            // Source-row-based index: independent of per-row speed,
+            // so a `GlobalEffect::Speed` mid-clip can't alias two
+            // source rows onto the same track index.
+            if row_u32 < clip.source_start_row {
+                continue;
+            }
+            let row_in_track = row_u32 - clip.source_start_row;
+            if row_in_track < clip.track_row_offset {
+                continue;
+            }
+            let track = match clip.track_in(self) {
+                Some(t) => t,
+                None => continue,
+            };
+            // Euclidean (generative) branch: the Track was collapsed
+            // to a single prototype cell at conversion time; per-row
+            // playback content is derived from the wrapper's
+            // `(events, steps, rotation)`. Emit the prototype on
+            // Bjorklund pulse positions, Empty elsewhere.
+            if let Some(crate::instrument::InstrumentType::Euclidean(ekn)) =
+                self.instrument.get(track.instrument).map(|i| &i.instr_type)
+            {
+                let steps = ekn.steps.max(1) as u32;
+                let pos = (row_in_track) % steps;
+                let rot = (ekn.rotation as u32) % steps;
+                let bjork_idx = ((pos + steps - rot) % steps) as usize;
+                let canonical = crate::daw::euclidean::euclidean_pattern(ekn.events, ekn.steps);
+                if canonical.get(bjork_idx).copied().unwrap_or(false) {
+                    if let Some(proto) = track.rows.first() {
+                        *out_cell = proto.clone();
+                    }
+                }
+                continue;
+            }
+            if (row_in_track as usize) >= track.rows.len() {
+                continue;
+            }
+            *out_cell = track.rows[row_in_track as usize].clone();
+        }
+        out
+    }
+
+    /// Verify that the DAW layer (`tracks` / `clips` / `automation`
+    /// / `timeline_map`) is internally consistent: clips sorted and
+    /// non-overlapping per `(song, target_channel)`, automation
+    /// values matched against their lane's target, timeline_map
+    /// entries monotonic per song, tracks pointing at valid
+    /// instruments. Used by importers and tests.
+    pub fn verify_layers_consistent(&self) -> Result<(), LayerInconsistency> {
+        // 1. clips sorted by (song, target_channel, position_tick).
+        // `SortedClips` enforces this invariant internally, so this
+        // pass is a sanity belt-and-braces against deserialisation
+        // sinks that bypass the type's API.
+        for w in self.clips.as_slice().windows(2) {
+            let a = (w[0].song, w[0].target_channel, w[0].position_tick);
+            let b = (w[1].song, w[1].target_channel, w[1].position_tick);
+            if a > b {
+                return Err(LayerInconsistency::ClipsUnsorted);
+            }
+        }
+
+        // 2. clip.track must point inside `tracks`
+        for (i, clip) in self.clips.iter().enumerate() {
+            if clip.track as usize >= self.tracks.len() {
+                return Err(LayerInconsistency::ClipTrackOutOfRange {
+                    clip_idx: i,
+                    track: clip.track,
+                });
+            }
+        }
+
+        // 3. No overlap on (song, target_channel)
+        for i in 0..self.clips.len() {
+            let ci = &self.clips[i];
+            let end_i = ci.end_tick(self);
+            for j in (i + 1)..self.clips.len() {
+                let cj = &self.clips[j];
+                if cj.song != ci.song || cj.target_channel != ci.target_channel {
+                    continue;
+                }
+                if cj.position_tick >= end_i {
+                    // No further overlap possible with i on this
+                    // (song, channel) — clips are sorted by
+                    // position_tick. break out of inner loop.
+                    break;
+                }
+                return Err(LayerInconsistency::ClipsOverlap {
+                    clip_a: i,
+                    clip_b: j,
+                });
+            }
+        }
+
+        // 4. tracks: instrument index in range. The
+        // `EFFECT_ONLY_INSTRUMENT` sentinel marks a track whose
+        // cells modify a voice inherited from a prior pattern; it
+        // intentionally points at no real instrument.
+        for (i, t) in self.tracks.iter().enumerate() {
+            if t.instrument == crate::daw::build_timeline::EFFECT_ONLY_INSTRUMENT {
+                // Effect-only track: cells must all have
+                // `cell.instrument = None` (they don't trigger any
+                // sample).
+                for (r, cell) in t.rows.iter().enumerate() {
+                    if cell.instrument.is_some() {
+                        return Err(LayerInconsistency::TrackInstrumentMismatch {
+                            track_idx: i,
+                            row: r,
+                        });
+                    }
+                }
+                continue;
+            }
+            if t.instrument >= self.instrument.len() && !self.instrument.is_empty() {
+                return Err(LayerInconsistency::TrackInstrumentMismatch {
+                    track_idx: i,
+                    row: 0,
+                });
+            }
+            // Each non-Empty cell that carries an explicit instrument
+            // must match the track's instrument (or have None,
+            // inheriting it).
+            for (r, cell) in t.rows.iter().enumerate() {
+                if let Some(instr) = cell.instrument {
+                    if instr != t.instrument {
+                        return Err(LayerInconsistency::TrackInstrumentMismatch {
+                            track_idx: i,
+                            row: r,
+                        });
+                    }
+                }
+            }
+        }
+
+        // 5. Automation lanes: typed values + sorted points
+        for (i, lane) in self.automation.iter().enumerate() {
+            let mut last_tick: Option<u32> = None;
+            for (j, p) in lane.points.iter().enumerate() {
+                if !p.value.is_compatible_with(lane.target) {
+                    return Err(LayerInconsistency::AutomationTypeMismatch {
+                        lane_idx: i,
+                        point_idx: j,
+                    });
+                }
+                if let Some(lt) = last_tick {
+                    if p.tick < lt {
+                        return Err(LayerInconsistency::AutomationPointsUnsorted { lane_idx: i });
+                    }
+                }
+                last_tick = Some(p.tick);
+            }
+        }
+
+        // 6. timeline_map: entries are sorted by (song, tick) within
+        // each song. They are produced in this order by the builder.
+        let mut last_song: u16 = 0;
+        let mut last_tick: u32 = 0;
+        let mut first = true;
+        for (i, e) in self.timeline_map.entries.iter().enumerate() {
+            if first || e.song != last_song {
+                first = false;
+                last_song = e.song;
+                last_tick = e.tick;
+                continue;
+            }
+            if e.tick < last_tick {
+                return Err(LayerInconsistency::TimelineMapMismatch { entry_idx: i });
+            }
+            last_tick = e.tick;
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LayerInconsistency {
+    ClipsUnsorted,
+    ClipTrackOutOfRange { clip_idx: usize, track: u32 },
+    ClipsOverlap { clip_a: usize, clip_b: usize },
+    TimelineMapMismatch { entry_idx: usize },
+    AutomationTypeMismatch { lane_idx: usize, point_idx: usize },
+    AutomationPointsUnsorted { lane_idx: usize },
+    TrackInstrumentMismatch { track_idx: usize, row: usize },
 }

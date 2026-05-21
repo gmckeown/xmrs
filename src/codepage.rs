@@ -36,7 +36,7 @@
 //!    block glyphs like `0xDB 0xDB 0xDB ...`); ordinary
 //!    accented-letter text rarely exceeds ~20 %.
 //!
-//! Combined-field detection ([`Codepage::detect_from_fields`]) is
+//! Combined-field detection ([`crate::codepage::Codepage::detect_from_fields`]) is
 //! stronger than per-field detection because the aggregate has
 //! more bytes to score on — a single 22-byte name with two
 //! accents is ambiguous on its own.
@@ -111,11 +111,11 @@ impl Codepage {
     }
 
     /// Detect the codepage shared by several name fields read out
-    /// of the same file (title + sample names + instrument names
-    /// + …). Pooling the bytes across every field gives the
-    /// detector more signal: a single name with one accented
-    /// letter is ambiguous on its own, but the song's *aggregate*
-    /// byte distribution is decisive.
+    /// of the same file (title plus sample names plus instrument
+    /// names plus more). Pooling the bytes across every field
+    /// gives the detector more signal: a single name with one
+    /// accented letter is ambiguous on its own, but the song's
+    /// *aggregate* byte distribution is decisive.
     ///
     /// The verdict is whichever of the supported codepages best
     /// matches the byte distribution. NUL bytes (used as

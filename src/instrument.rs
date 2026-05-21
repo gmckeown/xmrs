@@ -34,8 +34,8 @@ pub enum InstrumentType {
     Empty,
     /// Historical XM Instrument
     Default(InstrDefault),
-    /// Euclidian Rythm Instrument
-    Euclidian(InstrEkn),
+    /// Euclidean Rhythm Instrument
+    Euclidean(InstrEkn),
     /// Midi Instrument
     Midi(InstrMidi),
     /// Yamaha OPL

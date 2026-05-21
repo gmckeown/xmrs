@@ -403,32 +403,32 @@ impl AmigaModule {
         module.default_bpm = 125;
         // MOD restart byte (offset 0x3B7). Soundtracker / Noisetracker
         // used it as a real loop point; ProTracker writes 0x7F (127)
-        // as a sentinel meaning "no restart". Anything ≥ song length
-        // is therefore not a valid index — fall back to 0 in that
-        // case rather than letting a 127 propagate into a 64-pattern
-        // song.
-        module.restart_position = if (self.restart_position as usize) < self.song_length as usize {
-            self.restart_position as usize
-        } else {
-            0
-        };
-        module.pattern_order = vec![self.positions[..usize::from(self.song_length)]
+        // as a "no restart" sentinel. Realised below as a synthetic
+        // `GlobalEffect::PositionJump` on the last played row.
+        let mut pattern_order = vec![self.positions[..usize::from(self.song_length)]
             .to_vec()
             .iter()
             .map(|&x| x as usize)
             .collect()];
         let mut im = ImportMemory::default();
-        module.pattern = im.unpack_patterns(
+        let mut pattern = im.unpack_patterns(
             FrequencyType::AmigaFrequencies,
             MemoryType::Mod,
-            &module.pattern_order,
+            &pattern_order,
             &self.patterns,
+        );
+        crate::daw::build_timeline::inject_restart_position_jump(
+            &mut pattern_order[0],
+            &mut pattern,
+            self.restart_position as usize,
         );
 
         for i in 0..self.samples.len() {
             let instr = self.to_instr(i);
             module.instrument.push(instr);
         }
+
+        crate::daw::build_timeline::build_timeline_layer(&mut module, &pattern_order, &pattern);
 
         module
     }
