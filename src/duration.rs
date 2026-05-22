@@ -110,7 +110,7 @@ fn secs_to_duration(secs: f64) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::daw::build_timeline::build_timeline_layer;
+    use crate::daw::build_timeline::{build_timeline_layer, Pattern, Row};
     use crate::prelude::*;
     use alloc::vec;
     use alloc::vec::Vec;

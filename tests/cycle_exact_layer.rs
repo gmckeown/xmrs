@@ -11,6 +11,7 @@
 #![cfg(feature = "std")]
 #![allow(deprecated)]
 
+use xmrs::daw::build_timeline::Pattern;
 use xmrs::fixed::fixed::{Q15, Q8_8};
 use xmrs::prelude::*;
 

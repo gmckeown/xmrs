@@ -15,21 +15,6 @@ use alloc::string::String;
 use alloc::string::ToString;
 use alloc::{vec, vec::Vec};
 
-#[cfg(target_pointer_width = "16")]
-pub const MAX_NUM_ROWS: usize = 255;
-
-#[cfg(target_pointer_width = "32")]
-pub const MAX_NUM_ROWS: usize = 4095;
-
-#[cfg(target_pointer_width = "64")]
-pub const MAX_NUM_ROWS: usize = 4095;
-
-/// A row contains its column elements
-pub type Row = Vec<TrackUnit>;
-
-/// Patterns are sequences of lines
-pub type Pattern = Vec<Row>;
-
 /// Which tracker convention this module was imported from.
 ///
 /// This is **metadata only** — it identifies the source format for

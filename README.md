@@ -37,10 +37,14 @@ Module ─┬─ Instrument ─┬─ InstrDefault ─┬─ VoiceSetup     (env
         │              ├─ InstrOpl       (Yamaha OPL)
         │              ├─ InstrSid       (MOS6581 SID voice)
         │              └─ InstrRobSid ── InstrSid  (Rob Hubbard-style)
-        └─ Pattern ─ Row ─ TrackUnit ─┬─ CellNote      (Empty, Play(Pitch), KeyOff, NoteCut, NoteFade)
-                                      ├─ TrackEffect
-                                      └─ GlobalEffect
+        └─ Track ─ Vec<TrackUnit> ─┬─ CellNote        (Empty, Play(Pitch), KeyOff, NoteCut, NoteFade)
+                                   ├─ TrackEffect
+                                   └─ GlobalEffect
 ```
+
+Tracks are arranged on the timeline by `Clip`s; see
+[*The DAW timeline layer*](#the-daw-timeline-layer) below for the
+full layout.
 
 `InstrDefault` is split into three orthogonal sub-types so each
 concern lives in one place: [`VoiceSetup`] (how the voice sounds
@@ -69,6 +73,64 @@ initial state (panning, channel volume, mute, surround). S3M's
 `channel_settings` and IT's `initial_channel_pan` /
 `initial_channel_volume` populate it; XM/MOD leave it empty.
 
+## The DAW timeline layer
+
+The historical `Pattern → Row → TrackUnit` matrix is gone — `Module`
+stores songs natively in a DAW-style layout, populated by the
+importers (or on demand via
+[`xmrs::daw::build_timeline::build_timeline_layer`]):
+
+```text
+Module ─┬─ tracks       : Vec<Track>     (one per song + instrument)
+        ├─ clips        : SortedClips    (placements on the timeline)
+        ├─ automation   : Vec<AutomationLane>  (edit-API output)
+        └─ timeline_map : TimelineMap    (linearised pattern_order)
+```
+
+- **`Track`** owns the actual `Vec<TrackUnit>` for a given
+  (song, instrument) pair. Two special `instrument` values are
+  reserved: `EFFECT_ONLY_INSTRUMENT` for segments that carry only
+  effects (no note/instrument), and the index of an
+  `InstrumentType::Euclidean(…)` wrapper for collapsed Euclidean
+  rhythm tracks.
+- **`Clip`** places a `Track` onto a `(song, target_channel)` lane at
+  a given `position_tick`, with `end_tick` stored at extract time so
+  half-open `active_at` lookups are exact.
+- **`SortedClips`** keeps clips sorted by
+  `(song, target_channel, position_tick)` and exposes
+  `from_unsorted`, `lane`, `active_at`, `modify`, `insert`.
+- **`TimelineMap`** flattens the `pattern_order` into absolute ticks
+  and survives `Bxx` / `Dxx` / restart jumps via
+  `find_entry_at_order`.
+
+The import pipeline (run by every `import_*` feature) is:
+
+```text
+build_timeline_map → extract_tracks_and_clips → dedupe_tracks_by_content
+                  → (optional) auto_convert_strict_euclidean_tracks
+```
+
+[`Module::row_at(song, pattern, row)`] is the single cell-resolution
+API. It looks up the absolute tick in `timeline_map`, picks the
+active clip on each `(song, target_channel)` lane via
+`SortedClips::active_at`, and returns one `TrackUnit` per channel —
+all reads go through the DAW layer, there is no legacy fallback. The
+[`xmrs::edit`] module exposes incremental commands
+(`cmd_create_clip`, `cmd_duplicate_clip`, …) for editor / DAW UIs,
+with apply/undo round-trip verified by a proptest suite.
+
+### Euclidean rhythm instruments
+
+`InstrEkn` (`InstrumentType::Euclidean`) stores
+`(events, steps, rotation, prototype)`: a single `TrackUnit`
+prototype plus a Bjorklund pattern. When a strict
+single-note repetition is detected,
+`auto_convert_strict_euclidean_tracks` collapses the Track to one
+row and routes the cells through a canonical
+`euclidean_pattern(events, steps)` generator at playback time.
+Bit-identical to the original — but the on-disk track is one row
+instead of N.
+
 ## Loading a file
 
 ```rust
@@ -82,7 +144,7 @@ let module = Module::load(&bytes)?;
 // Or target a specific format:
 let module = Module::load_xm(&bytes)?;
 
-println!("{} — {} patterns", module.name, module.pattern.len());
+println!("{} — {} tracks, {} clips", module.name, module.tracks.len(), module.clips.len());
 ```
 
 Format-specific constructors are also available: `Module::load_mod`,

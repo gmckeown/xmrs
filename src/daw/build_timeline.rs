@@ -30,8 +30,19 @@ use crate::daw::clip::Clip;
 use crate::daw::timeline::{TimelineEntry, TimelineMap};
 use crate::daw::track::Track;
 use crate::effect::GlobalEffect;
-use crate::module::{Module, Pattern};
+use crate::module::Module;
 use crate::track_unit::TrackUnit;
+
+/// A row of cells, one per channel, as emitted by the importers
+/// before the DAW layer is built. Exists as a transient shape: the
+/// importer parses its native pattern format into `Vec<Row>`, then
+/// hands it to [`build_timeline_layer`] which redistributes the
+/// cells into per-track [`Track::rows`].
+pub type Row = Vec<TrackUnit>;
+
+/// A pattern as the importers see it: a vector of [`Row`]s.
+/// Transient, never stored on [`Module`].
+pub type Pattern = Vec<Row>;
 
 // =====================================================================
 // 1. TimelineMap walker
@@ -398,10 +409,7 @@ pub fn split_rows_by_instrument(rows: &[TrackUnit]) -> Vec<TrackSegment> {
 /// Pattern-grid wrapper: extract column `channel` from `pattern`
 /// (padding `Empty` where the row is shorter) then call
 /// [`split_rows_by_instrument`].
-fn split_channel_by_instrument(
-    pattern: &[crate::module::Row],
-    channel: usize,
-) -> Vec<TrackSegment> {
+fn split_channel_by_instrument(pattern: &[Row], channel: usize) -> Vec<TrackSegment> {
     let column: Vec<TrackUnit> = pattern
         .iter()
         .map(|row| row.get(channel).cloned().unwrap_or_default())

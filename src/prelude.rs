@@ -31,8 +31,8 @@ pub use crate::{
     keyboard::Keyboard,
     mix_plugin::{MixPlugin, MixPluginInfo, MixPlugins},
     module::{
-        ChannelDefault, MidiMacros, Module, ModuleFormat, PanResetPolicy, Pattern,
-        PatternHighlight, PlaybackQuirks, Row, MAX_NUM_ROWS,
+        ChannelDefault, MidiMacros, Module, ModuleFormat, PanResetPolicy, PatternHighlight,
+        PlaybackQuirks,
     },
     period_helper::{FrequencyType, PeriodHelper},
     pitch::Pitch,
