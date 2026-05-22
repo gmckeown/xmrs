@@ -1,5 +1,5 @@
+use crate::import::bin_reader::ImportError;
 use crate::prelude::*;
-use bincode::error::DecodeError;
 
 // The module-level gate in `crate::import::mod` only compiles this
 // file when at least one of MOD/XM/S3M/IT is enabled, so `load` below
@@ -8,46 +8,34 @@ use bincode::error::DecodeError;
 impl Module {
     /// Try to import an Amiga ProTracker MOD file.
     #[cfg(feature = "import_mod")]
-    pub fn load_mod(source: &[u8]) -> Result<Self, DecodeError> {
+    pub fn load_mod(source: &[u8]) -> Result<Self, ImportError> {
         use super::amiga::amiga_module::AmigaModule;
 
-        match AmigaModule::load(source) {
-            Ok(m) => Ok(m.to_module()),
-            Err(e) => Err(e),
-        }
+        Ok(AmigaModule::load(source)?.to_module())
     }
 
     /// Try to import a Fast Tracker II XM module file.
     #[cfg(feature = "import_xm")]
-    pub fn load_xm(source: &[u8]) -> Result<Self, DecodeError> {
+    pub fn load_xm(source: &[u8]) -> Result<Self, ImportError> {
         use super::xm::xmmodule::XmModule;
 
-        match XmModule::load(source) {
-            Ok(m) => Ok(m.to_module()),
-            Err(e) => Err(e),
-        }
+        Ok(XmModule::load(source)?.to_module())
     }
 
     /// Try to import a ScreamTracker 3 S3M module file.
     #[cfg(feature = "import_s3m")]
-    pub fn load_s3m(source: &[u8]) -> Result<Self, DecodeError> {
+    pub fn load_s3m(source: &[u8]) -> Result<Self, ImportError> {
         use super::s3m::s3m_module::S3mModule;
 
-        match S3mModule::load(source) {
-            Ok(m) => Ok(m.to_module()),
-            Err(e) => Err(e),
-        }
+        Ok(S3mModule::load(source)?.to_module())
     }
 
     /// Try to import an Impulse Tracker IT module file.
     #[cfg(feature = "import_it")]
-    pub fn load_it(source: &[u8]) -> Result<Self, DecodeError> {
+    pub fn load_it(source: &[u8]) -> Result<Self, ImportError> {
         use super::it::it_module::ItModule;
 
-        match ItModule::load(source) {
-            Ok(m) => Ok(m.to_module()),
-            Err(e) => Err(e),
-        }
+        Ok(ItModule::load(source)?.to_module())
     }
 
     /// Try to auto-detect and import any supported historical module
@@ -58,7 +46,7 @@ impl Module {
     ///
     /// SID is not auto-detected here — it has its own dedicated entry
     /// point via `crate::import::sid::sid_module::SidModule::load`.
-    pub fn load(source: &[u8]) -> Result<Self, DecodeError> {
+    pub fn load(source: &[u8]) -> Result<Self, ImportError> {
         #[cfg(feature = "import_xm")]
         if let Ok(m) = Self::load_xm(source) {
             return Ok(m);
@@ -90,6 +78,6 @@ impl Module {
         // complains.
         let _ = source;
 
-        Err(DecodeError::Other("Unknown data?"))
+        Err(ImportError::Other("Unknown data?"))
     }
 }

@@ -1,16 +1,16 @@
-use super::serde_helper::deserialize_string_22;
-use bincode::error::DecodeError;
-use serde::Deserialize;
+//! Amiga MOD sample header (30 bytes, big-endian):
+//! `name:[u8;22] length_div2:u16BE finetune:u8 volume:u8
+//!  repeat_offset_div2:u16BE repeat_length_div2:u16BE`.
 
 use alloc::string::String;
 use core::fmt;
 
 use crate::fixed::units::{ChannelVolume, Finetune, Panning, Volume};
+use crate::import::bin_reader::{bytes_to_trimmed_string, BinReader, ImportError};
 use crate::prelude::*;
 
-#[derive(Default, Deserialize)]
+#[derive(Default)]
 pub struct AmigaSample {
-    #[serde(deserialize_with = "deserialize_string_22")]
     pub name: String,
     pub length_div2: u16,
     pub finetune: u8,
@@ -35,19 +35,23 @@ impl fmt::Debug for AmigaSample {
 }
 
 impl AmigaSample {
-    pub fn load(ser_sample: &[u8]) -> Result<(&[u8], Self), DecodeError> {
-        match bincode::serde::decode_from_slice::<AmigaSample, _>(
-            ser_sample,
-            bincode::config::legacy(),
-        ) {
-            Ok((mut aspl, _)) => {
-                aspl.length_div2 = aspl.length_div2.rotate_right(8);
-                aspl.repeat_offset_div2 = aspl.repeat_offset_div2.rotate_right(8);
-                aspl.repeat_length_div2 = aspl.repeat_length_div2.rotate_right(8);
-                Ok((&ser_sample[30..], aspl))
-            }
-            Err(e) => Err(e),
-        }
+    pub fn load(ser_sample: &[u8]) -> Result<(&[u8], Self), ImportError> {
+        let mut r = BinReader::new(ser_sample);
+        let name_bytes: [u8; 22] = r.read_array()?;
+        let length_div2 = r.read_u16_be()?;
+        let finetune = r.read_u8()?;
+        let volume = r.read_u8()?;
+        let repeat_offset_div2 = r.read_u16_be()?;
+        let repeat_length_div2 = r.read_u16_be()?;
+        let aspl = AmigaSample {
+            name: bytes_to_trimmed_string(&name_bytes),
+            length_div2,
+            finetune,
+            volume,
+            repeat_offset_div2,
+            repeat_length_div2,
+        };
+        Ok((r.tail(), aspl))
     }
 
     pub fn to_sample(&self) -> Sample {

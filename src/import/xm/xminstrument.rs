@@ -1,7 +1,28 @@
-/// Original XM Instrument
-use bincode::error::{DecodeError, EncodeError};
-use serde::{Deserialize, Serialize};
-use serde_big_array::BigArray;
+//! Original XM Instrument.
+//!
+//! Layout (variable length, driven by `instrument_header_len`):
+//!
+//! ```text
+//! u32  instrument_header_len     // 4 + this header on disk
+//! ---- XmInstrumentHeader (25B) ----
+//! [u8;22] name
+//! u8      instr_type             // "random" per FT2 reference
+//! u16     num_samples
+//! ---- if num_samples > 0 ----
+//! u32  sample_header_size
+//! ---- XmInstrDefault (215B) ----
+//! [u8;96]  sample_for_pitchs
+//! [u8;48]  volume_envelope
+//! [u8;48]  panning_envelope
+//! u8       number_of_volume_points / panning_points / sustain & loop pts (×7)
+//! u8       volume_flag, panning_flag
+//! u8 × 4   vibrato type / sweep / depth / rate
+//! u16      volume_fadeout
+//! u8       midi_on, midi_channel
+//! u16      midi_program, midi_bend
+//! u8       midi_mute_computer
+//! ---- num_samples × XmSampleHeader, then sample bodies ----
+//! ```
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -10,42 +31,44 @@ use alloc::{vec, vec::Vec};
 use crate::envelope::{Envelope, EnvelopePoint};
 use crate::fixed::fixed::Q8_8;
 use crate::fixed::units::{EnvValue, PitchDelta, Volume};
+use crate::import::bin_reader::{
+    bytes_to_trimmed_string, string_to_fixed_array, write_bytes, write_u16_le, write_u32_le,
+    write_u8, BinReader, ImportError,
+};
 use crate::instr_default::InstrDefault;
 use crate::instrument::{Instrument, InstrumentType};
 use crate::module::Module;
 use crate::sample::Sample;
 use crate::waveform::Waveform;
 
-use super::serde_helper::{deserialize_string_22, serialize_string_22};
 use super::xmsample::{XmSample, XMSAMPLE_HEADER_SIZE};
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Debug)]
 pub enum XmInstrumentType {
     Empty,
     Default(Box<XmInstrDefault>),
 }
 
 impl XmInstrumentType {
-    pub fn save(&self) -> Result<Vec<u8>, EncodeError> {
+    pub fn save(&self) -> Vec<u8> {
         match self {
             XmInstrumentType::Default(xmid) => {
-                bincode::serde::encode_to_vec(xmid, bincode::config::legacy())
+                let mut out = Vec::with_capacity(XMINSTRDEFAULT_SIZE);
+                xmid.write(&mut out);
+                out
             }
-            _ => Ok(vec![]),
+            _ => vec![],
         }
     }
 }
 
 pub const XMINSTRDEFAULT_SIZE: usize = 96 + 4 * 12 + 4 * 12 + 14 + 2 + 2 + 2 + 2 + 1;
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct XmInstrDefault {
-    #[serde(with = "BigArray")]
     sample_for_pitchs: [u8; 96],
 
-    #[serde(with = "BigArray")]
     volume_envelope: [u8; 4 * 12],
-    #[serde(with = "BigArray")]
     panning_envelope: [u8; 4 * 12],
     number_of_volume_points: u8,
     number_of_panning_points: u8,
@@ -106,6 +129,83 @@ impl Default for XmInstrDefault {
 }
 
 impl XmInstrDefault {
+    pub(super) fn read(r: &mut BinReader) -> Result<Self, ImportError> {
+        let sample_for_pitchs: [u8; 96] = r.read_array()?;
+        let volume_envelope: [u8; 48] = r.read_array()?;
+        let panning_envelope: [u8; 48] = r.read_array()?;
+        let number_of_volume_points = r.read_u8()?;
+        let number_of_panning_points = r.read_u8()?;
+        let volume_sustain_point = r.read_u8()?;
+        let volume_loop_start_point = r.read_u8()?;
+        let volume_loop_end_point = r.read_u8()?;
+        let panning_sustain_point = r.read_u8()?;
+        let panning_loop_start_point = r.read_u8()?;
+        let panning_loop_end_point = r.read_u8()?;
+        let volume_flag = r.read_u8()?;
+        let panning_flag = r.read_u8()?;
+        let vibrato_type = r.read_u8()?;
+        let vibrato_sweep = r.read_u8()?;
+        let vibrato_depth = r.read_u8()?;
+        let vibrato_rate = r.read_u8()?;
+        let volume_fadeout = r.read_u16_le()?;
+        let midi_on = r.read_u8()?;
+        let midi_channel = r.read_u8()?;
+        let midi_program = r.read_u16_le()?;
+        let midi_bend = r.read_u16_le()?;
+        let midi_mute_computer = r.read_u8()?;
+        Ok(Self {
+            sample_for_pitchs,
+            volume_envelope,
+            panning_envelope,
+            number_of_volume_points,
+            number_of_panning_points,
+            volume_sustain_point,
+            volume_loop_start_point,
+            volume_loop_end_point,
+            panning_sustain_point,
+            panning_loop_start_point,
+            panning_loop_end_point,
+            volume_flag,
+            panning_flag,
+            vibrato_type,
+            vibrato_sweep,
+            vibrato_depth,
+            vibrato_rate,
+            volume_fadeout,
+            midi_on,
+            midi_channel,
+            midi_program,
+            midi_bend,
+            midi_mute_computer,
+        })
+    }
+
+    fn write(&self, out: &mut Vec<u8>) {
+        write_bytes(out, &self.sample_for_pitchs);
+        write_bytes(out, &self.volume_envelope);
+        write_bytes(out, &self.panning_envelope);
+        write_u8(out, self.number_of_volume_points);
+        write_u8(out, self.number_of_panning_points);
+        write_u8(out, self.volume_sustain_point);
+        write_u8(out, self.volume_loop_start_point);
+        write_u8(out, self.volume_loop_end_point);
+        write_u8(out, self.panning_sustain_point);
+        write_u8(out, self.panning_loop_start_point);
+        write_u8(out, self.panning_loop_end_point);
+        write_u8(out, self.volume_flag);
+        write_u8(out, self.panning_flag);
+        write_u8(out, self.vibrato_type);
+        write_u8(out, self.vibrato_sweep);
+        write_u8(out, self.vibrato_depth);
+        write_u8(out, self.vibrato_rate);
+        write_u16_le(out, self.volume_fadeout);
+        write_u8(out, self.midi_on);
+        write_u8(out, self.midi_channel);
+        write_u16_le(out, self.midi_program);
+        write_u16_le(out, self.midi_bend);
+        write_u8(out, self.midi_mute_computer);
+    }
+
     fn from_envelope(e: &Envelope) -> [u8; 48] {
         let mut dst: [u8; 48] = [0; 48];
         let mut i = 0;
@@ -171,18 +271,10 @@ impl XmInstrDefault {
                     Waveform::TranslatedRampDown => 3,
                     _ => 0,
                 };
-                // XM stores each vibrato parameter as a u8 byte
-                // representing `value × scale`. Scales come from
-                // the FT2 reference: sweep × 255, depth × 30,
-                // rate × 252. `to_ratio_byte` does the multiply
-                // with proper round-to-nearest and clamps to u8.
                 xmid.vibrato_sweep = id.voice.vibrato.sweep.to_ratio_byte(255);
                 xmid.vibrato_depth = id.voice.vibrato.depth.to_ratio_byte(15 * 2);
                 xmid.vibrato_rate = id.voice.vibrato.speed.to_ratio_byte(63 * 4);
 
-                // XM stores volume_fadeout as `value × 32760`
-                // in u16. The previous `+ 0.5` rounding bias is
-                // baked into `to_ratio_u16`'s round-to-nearest.
                 xmid.volume_fadeout = id.voice.volume_fadeout.to_ratio_u16(4095 * 4 * 2);
 
                 xmid.midi_on = if id.midi.muted { 0 } else { 1 };
@@ -200,20 +292,35 @@ impl XmInstrDefault {
 
 pub const XMINSTRUMENT_HEADER_SIZE: usize = 25;
 
-#[derive(Serialize, Deserialize, Debug, Default)]
+#[derive(Debug, Default)]
 pub struct XmInstrumentHeader {
-    #[serde(
-        deserialize_with = "deserialize_string_22",
-        serialize_with = "serialize_string_22"
-    )]
     pub name: String,
-    pub instr_type: u8, // must be 0, be random...
+    pub instr_type: u8, // FT2 writes a "random" byte here
     pub num_samples: u16,
 }
 
 impl XmInstrumentHeader {
-    pub fn save(&self) -> Result<Vec<u8>, EncodeError> {
-        bincode::serde::encode_to_vec(self, bincode::config::legacy())
+    pub(super) fn read(r: &mut BinReader) -> Result<Self, ImportError> {
+        let name_bytes: [u8; 22] = r.read_array()?;
+        let instr_type = r.read_u8()?;
+        let num_samples = r.read_u16_le()?;
+        Ok(Self {
+            name: bytes_to_trimmed_string(&name_bytes),
+            instr_type,
+            num_samples,
+        })
+    }
+
+    fn write(&self, out: &mut Vec<u8>) {
+        write_bytes(out, &string_to_fixed_array::<22>(&self.name));
+        write_u8(out, self.instr_type);
+        write_u16_le(out, self.num_samples);
+    }
+
+    pub fn save(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(XMINSTRUMENT_HEADER_SIZE);
+        self.write(&mut out);
+        out
     }
 
     pub fn from_instr(i: &Instrument) -> Self {
@@ -228,7 +335,7 @@ impl XmInstrumentHeader {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Debug)]
 pub struct XmInstrument {
     pub instrument_header_len: u32,
     pub header: XmInstrumentHeader,
@@ -250,31 +357,31 @@ impl Default for XmInstrument {
 }
 
 impl XmInstrument {
-    pub fn load(data: &[u8]) -> Result<(&[u8], XmInstrument), DecodeError> {
+    pub fn load(data: &[u8]) -> Result<(&[u8], XmInstrument), ImportError> {
         let mut sample: Vec<XmSample> = vec![];
 
-        // length
-        let xmih_len = if let Ok(len) =
-            bincode::serde::decode_from_slice::<u32, _>(data, bincode::config::legacy())
-        {
-            len.0 as usize
-        } else {
+        let mut r = BinReader::new(data);
+        // instrument_header_len. Some files truncate before this
+        // field — yield an empty record and don't advance.
+        let Ok(xmih_len_raw) = r.read_u32_le() else {
             return Ok((data, XmInstrument::default()));
         };
+        let xmih_len = xmih_len_raw as usize;
 
         if xmih_len == 4 {
-            // no data
+            // no data: just the length tag
             return Ok((&data[4..], XmInstrument::default()));
         }
 
-        // xmih
-        let xmih = bincode::serde::decode_from_slice::<XmInstrumentHeader, _>(
-            &data[4..],
-            bincode::config::legacy(),
-        )?
-        .0;
+        // XmInstrumentHeader (immediately follows the length tag).
+        let xmih = XmInstrumentHeader::read(&mut r)?;
 
         if xmih.num_samples == 0 {
+            if xmih_len > data.len() {
+                return Err(ImportError::OutOfRange(
+                    "XmInstrument.instrument_header_len overshoots input",
+                ));
+            }
             let data = &data[xmih_len..];
             let xmi = XmInstrument {
                 instrument_header_len: 4 + XMINSTRUMENT_HEADER_SIZE as u32,
@@ -286,25 +393,27 @@ impl XmInstrument {
             return Ok((data, xmi));
         }
 
-        // samples header
-        let d2 = &data[4 + XMINSTRUMENT_HEADER_SIZE..];
-        let _sample_header_size: u32 =
-            bincode::serde::decode_from_slice::<u32, _>(d2, bincode::config::legacy())?.0;
-        let d2 = &d2[4..];
-        let xmid = Box::new(
-            bincode::serde::decode_from_slice::<XmInstrDefault, _>(d2, bincode::config::legacy())?
-                .0,
-        );
+        // sample_header_size (discarded — we use XMSAMPLE_HEADER_SIZE)
+        // and then XmInstrDefault.
+        let _sample_header_size: u32 = r.read_u32_le()?;
+        let xmid = Box::new(XmInstrDefault::read(&mut r)?);
 
-        // all samples headers, then data...
-
+        // After the (variable-length) instrument header, sample
+        // headers and bodies are positioned at the offset declared
+        // by `instrument_header_len`. The previous implementation
+        // honoured that even when we had read fewer bytes than the
+        // declared length.
+        if xmih_len > data.len() {
+            return Err(ImportError::OutOfRange(
+                "XmInstrument.instrument_header_len overshoots input",
+            ));
+        }
         let mut d3 = &data[xmih_len..];
         for _ in 0..xmih.num_samples {
             let (d, s) = XmSample::load(d3)?;
             sample.push(s);
             d3 = d;
         }
-
         for s in &mut sample {
             let d = s.add_sample(d3)?;
             d3 = d;
@@ -317,47 +426,33 @@ impl XmInstrument {
             instr: XmInstrumentType::Default(xmid),
             sample,
         };
-        let data = d3;
-        Ok((data, xmi))
+        Ok((d3, xmi))
     }
 
-    pub fn save(&mut self) -> Result<Vec<u8>, EncodeError> {
-        let mut i = self.instr.save()?;
+    pub fn save(&mut self) -> Vec<u8> {
+        let i = self.instr.save();
         let mut vs: Vec<u8> = vec![];
 
-        // all headers
+        // all sample headers, then all sample bodies
         for s in &mut self.sample {
-            let mut b = s.save()?;
-            vs.append(&mut b);
+            vs.append(&mut s.save());
         }
-
-        // then samples
         for s in &mut self.sample {
-            let mut b = s.save_sample()?;
-            vs.append(&mut b);
+            vs.append(&mut s.save_sample());
         }
 
         self.instrument_header_len = 4 + XMINSTRUMENT_HEADER_SIZE as u32 + 4 + i.len() as u32;
-        let mut instrument_header_len_v = bincode::serde::encode_to_vec::<u32, _>(
-            self.instrument_header_len,
-            bincode::config::legacy(),
-        )?;
 
         self.header.num_samples = self.sample.len() as u16;
-        let mut h = self.header.save()?;
 
-        let sample_header_size = XMSAMPLE_HEADER_SIZE as u32;
-
-        let mut sample_header_size_v =
-            bincode::serde::encode_to_vec::<u32, _>(sample_header_size, bincode::config::legacy())?;
-
-        let mut all: Vec<u8> = vec![];
-        all.append(&mut instrument_header_len_v);
-        all.append(&mut h);
-        all.append(&mut sample_header_size_v);
-        all.append(&mut i);
-        all.append(&mut vs);
-        Ok(all)
+        let mut all: Vec<u8> =
+            Vec::with_capacity(4 + XMINSTRUMENT_HEADER_SIZE + 4 + i.len() + vs.len());
+        write_u32_le(&mut all, self.instrument_header_len);
+        self.header.write(&mut all);
+        write_u32_le(&mut all, XMSAMPLE_HEADER_SIZE as u32);
+        all.extend_from_slice(&i);
+        all.extend_from_slice(&vs);
+        all
     }
 
     fn envelope_from_slice(src: &[u8]) -> Option<Envelope> {

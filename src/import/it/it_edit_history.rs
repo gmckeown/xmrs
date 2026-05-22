@@ -1,15 +1,19 @@
+//! IT edit history block.
+//!
+//! Each entry is 8 bytes: `fat_date:u16 fat_time:u16 run_time:u32`.
+
 use core::time::Duration;
 
 use alloc::format;
 use alloc::vec;
 use alloc::vec::Vec;
-use bincode::error::DecodeError;
-use bincode::Decode;
 use core::fmt;
-use serde::Deserialize;
 
-#[derive(Deserialize, Default, Decode)]
-#[repr(C)]
+use crate::import::bin_reader::{BinReader, ImportError};
+
+const IT_EDIT_HISTORY_ENTRY_SIZE: usize = 8;
+
+#[derive(Default)]
 pub struct ItEditHistoryEntry {
     // 2 bytes (Microsoft FAT date format)
     fat_date: u16,
@@ -39,6 +43,17 @@ impl fmt::Debug for ItEditHistoryEntry {
 }
 
 impl ItEditHistoryEntry {
+    fn read(r: &mut BinReader) -> Result<Self, ImportError> {
+        let fat_date = r.read_u16_le()?;
+        let fat_time = r.read_u16_le()?;
+        let run_time = r.read_u32_le()?;
+        Ok(Self {
+            fat_date,
+            fat_time,
+            run_time,
+        })
+    }
+
     /// Return (year, month, day)
     pub fn date(&self) -> (u16, u8, u8) {
         let year = (self.fat_date >> 9) + 1980;
@@ -72,42 +87,29 @@ impl ItEditHistoryEntry {
     }
 }
 
-#[derive(Deserialize, Debug, Default)]
-#[repr(C)]
+#[derive(Debug, Default)]
 pub struct ItEditHistory;
 
 impl ItEditHistory {
-    pub fn load(source: &[u8]) -> Result<(Option<Vec<ItEditHistoryEntry>>, usize), DecodeError> {
-        let data = source;
-
-        if data.len() < 2 {
-            return Err(DecodeError::LimitExceeded);
+    pub fn load(source: &[u8]) -> Result<(Option<Vec<ItEditHistoryEntry>>, usize), ImportError> {
+        if source.len() < 2 {
+            return Err(ImportError::UnexpectedEof);
         }
 
-        let edit_history_number: u16 = u16::from_le_bytes(data[0..2].try_into().unwrap());
+        let edit_history_number = u16::from_le_bytes(source[0..2].try_into().unwrap()) as usize;
         if edit_history_number == 0 {
             return Ok((None, 2));
         }
 
-        let struct_size = core::mem::size_of::<ItEditHistoryEntry>();
-        let total_size = struct_size * edit_history_number as usize;
-        let data = &data[2..2 + total_size];
-
-        if data.len() < total_size {
-            return Err(DecodeError::LimitExceeded);
+        let total_size = IT_EDIT_HISTORY_ENTRY_SIZE * edit_history_number;
+        if source.len() < 2 + total_size {
+            return Err(ImportError::UnexpectedEof);
         }
 
+        let mut r = BinReader::new(&source[2..2 + total_size]);
         let mut edit_histories: Vec<ItEditHistoryEntry> = vec![];
-        for i in 0..edit_history_number {
-            let start = struct_size * i as usize;
-            let end = start + struct_size;
-            let src = &data[start..end];
-            let edit_history_entry: (ItEditHistoryEntry, usize) =
-                bincode::decode_from_slice::<ItEditHistoryEntry, _>(
-                    src,
-                    bincode::config::legacy(),
-                )?;
-            edit_histories.push(edit_history_entry.0);
+        for _ in 0..edit_history_number {
+            edit_histories.push(ItEditHistoryEntry::read(&mut r)?);
         }
 
         Ok((Some(edit_histories), 2 + total_size))

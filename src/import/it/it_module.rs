@@ -1,11 +1,10 @@
 use crate::codepage::Codepage;
 use crate::fixed::units::{ChannelVolume, Panning, Volume};
+use crate::import::bin_reader::{BinReader, ImportError};
 use crate::import::import_memory::{ImportMemory, MemoryType};
 use crate::import::orders_helper;
 use crate::import::patternslot::PatternSlot;
 use crate::prelude::*;
-
-use bincode::error::DecodeError;
 
 use alloc::format;
 use alloc::string::String;
@@ -15,14 +14,13 @@ use alloc::vec::Vec;
 use super::it_edit_history::{ItEditHistory, ItEditHistoryEntry};
 use super::it_header::ItHeader;
 use super::it_instrument::ItInstrument;
-use super::it_midi_macros::ItMidiMacros;
+use super::it_midi_macros::{ItMidiMacros, IT_MIDI_MACROS_SIZE};
 use super::it_pattern::ItPattern;
 use super::it_plugins::Plugins;
 use super::it_sample_header::ItSampleHeader;
 use super::it_x_names::ItXNames;
 
 #[derive(Debug)]
-#[repr(C)]
 pub struct ItModule {
     header: ItHeader,
     orders: Vec<u8>,
@@ -39,16 +37,13 @@ pub struct ItModule {
 }
 
 impl ItModule {
-    pub fn load(ser_it_module: &[u8]) -> Result<Self, DecodeError> {
+    pub fn load(ser_it_module: &[u8]) -> Result<Self, ImportError> {
         let data = ser_it_module;
 
         // === ItHeader =====================================================
 
         if data.len() < ItHeader::get_size() {
-            return Err(DecodeError::ArrayLengthMismatch {
-                required: ItHeader::get_size(),
-                found: data.len(),
-            });
+            return Err(ImportError::UnexpectedEof);
         }
 
         let header = ItHeader::load(data)?;
@@ -57,10 +52,7 @@ impl ItModule {
         // === Orders =======================================================
 
         if data.len() < header.0.order_number as usize {
-            return Err(DecodeError::ArrayLengthMismatch {
-                required: header.0.order_number as usize,
-                found: data.len(),
-            });
+            return Err(ImportError::UnexpectedEof);
         }
 
         let orders = &data[..header.0.order_number as usize];
@@ -69,10 +61,7 @@ impl ItModule {
         // === Instruments Offsets ==========================================
 
         if data.len() < 4 * header.0.instrument_number as usize {
-            return Err(DecodeError::ArrayLengthMismatch {
-                required: 4 * header.0.instrument_number as usize,
-                found: data.len(),
-            });
+            return Err(ImportError::UnexpectedEof);
         }
 
         let instrument_offsets_u8 = &data[..4 * header.0.instrument_number as usize];
@@ -85,10 +74,7 @@ impl ItModule {
         // === Samples Header Offsets =======================================
 
         if data.len() < 4 * header.0.sample_number as usize {
-            return Err(DecodeError::ArrayLengthMismatch {
-                required: 4 * header.0.sample_number as usize,
-                found: data.len(),
-            });
+            return Err(ImportError::UnexpectedEof);
         }
 
         let sample_header_offsets_u8 = &data[..4 * header.0.sample_number as usize];
@@ -101,10 +87,7 @@ impl ItModule {
         // === Patterns Offsets ==========================================
 
         if data.len() < 4 * header.0.pattern_number as usize {
-            return Err(DecodeError::ArrayLengthMismatch {
-                required: 4 * header.0.pattern_number as usize,
-                found: data.len(),
-            });
+            return Err(ImportError::UnexpectedEof);
         }
 
         let pattern_offsets_u8 = &data[..4 * header.0.pattern_number as usize];
@@ -128,12 +111,10 @@ impl ItModule {
 
         let midi_macros = if header.0.is_embedded_midi_macro() || header.0.is_embedded_midi_macros()
         {
-            let r = bincode::serde::decode_from_slice::<ItMidiMacros, _>(
-                data,
-                bincode::config::legacy(),
-            )?;
-            data = &data[r.1..];
-            Some(r.0)
+            let mut r = BinReader::new(data);
+            let macros = ItMidiMacros::read(&mut r)?;
+            data = &data[IT_MIDI_MACROS_SIZE..];
+            Some(macros)
         } else {
             None
         };
@@ -197,10 +178,7 @@ impl ItModule {
                 if end <= ser_it_module.len() {
                     Some((start, header.0.message_length as usize))
                 } else {
-                    return Err(DecodeError::ArrayLengthMismatch {
-                        required: header.0.message_length as usize,
-                        found: ser_it_module[start..].len(),
-                    });
+                    return Err(ImportError::OutOfRange("IT song message overshoots input"));
                 }
             } else {
                 None
@@ -215,7 +193,7 @@ impl ItModule {
             let i_seek = instrument_offsets[i as usize] as usize;
 
             if ser_it_module.len() < i_seek {
-                return Err(DecodeError::LimitExceeded);
+                return Err(ImportError::UnexpectedEof);
             }
 
             let data = &ser_it_module[i_seek..];
@@ -233,15 +211,13 @@ impl ItModule {
             let i_seek = sample_header_offsets[i as usize] as usize;
 
             if ser_it_module.len() < i_seek {
-                return Err(DecodeError::LimitExceeded);
+                return Err(ImportError::OutOfRange(
+                    "IT sample header offset out of range",
+                ));
             }
 
-            let data = &ser_it_module[i_seek..];
-            let sample_h = bincode::serde::decode_from_slice::<ItSampleHeader, _>(
-                data,
-                bincode::config::legacy(),
-            )?;
-            samples_header.push(sample_h.0);
+            let mut r = BinReader::new(&ser_it_module[i_seek..]);
+            samples_header.push(ItSampleHeader::read(&mut r)?);
         }
 
         // === Patterns =====================================================
@@ -249,7 +225,7 @@ impl ItModule {
         let mut patterns: Vec<Vec<Vec<PatternSlot>>> = vec![];
         for pattern_seek in &pattern_offsets {
             if ser_it_module.len() < *pattern_seek as usize {
-                return Err(DecodeError::LimitExceeded);
+                return Err(ImportError::UnexpectedEof);
             }
 
             if *pattern_seek != 0 {
@@ -270,7 +246,7 @@ impl ItModule {
                 let start = sh.sample_pointer as usize;
 
                 if ser_it_module.len() < start {
-                    return Err(DecodeError::LimitExceeded);
+                    return Err(ImportError::UnexpectedEof);
                 }
 
                 let sample = sh.get_sample_data(&ser_it_module[start..])?;
@@ -313,7 +289,7 @@ impl ItModule {
         // (20-byte slots from `CNAM`), plus the optional song
         // message — and picks the single codepage that best
         // fits the aggregate. Constants below come from the
-        // bincode layout of `ItHeader`,
+        // on-disk layout of `ItHeader`,
         // `ItInstrumentHeaderPre2` / `ItInstrumentHeaderPost2`
         // (which agree on the offsets used here), and
         // `ItSampleHeader`.

@@ -1,9 +1,8 @@
 use alloc::vec;
 use alloc::vec::Vec;
-use bincode::error::DecodeError;
-use serde::Deserialize;
 
 use crate::cell_note::CellNote;
+use crate::import::bin_reader::ImportError;
 use crate::import::patternslot::PatternSlot;
 
 /// Sentinel placed in `PatternSlot::volume` for cells whose IT
@@ -19,8 +18,7 @@ pub(crate) const NO_VOL_COL: u8 = 0xFF;
 
 /// Structure representing a pattern in a musical tracker format.
 /// Note: The entire `Pattern` struct is limited to a maximum size of 0xFFFF (64 kilobytes).
-#[derive(Deserialize, Debug, Default)]
-#[repr(C)]
+#[derive(Debug, Default)]
 pub struct ItPattern {
     /// Length of the packed data in bytes.
     /// Length: 2 bytes
@@ -42,11 +40,11 @@ pub struct ItPattern {
 }
 
 impl ItPattern {
-    pub fn load(source: &[u8]) -> Result<Self, DecodeError> {
+    pub fn load(source: &[u8]) -> Result<Self, ImportError> {
         let mut data = source;
 
         if data.len() < 8 {
-            return Err(DecodeError::LimitExceeded);
+            return Err(ImportError::UnexpectedEof);
         }
 
         let pattern_length: u16 = u16::from_le_bytes(data[0..2].try_into().unwrap());
@@ -56,7 +54,7 @@ impl ItPattern {
         data = &data[8..];
 
         if data.len() < pattern_length as usize {
-            return Err(DecodeError::LimitExceeded);
+            return Err(ImportError::UnexpectedEof);
         }
 
         if pattern_length == 0 {
@@ -76,7 +74,7 @@ impl ItPattern {
         })
     }
 
-    pub fn unpack(&self) -> Result<Vec<Vec<PatternSlot>>, DecodeError> {
+    pub fn unpack(&self) -> Result<Vec<Vec<PatternSlot>>, ImportError> {
         if self.row_count <= 0 {
             return Ok(vec![]);
         }
@@ -117,7 +115,7 @@ impl ItPattern {
                 let ch = channel as usize;
 
                 let mask_variable = if channel_mask & 0x80 != 0 {
-                    let var = *data_iter.next().ok_or(DecodeError::LimitExceeded)?;
+                    let var = *data_iter.next().ok_or(ImportError::UnexpectedEof)?;
                     last_mask_vars[ch] = var;
                     var
                 } else {
@@ -132,7 +130,7 @@ impl ItPattern {
                     // bytes that schism treats as NOTE_FADE
                     // (`fmt/it.c:284`). No need for a manual
                     // try_into-then-map step.
-                    let n = *data_iter.next().ok_or(DecodeError::LimitExceeded)?;
+                    let n = *data_iter.next().ok_or(ImportError::UnexpectedEof)?;
                     let note = CellNote::from_byte(n);
                     slot.note = note;
                     last_note[ch] = note;
@@ -141,7 +139,7 @@ impl ItPattern {
                 }
 
                 if mask_variable & 0x02 != 0 {
-                    let instr = *data_iter.next().ok_or(DecodeError::LimitExceeded)?;
+                    let instr = *data_iter.next().ok_or(ImportError::UnexpectedEof)?;
                     let instr_idx = if instr != 0 {
                         Some(instr as usize - 1)
                     } else {
@@ -154,7 +152,7 @@ impl ItPattern {
                 }
 
                 if mask_variable & 0x04 != 0 {
-                    let vol = *data_iter.next().ok_or(DecodeError::LimitExceeded)?;
+                    let vol = *data_iter.next().ok_or(ImportError::UnexpectedEof)?;
                     slot.volume = vol;
                     last_volume[ch] = vol;
                 } else if mask_variable & 0x40 != 0 {
@@ -162,8 +160,8 @@ impl ItPattern {
                 }
 
                 if mask_variable & 0x08 != 0 {
-                    let et = *data_iter.next().ok_or(DecodeError::LimitExceeded)?;
-                    let ep = *data_iter.next().ok_or(DecodeError::LimitExceeded)?;
+                    let et = *data_iter.next().ok_or(ImportError::UnexpectedEof)?;
+                    let ep = *data_iter.next().ok_or(ImportError::UnexpectedEof)?;
                     slot.effect_type = et;
                     slot.effect_parameter = ep;
                     last_effect_type[ch] = et;

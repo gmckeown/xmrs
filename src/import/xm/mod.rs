@@ -15,8 +15,6 @@ pub mod mod_xm_effect;
 
 #[cfg(feature = "import_xm")]
 mod helper;
-#[cfg(feature = "import_xm")]
-mod serde_helper;
 
 #[cfg(feature = "import_xm")]
 pub mod patternslot;

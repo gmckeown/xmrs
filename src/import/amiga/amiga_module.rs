@@ -1,6 +1,6 @@
 use super::amiga_sample::AmigaSample;
 use super::patternslot::PatternSlot;
-use bincode::error::DecodeError;
+use crate::import::bin_reader::ImportError;
 
 use crate::codepage::Codepage;
 use crate::fixed::units::Volume;
@@ -138,7 +138,7 @@ impl AmigaModule {
     /// Neither variant has a magic signature, so the verdict comes
     /// from header field ranges plus a file-size equation —
     /// each on its own is weak, but the conjunction is decisive.
-    fn detect_variant(data: &[u8]) -> Result<AmigaVariant, DecodeError> {
+    fn detect_variant(data: &[u8]) -> Result<AmigaVariant, ImportError> {
         // Try the high-confidence path first: the bytes at 0x438
         // must spell a recognised tag AND the rest of the structure
         // must validate against that variant. If both hold we
@@ -157,7 +157,7 @@ impl AmigaModule {
         if Self::validate_structure(data, AmigaVariant::Fifteen).is_ok() {
             return Ok(AmigaVariant::Fifteen);
         }
-        Err(DecodeError::Other("Not an Amiga MOD module"))
+        Err(ImportError::Other("Not an Amiga MOD module"))
     }
 
     /// Cheap range / size sanity checks for one variant. Each
@@ -166,44 +166,50 @@ impl AmigaModule {
     /// cumulatively rejects a uniform-random binary blob with
     /// overwhelming probability — across 15 sample slots
     /// `volume ≤ 64` × `finetune ≤ 15` is on the order of 1e-27.
-    fn validate_structure(data: &[u8], variant: AmigaVariant) -> Result<(), DecodeError> {
+    fn validate_structure(data: &[u8], variant: AmigaVariant) -> Result<(), ImportError> {
         let (num_samples, num_tracks, header_size) = match variant {
             AmigaVariant::Fifteen => (15usize, 4u8, MOD_15_HEADER_SIZE),
             AmigaVariant::ThirtyOne { num_tracks } => (31, num_tracks, MOD_31_HEADER_SIZE),
         };
 
         if data.len() < header_size {
-            return Err(DecodeError::Other("File too short for MOD header"));
+            return Err(ImportError::Other("File too short for MOD header"));
         }
 
         // Title bytes 0..20 must be printable ASCII or NUL —
         // pre-rejects nearly all random binary.
         if !is_clean_text(&data[..20]) {
-            return Err(DecodeError::Other("MOD title is not ASCII"));
+            return Err(ImportError::Other("MOD title is not ASCII"));
         }
 
-        let mut total_sample_bytes: u64 = 0;
+        // u32 is comfortably enough for every quantity below.
+        // Worst-case Amiga MOD: 31 samples × `2 × u16::MAX` bytes ≈
+        // 4 MB of sample data; 128 patterns × 32 ch × 64 rows × 4 B
+        // ≈ 1 MB of pattern data. Well below `u32::MAX = 4 GB`.
+        // `saturating_*` defends against the unlikely fuzzed input
+        // where `length_div2 = u16::MAX` on every slot anyway.
+        let mut total_sample_bytes: u32 = 0;
         for i in 0..num_samples {
             let off = 20 + i * AMIGA_SAMPLE_RECORD_SIZE;
             if !is_clean_text(&data[off..off + 22]) {
-                return Err(DecodeError::Other("MOD sample name is not ASCII"));
+                return Err(ImportError::Other("MOD sample name is not ASCII"));
             }
             let length_div2 = u16::from_be_bytes([data[off + 22], data[off + 23]]);
             let finetune = data[off + 24];
             let volume = data[off + 25];
             if finetune > 0x0F {
-                return Err(DecodeError::Other("MOD sample finetune > 15"));
+                return Err(ImportError::Other("MOD sample finetune > 15"));
             }
             if volume > 0x40 {
-                return Err(DecodeError::Other("MOD sample volume > 64"));
+                return Err(ImportError::Other("MOD sample volume > 64"));
             }
-            total_sample_bytes = total_sample_bytes.saturating_add(2 * length_div2 as u64);
+            total_sample_bytes = total_sample_bytes.saturating_add(2 * length_div2 as u32);
         }
 
         let song_length_off = 20 + num_samples * AMIGA_SAMPLE_RECORD_SIZE;
         let song_length = data[song_length_off];
         if song_length == 0 || song_length > 128 {
-            return Err(DecodeError::Other("MOD song_length out of range"));
+            return Err(ImportError::Other("MOD song_length out of range"));
         }
 
         let positions_off = song_length_off + 2;
@@ -213,27 +219,27 @@ impl AmigaModule {
         // historical tracker but liable to be garbage in fuzz input.
         let max_pos = *positions[..song_length as usize].iter().max().unwrap_or(&0);
         if max_pos >= 128 {
-            return Err(DecodeError::Other("MOD position byte out of range"));
+            return Err(ImportError::Other("MOD position byte out of range"));
         }
 
         // The decisive check: every byte the loader would read must
         // actually be present in the file. Headers + patterns +
         // sample data, summed exactly the way the rest of `load`
         // walks them. Random blobs almost never satisfy this.
-        let pattern_size =
-            num_tracks as u64 * AMIGA_ROWS_PER_PATTERN as u64 * AMIGA_SLOT_SIZE as u64;
-        let num_patterns = max_pos as u64 + 1;
-        let expected = (header_size as u64)
+        let pattern_size: u32 =
+            num_tracks as u32 * AMIGA_ROWS_PER_PATTERN as u32 * AMIGA_SLOT_SIZE as u32;
+        let num_patterns: u32 = max_pos as u32 + 1;
+        let expected: u32 = (header_size as u32)
             .saturating_add(pattern_size.saturating_mul(num_patterns))
             .saturating_add(total_sample_bytes);
-        if expected > data.len() as u64 {
-            return Err(DecodeError::Other("MOD file shorter than declared content"));
+        if expected as usize > data.len() {
+            return Err(ImportError::Other("MOD file shorter than declared content"));
         }
 
         Ok(())
     }
 
-    pub fn load(ser_amiga_module: &[u8]) -> Result<AmigaModule, DecodeError> {
+    pub fn load(ser_amiga_module: &[u8]) -> Result<AmigaModule, ImportError> {
         // Refuse non-MOD garbage up-front. Without this the loader
         // would happily decode any sufficiently-long binary as a
         // 15-sample MOD because that branch has no signature to
@@ -296,8 +302,8 @@ impl AmigaModule {
 
         let mut data = &ser_amiga_module[0x14..];
 
-        // samples struct. AmigaSample::load runs the bincode helper
-        // which fills `sample.name` via the legacy lossy decode; we
+        // samples struct. AmigaSample::load fills `sample.name`
+        // via a UTF-8-lossy decode (the initial parse path); we
         // overwrite it immediately afterwards with a codepage-aware
         // decode of the same byte range so CP437 art and Latin-1
         // accents both survive intact.
@@ -325,7 +331,7 @@ impl AmigaModule {
         // patterns
         let number_of_tracks = match amiga.get_number_of_tracks() {
             Some(n) => n as usize,
-            None => 4, // default is 4...return Result::Err(DecodeError::Other("Not an amiga module?")),
+            None => 4, // default is 4...return Result::Err(ImportError::Other("Not an amiga module?")),
         };
 
         let number_of_patterns = amiga.get_number_of_patterns();

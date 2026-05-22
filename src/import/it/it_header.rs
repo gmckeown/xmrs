@@ -1,22 +1,45 @@
-use alloc::string::String;
-use alloc::string::ToString;
-use bincode::error::DecodeError;
-use serde::Deserialize;
-use serde_big_array::BigArray;
+//! IT file header (192 bytes on disk).
+//!
+//! ```text
+//! [u8;4]   id ("IMPM")
+//! [u8;26]  song_name
+//! u8       rows_per_beat
+//! u8       rows_per_measure
+//! u16      order_number
+//! u16      instrument_number
+//! u16      sample_number
+//! u16      pattern_number
+//! u16      created_with_tracker
+//! u16      compatible_with_tracker
+//! u16      flags
+//! u16      special_flags
+//! u8       global_volume
+//! u8       mix_volume
+//! u8       initial_speed
+//! u8       initial_bpm
+//! u8       pan_separation
+//! u8       pitch_wheel_depth
+//! u16      message_length
+//! u32      message_offset
+//! [u8;4]   reserved ("OMPT" for OpenMPT files)
+//! [u8;64]  initial_channel_pan
+//! [u8;64]  initial_channel_volume
+//! ```
 
-use super::serde_helper::deserialize_string_26;
-use super::serde_helper::deserialize_string_4;
+use alloc::string::String;
+
+use crate::import::bin_reader::{bytes_to_trimmed_string, BinReader, ImportError};
+
+/// On-disk size of [`ItHeader`].
+pub const IT_HEADER_SIZE: usize = 192;
 
 /// IT file header.
-#[derive(Deserialize, Debug)]
-#[repr(C)]
+#[derive(Debug)]
 pub struct ItHeader {
     /// Identifier ("IMPM").
-    #[serde(deserialize_with = "deserialize_string_4")]
     id: String,
 
     /// Song name
-    #[serde(deserialize_with = "deserialize_string_26")]
     pub song_name: String,
 
     /// Pattern information: Represents the number of rows per beat.
@@ -88,39 +111,77 @@ pub struct ItHeader {
     pub message_offset: u32,
 
     /// Reserved field ("OMPT" for interpreted Mod Plug files).
-    #[serde(deserialize_with = "deserialize_string_4")]
     pub reserved: String,
 
     /// Initial pan of the channels
     /// Each byte is a pan value (examples: 0 is left pan, 32 is center pan and 64 is right pan).
-    #[serde(with = "BigArray")]
     pub initial_channel_pan: [u8; 64],
 
     /// Initial volume of the channels
     /// Each byte is a channel volume (0-64).
-    #[serde(with = "BigArray")]
     pub initial_channel_volume: [u8; 64],
 }
 
 impl ItHeader {
-    pub fn load(data: &[u8]) -> Result<(Self, usize), DecodeError> {
-        let header_de =
-            bincode::serde::decode_from_slice::<ItHeader, _>(data, bincode::config::legacy());
+    pub fn load(data: &[u8]) -> Result<(Self, usize), ImportError> {
+        let mut r = BinReader::new(data);
+        let id_bytes: [u8; 4] = r.read_array()?;
+        let song_name_bytes: [u8; 26] = r.read_array()?;
+        let rows_per_beat = r.read_u8()?;
+        let rows_per_measure = r.read_u8()?;
+        let order_number = r.read_u16_le()?;
+        let instrument_number = r.read_u16_le()?;
+        let sample_number = r.read_u16_le()?;
+        let pattern_number = r.read_u16_le()?;
+        let created_with_tracker = r.read_u16_le()?;
+        let compatible_with_tracker = r.read_u16_le()?;
+        let flags = r.read_u16_le()?;
+        let special_flags = r.read_u16_le()?;
+        let global_volume = r.read_u8()?;
+        let mix_volume = r.read_u8()?;
+        let initial_speed = r.read_u8()?;
+        let initial_bpm = r.read_u8()?;
+        let pan_separation = r.read_u8()?;
+        let pitch_wheel_depth = r.read_u8()?;
+        let message_length = r.read_u16_le()?;
+        let message_offset = r.read_u32_le()?;
+        let reserved_bytes: [u8; 4] = r.read_array()?;
+        let initial_channel_pan: [u8; 64] = r.read_array()?;
+        let initial_channel_volume: [u8; 64] = r.read_array()?;
 
-        match header_de {
-            Ok(header_de_ok) => {
-                if header_de_ok.0.is_it_header() {
-                    Ok(header_de_ok)
-                } else {
-                    Err(DecodeError::OtherString("Not an IT Module?".to_string()))
-                }
-            }
-            Err(e) => Err(e),
+        let header = ItHeader {
+            id: bytes_to_trimmed_string(&id_bytes),
+            song_name: bytes_to_trimmed_string(&song_name_bytes),
+            rows_per_beat,
+            rows_per_measure,
+            order_number,
+            instrument_number,
+            sample_number,
+            pattern_number,
+            created_with_tracker,
+            compatible_with_tracker,
+            flags,
+            special_flags,
+            global_volume,
+            mix_volume,
+            initial_speed,
+            initial_bpm,
+            pan_separation,
+            pitch_wheel_depth,
+            message_length,
+            message_offset,
+            reserved: bytes_to_trimmed_string(&reserved_bytes),
+            initial_channel_pan,
+            initial_channel_volume,
+        };
+        if !header.is_it_header() {
+            return Err(ImportError::InvalidMagic("Not an IT Module?"));
         }
+        Ok((header, IT_HEADER_SIZE))
     }
 
     pub fn get_size() -> usize {
-        core::mem::size_of::<ItHeader>()
+        IT_HEADER_SIZE
     }
 
     pub fn is_it_header(&self) -> bool {

@@ -1,12 +1,12 @@
-//! Property-based tests for the phase-4 Edit API.
+//! Property-based tests for the Edit API.
 //!
-//! Per `xmrs-daw-evolution-plan.md` §8.10, the central Phase-4
-//! invariants are:
+//! Two central invariants are checked across a large random
+//! command sequence:
 //!
 //! 1. `apply(cmd)` followed by `undo(receipt)` is identity on the
-//!    Module (`apply_then_undo_is_identity_on_all_commands`).
+//!    Module (`apply_then_undo_is_identity`).
 //! 2. `verify_layers_consistent()` returns `Ok` at every point in
-//!    a 10000+ command random sequence.
+//!    the sequence (`verify_layers_consistent_after_each_command`).
 //!
 //! We don't aim for an oracle of correctness on the *content*
 //! produced by random sequences — just that the Module stays well-
@@ -231,15 +231,15 @@ fn arb_edit_command() -> impl Strategy<Value = EditCommand> {
 
 proptest! {
     #![proptest_config(ProptestConfig {
-        // §8.10 mandates ≥ 10000 generated commands. Each test case
-        // is a vec of up to 64 commands; 256 cases × ~32 average
-        // length comfortably exceeds the threshold.
+        // Target ≥ 10 000 generated commands total. Each test
+        // case is a vec of up to 64 commands; 256 cases × ~32
+        // average length comfortably exceeds that threshold.
         cases: 256,
         ..ProptestConfig::default()
     })]
 
-    /// Per §8.10: apply(cmd) followed by undo(receipt) is identity.
-    /// We check this on every command that successfully applies.
+    /// `apply(cmd)` followed by `undo(receipt)` is identity on the
+    /// Module. Checked on every command that successfully applies.
     #[test]
     fn apply_then_undo_is_identity(commands in proptest::collection::vec(arb_edit_command(), 1..32)) {
         let mut module = starter_module();
@@ -283,8 +283,8 @@ proptest! {
         }
     }
 
-    /// Per §8.10: after every successful command, `verify_layers_consistent`
-    /// must hold.
+    /// After every command (success or error), the Module's
+    /// `verify_layers_consistent` invariant must still hold.
     #[test]
     fn verify_layers_consistent_after_each_command(
         commands in proptest::collection::vec(arb_edit_command(), 1..64)

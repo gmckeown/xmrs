@@ -1,12 +1,9 @@
 use core::cmp::PartialEq;
 use core::fmt::*;
-use num_enum::{IntoPrimitive, TryFromPrimitive};
 use serde::{Deserialize, Serialize};
 
 /// 10 octaves with notes
-#[derive(
-    Serialize, Deserialize, TryFromPrimitive, IntoPrimitive, Copy, Clone, Eq, Hash, PartialEq,
-)]
+#[derive(Serialize, Deserialize, Copy, Clone, Eq, Hash, PartialEq)]
 #[repr(u8)]
 pub enum Pitch {
     /// Octave 0
@@ -285,5 +282,164 @@ impl Pitch {
     #[inline(always)]
     pub fn value(&self) -> u8 {
         *self as u8
+    }
+}
+
+impl From<Pitch> for u8 {
+    #[inline]
+    fn from(p: Pitch) -> u8 {
+        p as u8
+    }
+}
+
+/// Reverse table: `ALL_PITCHES[b as usize] == try_from(b)`.
+/// `#[repr(u8)]` guarantees consecutive discriminants 0..=119, so
+/// indexing this table is the safe equivalent of an `unsafe`
+/// transmute. Lets `TryFrom<u8>` stay forbid-unsafe-clean while
+/// running at O(1).
+const ALL_PITCHES: [Pitch; 120] = [
+    Pitch::C0,
+    Pitch::Cs0,
+    Pitch::D0,
+    Pitch::Ds0,
+    Pitch::E0,
+    Pitch::F0,
+    Pitch::Fs0,
+    Pitch::G0,
+    Pitch::Gs0,
+    Pitch::A0,
+    Pitch::As0,
+    Pitch::B0,
+    Pitch::C1,
+    Pitch::Cs1,
+    Pitch::D1,
+    Pitch::Ds1,
+    Pitch::E1,
+    Pitch::F1,
+    Pitch::Fs1,
+    Pitch::G1,
+    Pitch::Gs1,
+    Pitch::A1,
+    Pitch::As1,
+    Pitch::B1,
+    Pitch::C2,
+    Pitch::Cs2,
+    Pitch::D2,
+    Pitch::Ds2,
+    Pitch::E2,
+    Pitch::F2,
+    Pitch::Fs2,
+    Pitch::G2,
+    Pitch::Gs2,
+    Pitch::A2,
+    Pitch::As2,
+    Pitch::B2,
+    Pitch::C3,
+    Pitch::Cs3,
+    Pitch::D3,
+    Pitch::Ds3,
+    Pitch::E3,
+    Pitch::F3,
+    Pitch::Fs3,
+    Pitch::G3,
+    Pitch::Gs3,
+    Pitch::A3,
+    Pitch::As3,
+    Pitch::B3,
+    Pitch::C4,
+    Pitch::Cs4,
+    Pitch::D4,
+    Pitch::Ds4,
+    Pitch::E4,
+    Pitch::F4,
+    Pitch::Fs4,
+    Pitch::G4,
+    Pitch::Gs4,
+    Pitch::A4,
+    Pitch::As4,
+    Pitch::B4,
+    Pitch::C5,
+    Pitch::Cs5,
+    Pitch::D5,
+    Pitch::Ds5,
+    Pitch::E5,
+    Pitch::F5,
+    Pitch::Fs5,
+    Pitch::G5,
+    Pitch::Gs5,
+    Pitch::A5,
+    Pitch::As5,
+    Pitch::B5,
+    Pitch::C6,
+    Pitch::Cs6,
+    Pitch::D6,
+    Pitch::Ds6,
+    Pitch::E6,
+    Pitch::F6,
+    Pitch::Fs6,
+    Pitch::G6,
+    Pitch::Gs6,
+    Pitch::A6,
+    Pitch::As6,
+    Pitch::B6,
+    Pitch::C7,
+    Pitch::Cs7,
+    Pitch::D7,
+    Pitch::Ds7,
+    Pitch::E7,
+    Pitch::F7,
+    Pitch::Fs7,
+    Pitch::G7,
+    Pitch::Gs7,
+    Pitch::A7,
+    Pitch::As7,
+    Pitch::B7,
+    Pitch::C8,
+    Pitch::Cs8,
+    Pitch::D8,
+    Pitch::Ds8,
+    Pitch::E8,
+    Pitch::F8,
+    Pitch::Fs8,
+    Pitch::G8,
+    Pitch::Gs8,
+    Pitch::A8,
+    Pitch::As8,
+    Pitch::B8,
+    Pitch::C9,
+    Pitch::Cs9,
+    Pitch::D9,
+    Pitch::Ds9,
+    Pitch::E9,
+    Pitch::F9,
+    Pitch::Fs9,
+    Pitch::G9,
+    Pitch::Gs9,
+    Pitch::A9,
+    Pitch::As9,
+    Pitch::B9,
+];
+
+impl TryFrom<u8> for Pitch {
+    type Error = u8;
+    #[inline]
+    fn try_from(b: u8) -> core::result::Result<Self, u8> {
+        ALL_PITCHES.get(b as usize).copied().ok_or(b)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pitch_try_from_roundtrip() {
+        for b in 0u8..120 {
+            let p = Pitch::try_from(b).unwrap();
+            assert_eq!(p.value(), b);
+            assert_eq!(u8::from(p), b);
+        }
+        assert!(Pitch::try_from(120u8).is_err());
+        assert!(Pitch::try_from(255u8).is_err());
     }
 }

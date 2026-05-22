@@ -1,3 +1,4 @@
+use crate::import::bin_reader::write_u16_le;
 use crate::import::patternslot::PatternSlot;
 use alloc::{vec, vec::Vec};
 
@@ -9,10 +10,8 @@ impl XtTrack {
         let mut data: Vec<u8> = vec![];
         let version: u16 = 1;
         let nrow: u16 = track.len() as u16;
-        data.append(
-            &mut bincode::serde::encode_to_vec(version, bincode::config::legacy()).unwrap(),
-        );
-        data.append(&mut bincode::serde::encode_to_vec(nrow, bincode::config::legacy()).unwrap());
+        write_u16_le(&mut data, version);
+        write_u16_le(&mut data, nrow);
         for xmps in track {
             let mut d = xmps.save_xm_unpack();
             data.append(&mut d);

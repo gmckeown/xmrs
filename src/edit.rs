@@ -1705,8 +1705,7 @@ mod tests {
 
     fn clone_module(m: &Module) -> Module {
         // Module doesn't impl Clone (would require Instrument: Clone),
-        // so we use serde round-trip via bincode in std-only tests
-        // or a manual copy here for the fields we actually touch.
+        // so we hand-copy the fields the tests actually touch.
         let mut c = Module {
             name: m.name.clone(),
             default_bpm: m.default_bpm,

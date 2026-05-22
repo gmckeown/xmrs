@@ -178,7 +178,7 @@ Defaults: `["std", "import"]`.
 
 | Feature           | Purpose                                                             |
 | ----------------- | ------------------------------------------------------------------- |
-| `std`             | Build against `std`. Only forwards `std` to a few dependencies (`bincode`, `serde`, `num_enum`); the crate itself does not need `std` for arithmetic — see below. |
+| `std`             | Build against `std`. Only forwards `std` to `serde`; the crate itself does not need `std` for arithmetic — see below. |
 | `float-helpers`   | Add `f32 ↔ Q` conversions on every fixed-point and domain type in `crate::fixed`. Intended for the editor / desktop side (level-meters, plotting, GUI numeric fields). Self-contained, uses only `core`-stable `f32` operations — no math backend pulled in. Never enable it on the embedded target. |
 | `import`          | Umbrella: enables every `import_*` format importer.                 |
 | `import_mod`      | Amiga ProTracker MOD.                                               |
@@ -198,10 +198,11 @@ Q-format arithmetic — pitch / period / frequency tables, the LFO
 search via `linear_frequency_to_period`), envelopes, panning, filter,
 sample interpolation. No `libm`, no `micromath`, no `num-traits`.
 
-`bincode` is pulled in only by the importer features that need it —
-with no `import_*` enabled, it is not compiled. `serde-big-array` is
-core (the IT keyboard table is `[Option<_>; 120]`, beyond serde's
-native const-generic limit of `N ≤ 32`).
+Importer features parse fixed-layout tracker headers through a
+cursor-based helper ([`xmrs::import::bin_reader`]) — no third-party
+binary-parsing crate is involved. `serde` is the only direct
+runtime dependency (the IT keyboard's `[Option<_>; 120]` arrays
+ride on an inline `serde_with` shim — no `serde-big-array`).
 
 ```sh
 # Minimal build, no importers (pre-baked blobs only):
@@ -233,12 +234,16 @@ sound *in tune* against modern audio.
 ### Embedded / footprint-sensitive builds
 
 If you're targeting tight flash budgets, *don't* ship the importers.
-Parse modules on a host machine, serialize with
-[`bincode`](https://crates.io/crates/bincode) 2.x (`alloc` feature) —
-optionally compressed with
-[`flate2`](https://crates.io/crates/flate2) — and load the resulting
-blob on-device. You end up with a much smaller binary that still
-manipulates the full `Module` model.
+Parse modules on a host machine, serialise the resulting `Module`
+through any serde codec (`Module` derives `Serialize` /
+`Deserialize`), and load the resulting blob on-device.
+[`postcard`](https://crates.io/crates/postcard) is a good `no_std`
+default — it's `alloc`-only by default, varint-encoded, and produces
+compact output; pair it with
+[`flate2`](https://crates.io/crates/flate2) or
+[`miniz_oxide`](https://crates.io/crates/miniz_oxide) if you need
+further compression. You end up with a much smaller binary that
+still manipulates the full `Module` model.
 
 ## License
 

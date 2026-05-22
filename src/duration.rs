@@ -7,6 +7,14 @@
 //! row's start-bpm, which matches the contract of a duration
 //! *estimator* (the cycle-exact playback path lives in xmrsplayer).
 //!
+//! The accumulator is integer nanoseconds (`u64`): the per-row
+//! formula `seconds = speed × 2.5 / bpm` rewrites exactly as
+//! `nanos = speed × 2_500_000_000 / bpm`, with `speed ∈ 0..=255`
+//! (u8) and `bpm ∈ 1..=65535` (u16). The numerator peaks at
+//! `255 × 2.5e9 ≈ 6.4e11` — well inside `u64`, and the final
+//! total fits the same range for any realistically-long song.
+//! No floats anywhere on this path.
+//!
 //! # Example
 //!
 //! ```ignore
@@ -21,41 +29,6 @@
 use core::time::Duration;
 
 use crate::module::Module;
-
-#[cfg(not(feature = "std"))]
-mod no_std_math {
-    #[inline]
-    pub fn round_f64(x: f64) -> f64 {
-        if x >= 0.0 {
-            (x + 0.5) as i128 as f64
-        } else {
-            (x - 0.5) as i128 as f64
-        }
-    }
-
-    #[inline]
-    pub fn is_finite_f64(x: f64) -> bool {
-        if x != x {
-            return false;
-        }
-        x - x == 0.0
-    }
-}
-
-#[cfg(not(feature = "std"))]
-use no_std_math::{is_finite_f64, round_f64};
-
-#[cfg(feature = "std")]
-#[inline]
-fn round_f64(x: f64) -> f64 {
-    x.round()
-}
-
-#[cfg(feature = "std")]
-#[inline]
-fn is_finite_f64(x: f64) -> bool {
-    x.is_finite()
-}
 
 /// Extension trait adding duration estimates to [`Module`].
 ///
@@ -81,29 +54,26 @@ impl ModuleDuration for Module {
 /// entries in `module.timeline_map`.
 pub fn compute_duration(module: &Module, song: usize) -> Duration {
     let song_u16 = song.min(u16::MAX as usize) as u16;
-    let mut total_secs: f64 = 0.0;
+    let mut total_nanos: u64 = 0;
     for e in &module.timeline_map.entries {
         if e.song != song_u16 {
             continue;
         }
-        let bpm = e.bpm_at_row.max(1) as f64;
-        total_secs += e.speed_at_row as f64 * 2.5 / bpm;
+        let bpm = e.bpm_at_row.max(1) as u64;
+        // row_seconds = speed × 2.5 / bpm
+        //             = speed × 2_500_000_000 / bpm   (ns)
+        //
+        // With `speed: u8` and `bpm: u16 ≥ 1`, the numerator fits
+        // u64 by ~7 orders of magnitude. Round-to-nearest by adding
+        // `bpm / 2` before dividing — the accumulated error across
+        // a 100k-row song is bounded by 50 µs, far below the
+        // estimator's tolerance.
+        let scaled = (e.speed_at_row as u64) * 2_500_000_000;
+        let row_nanos = (scaled + bpm / 2) / bpm;
+        total_nanos = total_nanos.saturating_add(row_nanos);
     }
-    secs_to_duration(total_secs)
-}
-
-#[inline]
-fn secs_to_duration(secs: f64) -> Duration {
-    if !is_finite_f64(secs) || secs <= 0.0 {
-        return Duration::ZERO;
-    }
-    let nanos_total = round_f64(secs * 1_000_000_000.0);
-    if nanos_total >= (u64::MAX as f64) * 1_000_000_000.0 {
-        return Duration::new(u64::MAX, 999_999_999);
-    }
-    let nanos_total = nanos_total as u128;
-    let secs = (nanos_total / 1_000_000_000) as u64;
-    let nanos = (nanos_total % 1_000_000_000) as u32;
+    let secs = total_nanos / 1_000_000_000;
+    let nanos = (total_nanos % 1_000_000_000) as u32;
     Duration::new(secs, nanos)
 }
 
@@ -136,6 +106,18 @@ mod tests {
         m
     }
 
+    /// Integer-arithmetic equivalent of `seconds × 2.5 / bpm` →
+    /// `Duration`. Lets the tests express expected values without
+    /// reintroducing `Duration::from_secs_f64` (which would pull
+    /// floats back into the test path that the implementation just
+    /// purged).
+    fn expected_duration(rows: u64, speed: u64, bpm: u64) -> Duration {
+        let total_nanos = (rows * speed * 2_500_000_000 + bpm / 2) / bpm;
+        let secs = total_nanos / 1_000_000_000;
+        let nanos = (total_nanos % 1_000_000_000) as u32;
+        Duration::new(secs, nanos)
+    }
+
     fn close_to(d: Duration, expected: Duration) -> bool {
         let delta = d.abs_diff(expected);
         delta < Duration::from_millis(1)
@@ -157,7 +139,7 @@ mod tests {
     fn defaults_one_pattern_64_rows() {
         let pat: Pattern = (0..64).map(|_| empty_row(4)).collect();
         let m = build_module(pat, vec![0]);
-        let expected = Duration::from_secs_f64(64.0 * 6.0 * 2.5 / 125.0);
+        let expected = expected_duration(64, 6, 125);
         assert!(close_to(m.duration(0), expected), "got {:?}", m.duration(0));
     }
 
@@ -166,7 +148,7 @@ mod tests {
         let mut pat: Pattern = (0..64).map(|_| empty_row(4)).collect();
         pat[0] = row_with(4, vec![GlobalEffect::Speed(12)]);
         let m = build_module(pat, vec![0]);
-        let expected = Duration::from_secs_f64(64.0 * 12.0 * 2.5 / 125.0);
+        let expected = expected_duration(64, 12, 125);
         assert!(close_to(m.duration(0), expected));
     }
 
@@ -175,7 +157,7 @@ mod tests {
         let mut pat: Pattern = (0..64).map(|_| empty_row(4)).collect();
         pat[0] = row_with(4, vec![GlobalEffect::Bpm(250)]);
         let m = build_module(pat, vec![0]);
-        let expected = Duration::from_secs_f64(64.0 * 6.0 * 2.5 / 250.0);
+        let expected = expected_duration(64, 6, 250);
         assert!(close_to(m.duration(0), expected));
     }
 
@@ -184,7 +166,7 @@ mod tests {
         let mut pat: Pattern = (0..4).map(|_| empty_row(4)).collect();
         pat[3] = row_with(4, vec![GlobalEffect::PositionJump(0)]);
         let m = build_module(pat, vec![0]);
-        let expected = Duration::from_secs_f64(4.0 * 6.0 * 2.5 / 125.0);
+        let expected = expected_duration(4, 6, 125);
         assert!(close_to(m.duration(0), expected));
     }
 
@@ -195,7 +177,7 @@ mod tests {
         let pat1: Pattern = (0..64).map(|_| empty_row(4)).collect();
         let mut m = Module::default();
         build_timeline_layer(&mut m, &[vec![0, 1]], &[pat0, pat1]);
-        let expected = Duration::from_secs_f64((8 + 64) as f64 * 6.0 * 2.5 / 125.0);
+        let expected = expected_duration(8 + 64, 6, 125);
         assert!(close_to(m.duration(0), expected));
     }
 
@@ -210,7 +192,7 @@ mod tests {
             }],
         );
         let m = build_module(pat, vec![0]);
-        let expected = Duration::from_secs_f64(7.0 * 6.0 * 2.5 / 125.0);
+        let expected = expected_duration(7, 6, 125);
         assert!(close_to(m.duration(0), expected));
     }
 
@@ -220,7 +202,7 @@ mod tests {
         pat[0] = row_with(4, vec![GlobalEffect::PatternLoop(0)]);
         pat[3] = row_with(4, vec![GlobalEffect::PatternLoop(2)]);
         let m = build_module(pat, vec![0]);
-        let expected = Duration::from_secs_f64(12.0 * 6.0 * 2.5 / 125.0);
+        let expected = expected_duration(12, 6, 125);
         assert!(close_to(m.duration(0), expected));
     }
 
@@ -230,7 +212,7 @@ mod tests {
         pat[2] = row_with(4, vec![GlobalEffect::Speed(0)]);
         // Without the quirk: all 4 rows play.
         let m = build_module(pat.clone(), vec![0]);
-        let four_rows = Duration::from_secs_f64(4.0 * 6.0 * 2.5 / 125.0);
+        let four_rows = expected_duration(4, 6, 125);
         assert!(close_to(m.duration(0), four_rows));
 
         // With the quirk: stop after row 2.
@@ -239,7 +221,7 @@ mod tests {
             ..Default::default()
         };
         build_timeline_layer(&mut m, &[vec![0]], &[pat]);
-        let three_rows = Duration::from_secs_f64(3.0 * 6.0 * 2.5 / 125.0);
+        let three_rows = expected_duration(3, 6, 125);
         assert!(close_to(m.duration(0), three_rows));
     }
 }

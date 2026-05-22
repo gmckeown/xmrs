@@ -1,28 +1,18 @@
 use alloc::string::String;
-use alloc::string::ToString;
 use alloc::vec::Vec;
-use bincode::error::DecodeError;
-use serde::Deserialize;
-use serde_big_array::BigArray;
 
 use crate::fixed::fixed::Q15;
 use crate::fixed::units::{EnvValue, Panning, Volume};
+use crate::import::bin_reader::{bytes_to_trimmed_string, BinReader, ImportError};
 use crate::prelude::*;
 
-use super::serde_helper::deserialize_string_12;
-use super::serde_helper::deserialize_string_26;
-use super::serde_helper::deserialize_string_4;
-
-#[derive(Deserialize, Debug)]
-#[repr(C)]
+#[derive(Debug)]
 /// IT instrument header (pre-2.0).
 pub struct ItInstrumentHeaderPre2 {
     /// Identifier ("IMPI").
-    #[serde(deserialize_with = "deserialize_string_4")]
     pub id: String,
 
     /// DOS filename
-    #[serde(deserialize_with = "deserialize_string_12")]
     pub dos_filename: String,
 
     /// Reserved for future use.
@@ -74,7 +64,6 @@ pub struct ItInstrumentHeaderPre2 {
     pub reserved3: u8,
 
     /// Instrument Name
-    #[serde(deserialize_with = "deserialize_string_26")]
     pub instrument_name: String,
 
     /// Reserved for future use.
@@ -83,26 +72,89 @@ pub struct ItInstrumentHeaderPre2 {
     /// Note-to-sample mapping table
     /// - .0: Note.
     /// - .1: Sample.
-    #[serde(with = "BigArray")]
     pub note_sample_keyboard_table: [(u8, u8); 120],
 }
 
+/// On-disk size of [`ItInstrumentHeaderPre2`] (4+12+1+1+1+1+1+1+2+2+1+1+2+1+1+26+6+240).
+pub const IT_INSTR_HEADER_PRE2_SIZE: usize = 304;
+
 impl ItInstrumentHeaderPre2 {
+    pub fn read(r: &mut BinReader) -> Result<Self, ImportError> {
+        let id_bytes: [u8; 4] = r.read_array()?;
+        let dos_filename_bytes: [u8; 12] = r.read_array()?;
+        let reserved1 = r.read_u8()?;
+        let flags = r.read_u8()?;
+        let loop_start = r.read_u8()?;
+        let loop_end = r.read_u8()?;
+        let sustain_loop_start = r.read_u8()?;
+        let sustain_loop_end = r.read_u8()?;
+        let reserved2 = r.read_u16_le()?;
+        let fadeout = r.read_u16_le()?;
+        let nna = r.read_u8()?;
+        let dnc = r.read_u8()?;
+        let tracker_version = r.read_u16_le()?;
+        let number_of_samples = r.read_u8()?;
+        let reserved3 = r.read_u8()?;
+        let instrument_name_bytes: [u8; 26] = r.read_array()?;
+        let reserved4: [u8; 6] = r.read_array()?;
+        let mut note_sample_keyboard_table = [(0u8, 0u8); 120];
+        for entry in &mut note_sample_keyboard_table {
+            entry.0 = r.read_u8()?;
+            entry.1 = r.read_u8()?;
+        }
+        Ok(Self {
+            id: bytes_to_trimmed_string(&id_bytes),
+            dos_filename: bytes_to_trimmed_string(&dos_filename_bytes),
+            reserved1,
+            flags,
+            loop_start,
+            loop_end,
+            sustain_loop_start,
+            sustain_loop_end,
+            reserved2,
+            fadeout,
+            nna,
+            dnc,
+            tracker_version,
+            number_of_samples,
+            reserved3,
+            instrument_name: bytes_to_trimmed_string(&instrument_name_bytes),
+            reserved4,
+            note_sample_keyboard_table,
+        })
+    }
+
     pub fn is_it_instrument(&self) -> bool {
         self.id == "IMPI"
     }
 }
 
 // Volume only
-#[derive(Deserialize, Debug)]
-#[repr(C)]
+#[derive(Debug)]
 pub struct ItEnvelopePre2 {
     /// 0-64, 0xff=end of envelope
-    #[serde(with = "BigArray")]
     pub envelope: [u8; 200],
 
     /// .0 = tick, .1 = magnitude
     pub node_points: [(u8, u8); 25],
+}
+
+/// On-disk size of [`ItEnvelopePre2`]: 200 + 25 × 2.
+pub const IT_ENV_PRE2_SIZE: usize = 250;
+
+impl ItEnvelopePre2 {
+    pub fn read(r: &mut BinReader) -> Result<Self, ImportError> {
+        let envelope: [u8; 200] = r.read_array()?;
+        let mut node_points = [(0u8, 0u8); 25];
+        for entry in &mut node_points {
+            entry.0 = r.read_u8()?;
+            entry.1 = r.read_u8()?;
+        }
+        Ok(Self {
+            envelope,
+            node_points,
+        })
+    }
 }
 
 impl ItEnvelopePre2 {
@@ -179,15 +231,12 @@ impl ItEnvelopePre2 {
 
 // --------------------------------------------------------------------------
 
-#[derive(Deserialize, Debug)]
-#[repr(C)]
+#[derive(Debug)]
 pub struct ItInstrumentHeaderPost2 {
     /// Instrument identifier - must be "IMPI"
-    #[serde(deserialize_with = "deserialize_string_4")]
     pub id: String,
 
     /// DOS filename
-    #[serde(deserialize_with = "deserialize_string_12")]
     pub dos_filename: String,
 
     /// Reserved
@@ -244,7 +293,6 @@ pub struct ItInstrumentHeaderPost2 {
     pub reserved2: u8,
 
     /// Instrument name
-    #[serde(deserialize_with = "deserialize_string_26")]
     pub instrument_name: String,
 
     /// Initial filter cutoff frequency (0-127)
@@ -267,18 +315,74 @@ pub struct ItInstrumentHeaderPost2 {
     /// Note-sample-keyboard table (120 entries)
     /// .0: Note
     /// .1: Sample
-    #[serde(with = "BigArray")]
     pub note_sample_keyboard_table: [(u8, u8); 120],
 }
 
+/// On-disk size of [`ItInstrumentHeaderPost2`].
+pub const IT_INSTR_HEADER_POST2_SIZE: usize = 304;
+
 impl ItInstrumentHeaderPost2 {
+    pub fn read(r: &mut BinReader) -> Result<Self, ImportError> {
+        let id_bytes: [u8; 4] = r.read_array()?;
+        let dos_filename_bytes: [u8; 12] = r.read_array()?;
+        let reserved1 = r.read_u8()?;
+        let nna = r.read_u8()?;
+        let duplicate_check_type = r.read_u8()?;
+        let duplicate_check_action = r.read_u8()?;
+        let fadeout = r.read_u16_le()? as i16;
+        let pitch_pan_separation = r.read_i8()?;
+        let pitch_pan_center = r.read_u8()?;
+        let global_volume = r.read_u8()?;
+        let default_pan = r.read_u8()?;
+        let random_volume_variation = r.read_u8()?;
+        let random_pan_variation = r.read_u8()?;
+        let tracker_version = r.read_u16_le()?;
+        let num_samples = r.read_u8()?;
+        let reserved2 = r.read_u8()?;
+        let instrument_name_bytes: [u8; 26] = r.read_array()?;
+        let initial_filter_cutoff = r.read_u8()?;
+        let initial_filter_resonance = r.read_u8()?;
+        let midi_channel = r.read_u8()?;
+        let midi_program = r.read_u8()?;
+        let midi_bank = r.read_u16_le()?;
+        let mut note_sample_keyboard_table = [(0u8, 0u8); 120];
+        for entry in &mut note_sample_keyboard_table {
+            entry.0 = r.read_u8()?;
+            entry.1 = r.read_u8()?;
+        }
+        Ok(Self {
+            id: bytes_to_trimmed_string(&id_bytes),
+            dos_filename: bytes_to_trimmed_string(&dos_filename_bytes),
+            reserved1,
+            nna,
+            duplicate_check_type,
+            duplicate_check_action,
+            fadeout,
+            pitch_pan_separation,
+            pitch_pan_center,
+            global_volume,
+            default_pan,
+            random_volume_variation,
+            random_pan_variation,
+            tracker_version,
+            num_samples,
+            reserved2,
+            instrument_name: bytes_to_trimmed_string(&instrument_name_bytes),
+            initial_filter_cutoff,
+            initial_filter_resonance,
+            midi_channel,
+            midi_program,
+            midi_bank,
+            note_sample_keyboard_table,
+        })
+    }
+
     pub fn is_it_instrument(&self) -> bool {
         self.id == "IMPI"
     }
 }
 
-#[derive(Deserialize, Debug, Default)]
-#[repr(C)]
+#[derive(Debug, Default)]
 pub struct ItEnvelopePost2 {
     /// Envelope flags
     /// - Bit 0: Enable/disable envelope
@@ -309,6 +413,34 @@ pub struct ItEnvelopePost2 {
     /// - .1: Node position in ticks (0-9999)
     pub node_points: [(u8, u16); 25],
     // trailing_bytes: [u8; 7], // 7 bytes if version 2.0 to 2.14, 4 bytes if 2.14p1 or above
+}
+
+/// On-disk size of [`ItEnvelopePost2`]: 6 byte fixed header + 25 × 3 byte node tuples.
+pub const IT_ENV_POST2_SIZE: usize = 81;
+
+impl ItEnvelopePost2 {
+    pub fn read(r: &mut BinReader) -> Result<Self, ImportError> {
+        let flags = r.read_u8()?;
+        let node_count = r.read_u8()?;
+        let loop_start = r.read_u8()?;
+        let loop_end = r.read_u8()?;
+        let sustain_loop_start = r.read_u8()?;
+        let sustain_loop_end = r.read_u8()?;
+        let mut node_points = [(0u8, 0u16); 25];
+        for entry in &mut node_points {
+            entry.0 = r.read_u8()?;
+            entry.1 = r.read_u16_le()?;
+        }
+        Ok(Self {
+            flags,
+            node_count,
+            loop_start,
+            loop_end,
+            sustain_loop_start,
+            sustain_loop_end,
+            node_points,
+        })
+    }
 }
 
 impl ItEnvelopePost2 {
@@ -438,7 +570,7 @@ impl ItEnvelopePost2 {
 
 // --------------------------------------------------------------------------
 
-#[derive(Deserialize, Debug)]
+#[derive(Debug)]
 pub struct ItInstrumentPre2 {
     pub instr: ItInstrumentHeaderPre2,
     pub volume_envelope: ItEnvelopePre2,
@@ -450,7 +582,7 @@ impl ItInstrumentPre2 {
     }
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Debug)]
 pub struct ItInstrumentPost2 {
     pub instr: ItInstrumentHeaderPost2,
     pub volume_envelope: ItEnvelopePost2,
@@ -464,7 +596,7 @@ impl ItInstrumentPost2 {
     }
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Debug)]
 pub enum ItInstrument {
     Pre2(ItInstrumentPre2),
     Post2(ItInstrumentPost2),
@@ -478,68 +610,37 @@ impl ItInstrument {
         }
     }
 
-    pub fn load_pre2(source: &[u8]) -> Result<Self, DecodeError> {
-        let mut data = source;
-
-        let instr_h = bincode::serde::decode_from_slice::<ItInstrumentHeaderPre2, _>(
-            data,
-            bincode::config::legacy(),
-        )?;
-
-        if !instr_h.0.is_it_instrument() {
-            return Err(DecodeError::OtherString(
-                "Not an IT Instrument?".to_string(),
-            ));
+    pub fn load_pre2(source: &[u8]) -> Result<Self, ImportError> {
+        let mut r = BinReader::new(source);
+        let instr = ItInstrumentHeaderPre2::read(&mut r)?;
+        if !instr.is_it_instrument() {
+            return Err(ImportError::InvalidMagic("Not an IT Instrument?"));
         }
-
-        data = &data[instr_h.1..];
-        let vol = bincode::serde::decode_from_slice::<ItEnvelopePre2, _>(
-            data,
-            bincode::config::legacy(),
-        )?;
-        let instr = ItInstrumentPre2 {
-            instr: instr_h.0,
-            volume_envelope: vol.0,
-        };
-        Ok(ItInstrument::Pre2(instr))
+        let volume_envelope = ItEnvelopePre2::read(&mut r)?;
+        Ok(ItInstrument::Pre2(ItInstrumentPre2 {
+            instr,
+            volume_envelope,
+        }))
     }
 
-    pub fn load_post2(source: &[u8]) -> Result<Self, DecodeError> {
-        let mut data = source;
-
-        let instr_h = bincode::serde::decode_from_slice::<ItInstrumentHeaderPost2, _>(
-            data,
-            bincode::config::legacy(),
-        )?;
-
-        if !instr_h.0.is_it_instrument() {
-            return Err(DecodeError::OtherString(
-                "Not an IT Instrument?".to_string(),
-            ));
+    pub fn load_post2(source: &[u8]) -> Result<Self, ImportError> {
+        let mut r = BinReader::new(source);
+        let instr = ItInstrumentHeaderPost2::read(&mut r)?;
+        if !instr.is_it_instrument() {
+            return Err(ImportError::InvalidMagic("Not an IT Instrument?"));
         }
-
-        data = &data[instr_h.1..];
-        let vol = bincode::serde::decode_from_slice::<ItEnvelopePost2, _>(
-            data,
-            bincode::config::legacy(),
-        )?;
-        data = &data[1 + vol.1..];
-        let pan = bincode::serde::decode_from_slice::<ItEnvelopePost2, _>(
-            data,
-            bincode::config::legacy(),
-        )?;
-        data = &data[1 + pan.1..];
-        let pitch = bincode::serde::decode_from_slice::<ItEnvelopePost2, _>(
-            data,
-            bincode::config::legacy(),
-        )?;
-        let instr = ItInstrumentPost2 {
-            instr: instr_h.0,
-            volume_envelope: vol.0,
-            panning_envelope: pan.0,
-            pitch_envelope: pitch.0,
-        };
-        Ok(ItInstrument::Post2(instr))
+        let volume_envelope = ItEnvelopePost2::read(&mut r)?;
+        // 1-byte unused field separating envelopes on disk.
+        r.skip(1)?;
+        let panning_envelope = ItEnvelopePost2::read(&mut r)?;
+        r.skip(1)?;
+        let pitch_envelope = ItEnvelopePost2::read(&mut r)?;
+        Ok(ItInstrument::Post2(ItInstrumentPost2 {
+            instr,
+            volume_envelope,
+            panning_envelope,
+            pitch_envelope,
+        }))
     }
 
     pub fn prepare_instrument(&self) -> Instrument {

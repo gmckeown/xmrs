@@ -1,12 +1,11 @@
 //! Procedurally generated DAW-layer test suite.
 //!
-//! Per `xmrs-daw-evolution-plan.md` §10.2-10.3, the cycle-exact suite
-//! is generated entirely in Rust from `TestCase`s that build
-//! synthetic Modules. For each case we verify that
-//! `build_timeline_layer` succeeds, `verify_layers_consistent`
-//! returns Ok, and the optional `extra_assert` structural check
-//! holds. PCM-level cycle-exactness lives in
-//! `xmrsplayer/tests/cycle_exact_pcm.rs`.
+//! The cycle-exact suite is generated entirely in Rust from
+//! `TestCase`s that build synthetic Modules. For each case we
+//! verify that `build_timeline_layer` succeeds,
+//! `verify_layers_consistent` returns Ok, and the optional
+//! `extra_assert` structural check holds. PCM-level
+//! cycle-exactness lives in `xmrsplayer/tests/cycle_exact_pcm.rs`.
 
 #![cfg(feature = "std")]
 #![allow(deprecated)]
@@ -169,8 +168,8 @@ pub struct TestCase {
 }
 
 // =====================================================================
-// 10.3.1 — quirks (a representative selection per §10.3.1; the suite
-// can be extended one-by-one as quirks are added).
+// Quirks — a representative selection; the suite can be extended
+// one-by-one as new playback quirks are added.
 // =====================================================================
 
 fn quirk_cases() -> Vec<TestCase> {
@@ -749,8 +748,8 @@ fn structural_cases() -> Vec<TestCase> {
             // moteur must still resolve cell lookups correctly for
             // both source patterns via
             // `clip.position_tick + clip.track_row_offset + speed`
-            // (§4.6 invariant — NOT through the Track's source-
-            // pattern `start_row`).
+            // — NOT through the Track's source-pattern `start_row`,
+            // which is a content-level concept only.
             //
             // Pat 0 channel 0: instr0 at row 0 ─ instr1 at row 4 (so
             // segment 0 is rows 0..3 only).
@@ -808,8 +807,8 @@ fn structural_cases() -> Vec<TestCase> {
                     .build()
             },
             extra_assert: Some(|m| {
-                // Even though the loop is iterated 3 times, we emit
-                // exactly one Clip for the order position (§5.5.2).
+                // Even though the loop is iterated 3 times, we
+                // emit exactly one Clip for the order position.
                 assert_eq!(m.clips.len(), 1);
             }),
         },

@@ -1,13 +1,13 @@
 /// Original XM Pattern Slot
 use crate::cell_note::CellNote;
+use crate::import::bin_reader::ImportError;
 use crate::import::patternslot::PatternSlot;
 use crate::pitch::Pitch;
-use bincode::error::DecodeError;
 
 use alloc::vec::Vec;
 
 impl PatternSlot {
-    pub fn load_xm(src: &[u8]) -> Result<(&[u8], PatternSlot), DecodeError> {
+    pub fn load_xm(src: &[u8]) -> Result<(&[u8], PatternSlot), ImportError> {
         let mut dst: [u8; 5] = [0; 5];
         let mut i = 0;
         let mut j = 0;

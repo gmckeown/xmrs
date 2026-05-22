@@ -1,6 +1,6 @@
 [package]
 name = "xmrs"
-version = "0.12.1"
+version = "0.12.2"
 edition = "2021"
 description = "A library to edit SoundTracker data with pleasure "
 license = "MIT"
@@ -13,14 +13,8 @@ keywords = ["xm", "mod", "s3m", "it", "soundtracker"]
 categories = ["multimedia::audio", "embedded", "no-std"]
 
 [dependencies]
-bincode = { version = "2.0", features = ["alloc", "derive", "serde"], default-features = false, optional = true }
 clap = { version = "4.5", optional = true, features = ["cargo", "derive"] }
-num_enum = { version = "0.7", default-features = false }
 serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
-# Required by `keyboard.rs` (and by the XM / IT loaders): serde
-# supports `[T; N]` natively only for `N ≤ 32`; our `[Option<_>; 120]`
-# tables need `#[serde(with = "BigArray")]`.
-serde-big-array = "0.5"
 
 [features]
 # `std` and `import` are on by default: the common case is a
@@ -40,7 +34,7 @@ default = ["std", "import"]
 # the corresponding feature flag to dependencies that have one
 # (and `bincode?/std` only fires if `bincode` was pulled in by
 # an importer feature).
-std = ["bincode?/std", "num_enum/std", "serde/std"]
+std = ["serde/std"]
 
 # `demo` gates the example binaries/tools. It is a convenience feature
 # that also turns on `std` and all importers so that
@@ -54,10 +48,9 @@ demo = ["std", "clap", "import"]
 float-helpers = []
 
 # ---- Historical-format importers ----
-# Each importer pulls in `bincode` for parsing fixed-layout
-# binary structs. The `dep:` syntax keeps `bincode` from being
-# exposed as a standalone user-facing feature (it's an
-# implementation detail).
+# All importers parse fixed-layout binary structs through the
+# cursor-based [`crate::import::bin_reader`] helper — no third-party
+# binary-parsing crate is involved.
 #
 # `import` is an umbrella for all importers. Downstreams that want a
 # smaller binary can disable it and pick only the formats they need:
@@ -71,15 +64,15 @@ import = [
 ]
 # ProTracker-style Amiga MOD. Shares effect-parsing code with XM
 # (via `import::xm::mod_xm_effect`), which is pulled in as needed.
-import_mod = ["dep:bincode"]
+import_mod = []
 # Fasttracker II XM.
-import_xm  = ["dep:bincode"]
+import_xm  = []
 # ScreamTracker 3 S3M.
-import_s3m = ["dep:bincode"]
+import_s3m = []
 # Impulse Tracker IT.
-import_it  = ["dep:bincode"]
+import_it  = []
 # Commodore 64 SID (MOS6581).
-import_sid = ["dep:bincode"]
+import_sid = []
 
 # ---- xorshift RNG widths (rand32 is always enabled) ----
 rand8 = []
@@ -88,9 +81,14 @@ rand64 = []
 
 
 [dev-dependencies]
-# Property-based testing for the phase-4 EditCommand round-trip
-# invariants (§8.10 of `xmrs-daw-evolution-plan.md`).
-proptest = "1"
+# Property-based testing for the EditCommand round-trip
+# invariants. Default features dropped: we don't need `fork`
+# (subprocess isolation per case, useful when tests can panic;
+# ours don't), `timeout` (requires `fork`), or `bit-set` (faster
+# shrinking via a `BitSet`, falls back to a slower path without).
+# Keeping `std` only — it pulls in `regex-syntax` which is used
+# by the `"[a-z]{1,8}"` name generators in `edit_proptest.rs`.
+proptest = { version = "1", default-features = false, features = ["std"] }
 
 [lib]
 name = "xmrs"

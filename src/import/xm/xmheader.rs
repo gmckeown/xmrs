@@ -1,40 +1,61 @@
-/// Original XM Header
-use bincode::error::DecodeError;
-use num_enum::{IntoPrimitive, TryFromPrimitive};
-use serde::{Deserialize, Serialize};
+//! Original XM Header.
+//!
+//! On-disk layout (80 bytes), exactly as written by FastTracker II:
+//!
+//! | Off | Size | Field                  |
+//! |-----|------|------------------------|
+//! | 0   | 17   | `id_text` ("Extended Module: ") |
+//! | 17  | 20   | `name` |
+//! | 37  | 1    | `0x1A` (CP/M right-arrow / EOF) |
+//! | 38  | 20   | `tracker_name` |
+//! | 58  | 2    | `version_number` |
+//! | 60  | 4    | `header_size` (from this offset onward) |
+//! | 64  | 2    | `song_length` |
+//! | 66  | 2    | `restart_position` |
+//! | 68  | 2    | `number_of_channels` |
+//! | 70  | 2    | `number_of_patterns` |
+//! | 72  | 2    | `number_of_instruments` |
+//! | 74  | 2    | `flags` (0 = Amiga freq, 1 = linear) |
+//! | 76  | 2    | `default_tempo` |
+//! | 78  | 2    | `default_bpm` |
 
 use alloc::string::String;
 use alloc::string::ToString;
 use alloc::vec::Vec;
 
-use super::serde_helper::{deserialize_string_17, serialize_string_17};
-use super::serde_helper::{deserialize_string_20, serialize_string_20};
+use crate::import::bin_reader::{bytes_to_trimmed_string, BinReader, ImportError};
 
-#[derive(Serialize, Deserialize, Copy, Clone, Debug, IntoPrimitive, TryFromPrimitive)]
-#[serde(into = "u16", try_from = "u16")]
+#[derive(Copy, Clone, Debug)]
 #[repr(u16)]
 pub enum XmFlagType {
     XmAmigaFrequencies = 0,
     XmLinearFrequencies = 1,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+impl From<XmFlagType> for u16 {
+    #[inline]
+    fn from(v: XmFlagType) -> u16 {
+        v as u16
+    }
+}
+
+impl TryFrom<u16> for XmFlagType {
+    type Error = u16;
+    #[inline]
+    fn try_from(v: u16) -> Result<Self, u16> {
+        match v {
+            0 => Ok(XmFlagType::XmAmigaFrequencies),
+            1 => Ok(XmFlagType::XmLinearFrequencies),
+            other => Err(other),
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct XmHeader {
-    #[serde(
-        deserialize_with = "deserialize_string_17",
-        serialize_with = "serialize_string_17"
-    )]
-    id_text: String, // "Extended module: "
-    #[serde(
-        deserialize_with = "deserialize_string_20",
-        serialize_with = "serialize_string_20"
-    )]
+    id_text: String, // "Extended Module: "
     pub name: String,
-    right_arrow: u8, // 0x1A on IBM437 charset matches →. For `COMMAND.COM` `TYPE` command, it is Ctrl-Z or EOF. Yes: a CP/M heritage...so old!
-    #[serde(
-        deserialize_with = "deserialize_string_20",
-        serialize_with = "serialize_string_20"
-    )]
+    right_arrow: u8, // 0x1A on IBM437 charset matches →
     pub tracker_name: String,
     pub version_number: u16,
     pub header_size: u32, // 20 (starting from here to PatternOrder start) + pattern size (default 256, can be less...or more)
@@ -54,8 +75,8 @@ impl Default for XmHeader {
             id_text: "Extended Module: ".to_string(),
             name: "".to_string(),
             right_arrow: 0x1A,
-            tracker_name: "XMrs".to_string(), // or "Fasttracker II clone"
-            version_number: 0x0104,           // minimal version number supported
+            tracker_name: "XMrs".to_string(),
+            version_number: 0x0104,
             header_size: 20,
             song_length: 0,
             restart_position: 0,
@@ -70,34 +91,62 @@ impl Default for XmHeader {
 }
 
 impl XmHeader {
-    /* return like nom (&[u8], (XmHeader, PatternOrder) ) */
-    pub fn load(ser_xmheader: &[u8]) -> Result<(&[u8], XmHeader, Vec<u8>), DecodeError> {
-        match bincode::serde::decode_from_slice::<XmHeader, _>(
-            ser_xmheader,
-            bincode::config::legacy(),
-        ) {
-            Ok((xmh, _)) => {
-                if xmh.id_text != "Extended Module:" {
-                    return Err(DecodeError::Other("Not an Extended Module?"));
-                }
-                match xmh.get_pattern_order(&ser_xmheader[80..]) {
-                    Ok((data, pattern_order)) => Ok((data, xmh, pattern_order)),
-                    Err(e) => Err(e),
-                }
-            }
-            Err(e) => Err(e),
+    /// Returns `(remaining_bytes, parsed_header, pattern_order_table)`.
+    pub fn load(data: &[u8]) -> Result<(&[u8], XmHeader, Vec<u8>), ImportError> {
+        let mut r = BinReader::new(data);
+
+        let id_bytes: [u8; 17] = r.read_array()?;
+        let name_bytes: [u8; 20] = r.read_array()?;
+        let right_arrow = r.read_u8()?;
+        let tracker_bytes: [u8; 20] = r.read_array()?;
+        let version_number = r.read_u16_le()?;
+        let header_size = r.read_u32_le()?;
+        let song_length = r.read_u16_le()?;
+        let restart_position = r.read_u16_le()?;
+        let number_of_channels = r.read_u16_le()?;
+        let number_of_patterns = r.read_u16_le()?;
+        let number_of_instruments = r.read_u16_le()?;
+        let flags_raw = r.read_u16_le()?;
+        let default_tempo = r.read_u16_le()?;
+        let default_bpm = r.read_u16_le()?;
+
+        let xmh = XmHeader {
+            id_text: bytes_to_trimmed_string(&id_bytes),
+            name: bytes_to_trimmed_string(&name_bytes),
+            right_arrow,
+            tracker_name: bytes_to_trimmed_string(&tracker_bytes),
+            version_number,
+            header_size,
+            song_length,
+            restart_position,
+            number_of_channels,
+            number_of_patterns,
+            number_of_instruments,
+            flags: XmFlagType::try_from(flags_raw)
+                .map_err(|_| ImportError::Other("XmHeader: invalid flags value"))?,
+            default_tempo,
+            default_bpm,
+        };
+
+        if xmh.id_text != "Extended Module:" {
+            return Err(ImportError::InvalidMagic("Not an Extended Module?"));
         }
+
+        let (tail, pattern_order) = xmh.get_pattern_order(r.tail())?;
+        Ok((tail, xmh, pattern_order))
     }
 
-    fn get_pattern_order<'a>(&self, data: &'a [u8]) -> Result<(&'a [u8], Vec<u8>), DecodeError> {
-        let pattern_order_and_maybe_more_len: usize = self.header_size as usize - 20;
-        if data.len() >= pattern_order_and_maybe_more_len
-            && self.song_length as usize <= pattern_order_and_maybe_more_len
-        {
-            let pattern_order: Vec<u8> = data[0..self.song_length as usize].to_vec();
-            Ok((&data[pattern_order_and_maybe_more_len..], pattern_order))
-        } else {
-            Err(DecodeError::Other("XmHeader.header_size too big?"))
+    fn get_pattern_order<'a>(&self, data: &'a [u8]) -> Result<(&'a [u8], Vec<u8>), ImportError> {
+        // Schism / OpenMPT defensive read: an XmHeader whose
+        // `header_size` is below the 20-byte minimum makes the
+        // subsequent `header_size - 20` subtraction underflow on
+        // unsigned arithmetic. Treat anything < 20 as if it were
+        // exactly 20 (i.e. no pattern-order extension).
+        let extra = (self.header_size as usize).saturating_sub(20);
+        if data.len() < extra || (self.song_length as usize) > extra {
+            return Err(ImportError::OutOfRange("XmHeader.header_size too big?"));
         }
+        let pattern_order = data[0..self.song_length as usize].to_vec();
+        Ok((&data[extra..], pattern_order))
     }
 }

@@ -1,9 +1,9 @@
 #![forbid(unsafe_code)]
 
-use bincode::error::EncodeError;
+use xmrs::import::bin_reader::ImportError;
 use xmrs::import::sid::sid_module::SidModule;
 
-fn main() -> Result<(), EncodeError> {
+fn main() -> Result<(), ImportError> {
     println!("--===~ XmRs SID Module Info Example ~===--");
     println!("(c) 2024 Sébastien Béchet\n");
 

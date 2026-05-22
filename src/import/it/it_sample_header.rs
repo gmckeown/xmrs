@@ -1,27 +1,24 @@
 use crate::fixed::fixed::Q8_8;
 use crate::fixed::units::{ChannelVolume, Finetune, Panning, PitchDelta, Volume};
+use crate::import::bin_reader::{bytes_to_trimmed_string, BinReader, ImportError};
 use crate::prelude::*;
 use alloc::string::String;
 
-use bincode::error::DecodeError;
-
 use alloc::vec;
 use alloc::vec::Vec;
-use serde::Deserialize;
 
 use super::bitreader::BitReader;
-use super::serde_helper::deserialize_string_12;
-use super::serde_helper::deserialize_string_26;
+
+/// On-disk size of an IT sample header.
+pub const IT_SAMPLE_HEADER_SIZE: usize = 80;
 
 /// Structure representing a sample header in the IMPS format.
-#[derive(Deserialize, Debug, Default)]
-#[repr(C)]
+#[derive(Debug, Default)]
 pub struct ItSampleHeader {
     /// "IMPS"
     pub id: [u8; 4],
 
     /// Name of the DOS file
-    #[serde(deserialize_with = "deserialize_string_12")]
     pub dos_filename: String,
 
     /// Reserved byte for future use.
@@ -50,7 +47,6 @@ pub struct ItSampleHeader {
 
     /// Name of the sample (null-terminated).
     /// Length: 26 bytes
-    #[serde(deserialize_with = "deserialize_string_26")]
     pub sample_name: String,
 
     /// Convert flags for the sample.
@@ -153,6 +149,51 @@ fn decode_delta_16(bytes: &[u8], frame_count: usize, big_endian: bool) -> Vec<i1
 }
 
 impl ItSampleHeader {
+    pub fn read(r: &mut BinReader) -> Result<Self, ImportError> {
+        let id: [u8; 4] = r.read_array()?;
+        let dos_filename_bytes: [u8; 12] = r.read_array()?;
+        let reserved_byte = r.read_u8()?;
+        let global_volume = r.read_u8()?;
+        let flags = r.read_u8()?;
+        let default_volume = r.read_u8()?;
+        let sample_name_bytes: [u8; 26] = r.read_array()?;
+        let convert_flags = r.read_u8()?;
+        let default_pan = r.read_u8()?;
+        let sample_length = r.read_u32_le()?;
+        let loop_beginning = r.read_u32_le()?;
+        let loop_end = r.read_u32_le()?;
+        let c5_speed = r.read_u32_le()?;
+        let sustain_loop_beginning = r.read_u32_le()?;
+        let sustain_loop_end = r.read_u32_le()?;
+        let sample_pointer = r.read_u32_le()?;
+        let vibrato_speed = r.read_u8()?;
+        let vibrato_depth = r.read_u8()?;
+        let vibrato_sweep = r.read_u8()?;
+        let vibrato_waveform = r.read_u8()?;
+        Ok(Self {
+            id,
+            dos_filename: bytes_to_trimmed_string(&dos_filename_bytes),
+            reserved_byte,
+            global_volume,
+            flags,
+            default_volume,
+            sample_name: bytes_to_trimmed_string(&sample_name_bytes),
+            convert_flags,
+            default_pan,
+            sample_length,
+            loop_beginning,
+            loop_end,
+            c5_speed,
+            sustain_loop_beginning,
+            sustain_loop_end,
+            sample_pointer,
+            vibrato_speed,
+            vibrato_depth,
+            vibrato_sweep,
+            vibrato_waveform,
+        })
+    }
+
     pub fn is_associated_sample(&self) -> bool {
         self.flags & 0b0000_0001 != 0
     }
@@ -212,7 +253,7 @@ impl ItSampleHeader {
     fn get_sample_data_from_compressed_values(
         &self,
         data: &[u8],
-    ) -> Result<SampleDataType, DecodeError> {
+    ) -> Result<SampleDataType, ImportError> {
         let dst = if self.is_16bits() {
             if self.is_stereo() {
                 let sample_len = 2 * self.sample_length as usize;
@@ -238,7 +279,7 @@ impl ItSampleHeader {
         Ok(dst)
     }
 
-    fn get_sample_data_from_values(&self, data: &[u8]) -> Result<SampleDataType, DecodeError> {
+    fn get_sample_data_from_values(&self, data: &[u8]) -> Result<SampleDataType, ImportError> {
         let dst = if self.is_16bits() {
             if self.is_stereo() {
                 let sample_len = 2 * 2 * self.sample_length as usize;
@@ -273,7 +314,7 @@ impl ItSampleHeader {
         Ok(dst)
     }
 
-    pub fn get_sample_data(&self, data: &[u8]) -> Result<SampleDataType, DecodeError> {
+    pub fn get_sample_data(&self, data: &[u8]) -> Result<SampleDataType, ImportError> {
         // Note on bits 3 (PTM byte-delta) and 4 (12-bit TX-Wave)
         // of `convert_flags`: schism's IT loader (`fmt/its.c:254`)
         // does not consult either bit — it dispatches solely on
@@ -323,16 +364,16 @@ impl ItSampleHeader {
     /// deltas, accumulates them with byte-wrapping arithmetic
     /// into a transient byte stream, then reinterprets that
     /// stream as little-endian `i16` frames.
-    fn get_sample_data_from_byte_delta(&self, data: &[u8]) -> Result<SampleDataType, DecodeError> {
+    fn get_sample_data_from_byte_delta(&self, data: &[u8]) -> Result<SampleDataType, ImportError> {
         if !self.is_16bits() || self.is_stereo() {
-            return Err(DecodeError::Other(
+            return Err(ImportError::Other(
                 "IT byte-delta-encoded samples are only defined for 16-bit mono",
             ));
         }
         let frame_count = self.sample_length as usize;
         let bytes_needed = frame_count * 2;
         if data.len() < bytes_needed {
-            return Err(DecodeError::Other("IT byte-delta sample truncated"));
+            return Err(ImportError::Other("IT byte-delta sample truncated"));
         }
 
         // Stage 1: accumulate signed-byte deltas.
@@ -360,7 +401,7 @@ impl ItSampleHeader {
     /// optional big-endian byte order). IT samples only use the
     /// "split" stereo layout (left block then right block),
     /// matching schism's `SF_SS` path.
-    fn get_sample_data_from_delta(&self, data: &[u8]) -> Result<SampleDataType, DecodeError> {
+    fn get_sample_data_from_delta(&self, data: &[u8]) -> Result<SampleDataType, ImportError> {
         let frame_count = self.sample_length as usize;
         let be = self.is_samples_be();
 
@@ -372,7 +413,7 @@ impl ItSampleHeader {
                 bytes_per_chan
             };
             if data.len() < total {
-                return Err(DecodeError::Other(
+                return Err(ImportError::Other(
                     "IT delta-encoded 16-bit sample truncated",
                 ));
             }
@@ -400,7 +441,7 @@ impl ItSampleHeader {
                 frame_count
             };
             if data.len() < total {
-                return Err(DecodeError::Other(
+                return Err(ImportError::Other(
                     "IT delta-encoded 8-bit sample truncated",
                 ));
             }
@@ -420,9 +461,9 @@ impl ItSampleHeader {
         }
     }
 
-    fn convert_u8_to_i16_vec(&self, input: &[u8]) -> Result<Vec<i16>, DecodeError> {
+    fn convert_u8_to_i16_vec(&self, input: &[u8]) -> Result<Vec<i16>, ImportError> {
         if !input.len().is_multiple_of(2) {
-            return Err(DecodeError::Other("input is odd!"));
+            return Err(ImportError::Other("input is odd!"));
         }
 
         let mut output = Vec::with_capacity(input.len() / 2);
@@ -492,12 +533,12 @@ impl ItSampleHeader {
         dst
     }
 
-    fn it_unpack_8bit(&self, input: &[u8], output_len: usize) -> Result<Vec<i8>, DecodeError> {
+    fn it_unpack_8bit(&self, input: &[u8], output_len: usize) -> Result<Vec<i8>, ImportError> {
         let mut output = Vec::new();
         let mut p_src = input;
         while output.len() < output_len {
             if p_src.len() < 2 {
-                return Err(DecodeError::LimitExceeded);
+                return Err(ImportError::Other("IT sample decoder bit budget exceeded"));
             }
 
             let block_len = u16::from_le_bytes([p_src[0], p_src[1]]) as usize;
@@ -508,7 +549,7 @@ impl ItSampleHeader {
             let mut temp2: u8 = 0;
 
             if p_src.len() < block_len {
-                return Err(DecodeError::LimitExceeded);
+                return Err(ImportError::Other("IT sample decoder bit budget exceeded"));
             }
 
             let mut bit_reader = BitReader::new(&p_src[..block_len]);
@@ -532,12 +573,16 @@ impl ItSampleHeader {
 
                 let mut bits: u16 = bit_reader
                     .read_bits(left)
-                    .ok_or(DecodeError::LimitExceeded)? as u16;
+                    .ok_or(ImportError::Other("IT sample decoder bit budget exceeded"))?
+                    as u16;
 
                 if left < 7 {
                     // Type A
                     if 1_u16 << (left - 1) == bits {
-                        bits = bit_reader.read_bits(3).ok_or(DecodeError::LimitExceeded)? as u16;
+                        bits = bit_reader
+                            .read_bits(3)
+                            .ok_or(ImportError::Other("IT sample decoder bit budget exceeded"))?
+                            as u16;
                         left = if bits as u8 + 1 < left {
                             bits as u8 + 1
                         } else {
@@ -591,12 +636,12 @@ impl ItSampleHeader {
         Ok(output)
     }
 
-    fn it_unpack_16bit(&self, input: &[u8], output_len: usize) -> Result<Vec<i16>, DecodeError> {
+    fn it_unpack_16bit(&self, input: &[u8], output_len: usize) -> Result<Vec<i16>, ImportError> {
         let mut output = Vec::new();
         let mut p_src = input;
         while output.len() < output_len {
             if p_src.len() < 2 {
-                return Err(DecodeError::LimitExceeded);
+                return Err(ImportError::Other("IT sample decoder bit budget exceeded"));
             }
 
             let block_len = u16::from_le_bytes([p_src[0], p_src[1]]) as usize;
@@ -607,7 +652,7 @@ impl ItSampleHeader {
             let mut temp2: i16 = 0;
 
             if p_src.len() < block_len {
-                return Err(DecodeError::LimitExceeded);
+                return Err(ImportError::Other("IT sample decoder bit budget exceeded"));
             }
 
             let mut bit_reader = BitReader::new(&p_src[..block_len]);
@@ -631,12 +676,14 @@ impl ItSampleHeader {
 
                 let mut bits = bit_reader
                     .read_bits(left)
-                    .ok_or(DecodeError::LimitExceeded)?;
+                    .ok_or(ImportError::Other("IT sample decoder bit budget exceeded"))?;
 
                 if left < 7 {
                     // Type A
                     if 1_u32 << (left - 1) == bits {
-                        bits = bit_reader.read_bits(4).ok_or(DecodeError::LimitExceeded)?;
+                        bits = bit_reader
+                            .read_bits(4)
+                            .ok_or(ImportError::Other("IT sample decoder bit budget exceeded"))?;
                         left = if bits as u8 + 1 < left {
                             bits as u8 + 1
                         } else {

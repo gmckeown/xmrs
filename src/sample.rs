@@ -1,4 +1,3 @@
-use num_enum::{IntoPrimitive, TryFromPrimitive};
 use serde::{Deserialize, Serialize};
 
 use alloc::string::String;
@@ -7,13 +6,33 @@ use alloc::vec::Vec;
 use crate::fixed::units::{Amp, ChannelVolume, Finetune, Panning, Volume};
 
 /// How to play sample
-#[derive(Default, Serialize, Deserialize, Copy, Clone, IntoPrimitive, TryFromPrimitive, Debug)]
+#[derive(Default, Serialize, Deserialize, Copy, Clone, Debug)]
 #[repr(u8)]
 pub enum LoopType {
     #[default]
     No = 0,
     Forward = 1,
     PingPong = 2,
+}
+
+impl From<LoopType> for u8 {
+    #[inline]
+    fn from(v: LoopType) -> u8 {
+        v as u8
+    }
+}
+
+impl TryFrom<u8> for LoopType {
+    type Error = u8;
+    #[inline]
+    fn try_from(b: u8) -> Result<Self, u8> {
+        match b {
+            0 => Ok(LoopType::No),
+            1 => Ok(LoopType::Forward),
+            2 => Ok(LoopType::PingPong),
+            other => Err(other),
+        }
+    }
 }
 
 // Hand-rolled `PartialEq` / `Eq` so the comparison inlines into the

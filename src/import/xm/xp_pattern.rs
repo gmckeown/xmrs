@@ -1,3 +1,4 @@
+use crate::import::bin_reader::write_u16_le;
 use crate::import::patternslot::PatternSlot;
 use alloc::{vec, vec::Vec};
 
@@ -14,10 +15,8 @@ impl XpPattern {
             return None;
         }
 
-        data.append(
-            &mut bincode::serde::encode_to_vec(version, bincode::config::legacy()).unwrap(),
-        );
-        data.append(&mut bincode::serde::encode_to_vec(nrow, bincode::config::legacy()).unwrap());
+        write_u16_le(&mut data, version);
+        write_u16_le(&mut data, nrow);
 
         for row in pattern {
             for ps in row {

@@ -1,41 +1,34 @@
-use bincode::error::DecodeError;
-use serde::{Deserialize, Serialize};
+//! Fast Tracker II XI instrument file.
+//!
+//! Header layout (66 bytes):
+//! ```text
+//! [u8;21]  id_text ("Extended Instrument: ")
+//! [u8;22]  name
+//! u8       0x1A (CP/M EOF marker)
+//! [u8;20]  tracker_name
+//! u16      version_number
+//! ```
+//! followed by an [`XmInstrDefault`] (215 bytes), 15 reserved bytes,
+//! `num_samples:u16`, then `num_samples × XmSampleHeader` + bodies.
 
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::string::ToString;
 use alloc::vec;
 
-use super::serde_helper::{deserialize_string_20, serialize_string_20};
-use super::serde_helper::{deserialize_string_21, serialize_string_21};
-use super::serde_helper::{deserialize_string_22, serialize_string_22};
+use crate::import::bin_reader::{bytes_to_trimmed_string, BinReader, ImportError};
 
 use super::xminstrument::{
-    XmInstrDefault, XmInstrument, XmInstrumentHeader, XmInstrumentType, XMINSTRDEFAULT_SIZE,
-    XMINSTRUMENT_HEADER_SIZE,
+    XmInstrDefault, XmInstrument, XmInstrumentHeader, XmInstrumentType, XMINSTRUMENT_HEADER_SIZE,
 };
 use super::xmsample::{XmSample, XMSAMPLE_HEADER_SIZE};
 
-const XMINSTRUMENT_HEADER: usize = 21 + 22 + 1 + 20 + 2;
-
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Debug)]
 pub struct XiInstrumentHeader {
-    #[serde(
-        deserialize_with = "deserialize_string_21",
-        serialize_with = "serialize_string_21"
-    )]
     id_text: String, // "Extended Instrument: "
-    #[serde(
-        deserialize_with = "deserialize_string_22",
-        serialize_with = "serialize_string_22"
-    )]
     name: String,
-    right_arrow: u8, // 0x1A on IBM437 charset matches →. For `COMMAND.COM` `TYPE` command, it is Ctrl-Z or EOF. Yes: a CP/M heritage...so old!
-    #[serde(
-        deserialize_with = "deserialize_string_20",
-        serialize_with = "serialize_string_20"
-    )]
-    tracker_name: String, // example: "Fasttracker II clone"
+    right_arrow: u8, // 0x1A CP/M EOF marker
+    tracker_name: String,
     version_number: u16,
 }
 
@@ -45,13 +38,13 @@ impl Default for XiInstrumentHeader {
             id_text: "Extended Instrument: ".to_string(),
             name: "".to_string(),
             right_arrow: 0x1A,
-            tracker_name: "XMrs".to_string(), // or "Fasttracker II clone"
-            version_number: 0x0104,           // minimal version number supported
+            tracker_name: "XMrs".to_string(),
+            version_number: 0x0104,
         }
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Debug)]
 pub struct XiInstrument {
     header: XiInstrumentHeader,
     instr: XmInstrDefault,
@@ -60,59 +53,67 @@ pub struct XiInstrument {
 }
 
 impl XiInstrument {
-    pub fn load(data: &[u8]) -> Result<XmInstrument, DecodeError> {
-        let xi =
-            bincode::serde::decode_from_slice::<XiInstrument, _>(data, bincode::config::legacy())?
-                .0;
-        let seek = XMINSTRUMENT_HEADER + XMINSTRDEFAULT_SIZE + 15 + 2;
-        let data = &data[seek..];
+    pub fn load(data: &[u8]) -> Result<XmInstrument, ImportError> {
+        let mut r = BinReader::new(data);
 
-        if xi.header.id_text != "Extended Instrument:" {
-            return Err(DecodeError::Other("Not an Extended Instrument?"));
+        // XiInstrumentHeader (66 bytes).
+        let id_bytes: [u8; 21] = r.read_array()?;
+        let name_bytes: [u8; 22] = r.read_array()?;
+        let right_arrow = r.read_u8()?;
+        let tracker_bytes: [u8; 20] = r.read_array()?;
+        let version_number = r.read_u16_le()?;
+
+        let header = XiInstrumentHeader {
+            id_text: bytes_to_trimmed_string(&id_bytes),
+            name: bytes_to_trimmed_string(&name_bytes),
+            right_arrow,
+            tracker_name: bytes_to_trimmed_string(&tracker_bytes),
+            version_number,
+        };
+        if header.id_text != "Extended Instrument:" {
+            return Err(ImportError::InvalidMagic("Not an Extended Instrument?"));
         }
 
-        //---
+        let instr = XmInstrDefault::read(&mut r)?;
+        let _reserved: [u8; 15] = r.read_array()?;
+        let num_samples = r.read_u16_le()?;
+        let data_after_header = r.tail();
 
-        let header = XmInstrumentHeader {
-            name: xi.header.name,
+        let xm_header = XmInstrumentHeader {
+            name: header.name,
             instr_type: 0,
-            num_samples: xi.num_samples,
+            num_samples,
         };
 
-        if xi.num_samples == 0 {
-            let xmi = XmInstrument {
+        if num_samples == 0 {
+            return Ok(XmInstrument {
                 instrument_header_len: 4 + XMINSTRUMENT_HEADER_SIZE as u32,
-                header,
+                header: xm_header,
                 sample_header_size: XMSAMPLE_HEADER_SIZE as u32,
-                instr: XmInstrumentType::Default(Box::new(xi.instr)),
+                instr: XmInstrumentType::Default(Box::new(instr)),
                 sample: vec![],
-            };
-            return Ok(xmi);
+            });
         }
 
-        // all samples headers, then data...
+        // all sample headers, then bodies
         let mut sample = vec![];
-
-        let mut d3 = data;
-        for _ in 0..xi.num_samples {
+        let mut d3 = data_after_header;
+        for _ in 0..num_samples {
             let (d, s) = XmSample::load(d3)?;
             sample.push(s);
             d3 = d;
         }
-
         for s in &mut sample {
             let d = s.add_sample(d3)?;
             d3 = d;
         }
 
-        let xmi = XmInstrument {
+        Ok(XmInstrument {
             instrument_header_len: 4 + XMINSTRUMENT_HEADER_SIZE as u32,
-            header,
+            header: xm_header,
             sample_header_size: XMSAMPLE_HEADER_SIZE as u32,
-            instr: XmInstrumentType::Default(Box::new(xi.instr)),
+            instr: XmInstrumentType::Default(Box::new(instr)),
             sample,
-        };
-
-        Ok(xmi)
+        })
     }
 }

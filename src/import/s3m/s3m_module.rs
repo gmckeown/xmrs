@@ -1,10 +1,6 @@
-use super::serde_helper::{deserialize_string_12, deserialize_string_28, deserialize_string_4};
-use bincode;
-use bincode::error::DecodeError;
-use serde::Deserialize;
-
 use crate::codepage::Codepage;
 use crate::fixed::units::{ChannelVolume, Finetune, Frequency, Panning, Period, Volume};
+use crate::import::bin_reader::{bytes_to_trimmed_string, BinReader, ImportError};
 use crate::import::import_memory::ImportMemory;
 use crate::import::import_memory::MemoryType;
 use crate::import::orders_helper;
@@ -13,16 +9,14 @@ use crate::prelude::*;
 
 use alloc::format;
 use alloc::string::String;
-use alloc::string::ToString;
 use alloc::{vec, vec::Vec};
 
 use super::s3m_effect::S3mEffect;
 use crate::import::import_memory::S3mImportFlags;
 
-#[repr(C)]
-#[derive(Default, Deserialize, Debug)]
+/// S3M file header (96 bytes).
+#[derive(Default, Debug)]
 struct S3mHeader {
-    #[serde(deserialize_with = "deserialize_string_28")]
     title: String,
     /// 0x1A
     sig1: u8,
@@ -35,7 +29,6 @@ struct S3mHeader {
     version: u16,
     sample_type: u16,
     /// SCRM
-    #[serde(deserialize_with = "deserialize_string_4")]
     sig2: String,
     global_volume: u8,
     speed: u8,
@@ -48,8 +41,57 @@ struct S3mHeader {
     channel_settings: [u8; 32],
 }
 
-#[repr(C)]
-#[derive(Deserialize, Debug, Default)]
+impl S3mHeader {
+    fn read(r: &mut BinReader) -> Result<Self, ImportError> {
+        let title_bytes: [u8; 28] = r.read_array()?;
+        let sig1 = r.read_u8()?;
+        let song_type = r.read_u8()?;
+        let reserved1 = r.read_u16_le()?;
+        let order_count = r.read_u16_le()?;
+        let instrument_count = r.read_u16_le()?;
+        let pattern_count = r.read_u16_le()?;
+        let flags = r.read_u16_le()?;
+        let version = r.read_u16_le()?;
+        let sample_type = r.read_u16_le()?;
+        let sig2_bytes: [u8; 4] = r.read_array()?;
+        let global_volume = r.read_u8()?;
+        let speed = r.read_u8()?;
+        let tempo = r.read_u8()?;
+        let master_volume = r.read_u8()?;
+        let ultra_click_removal = r.read_u8()?;
+        let pan = r.read_u8()?;
+        let reserved2: [u8; 8] = r.read_array()?;
+        let ptr_special = r.read_u16_le()?;
+        let channel_settings: [u8; 32] = r.read_array()?;
+        Ok(Self {
+            title: bytes_to_trimmed_string(&title_bytes),
+            sig1,
+            song_type,
+            reserved1,
+            order_count,
+            instrument_count,
+            pattern_count,
+            flags,
+            version,
+            sample_type,
+            sig2: bytes_to_trimmed_string(&sig2_bytes),
+            global_volume,
+            speed,
+            tempo,
+            master_volume,
+            ultra_click_removal,
+            pan,
+            reserved2,
+            ptr_special,
+            channel_settings,
+        })
+    }
+}
+
+/// S3M PCM sample instrument record (offset `+13` past the
+/// discriminator + 12-byte filename prefix; total record size on
+/// disk is 80 bytes).
+#[derive(Debug, Default)]
 struct S3mPcmInstr {
     /// offset = ((ptr_data_h << 16) | ptr_data_l) * 16
     ptr_data_h: u8,
@@ -74,11 +116,42 @@ struct S3mPcmInstr {
     /// sample rate for middle-c note (C-4)
     c2spd: u32,
     internal: [u8; 12],
-    #[serde(deserialize_with = "deserialize_string_28")]
     title: String,
     /// SCRS
-    #[serde(deserialize_with = "deserialize_string_4")]
     sig: String,
+}
+
+impl S3mPcmInstr {
+    fn read(r: &mut BinReader) -> Result<Self, ImportError> {
+        let ptr_data_h = r.read_u8()?;
+        let ptr_data_l = r.read_u16_le()?;
+        let len = r.read_u32_le()?;
+        let loop_start = r.read_u32_le()?;
+        let loop_end = r.read_u32_le()?;
+        let volume = r.read_u8()?;
+        let dsk = r.read_u8()?;
+        let pack = r.read_u8()?;
+        let flags = r.read_u8()?;
+        let c2spd = r.read_u32_le()?;
+        let internal: [u8; 12] = r.read_array()?;
+        let title_bytes: [u8; 28] = r.read_array()?;
+        let sig_bytes: [u8; 4] = r.read_array()?;
+        Ok(Self {
+            ptr_data_h,
+            ptr_data_l,
+            len,
+            loop_start,
+            loop_end,
+            volume,
+            dsk,
+            pack,
+            flags,
+            c2spd,
+            internal,
+            title: bytes_to_trimmed_string(&title_bytes),
+            sig: bytes_to_trimmed_string(&sig_bytes),
+        })
+    }
 }
 
 impl S3mPcmInstr {
@@ -98,7 +171,7 @@ impl S3mPcmInstr {
         (((self.ptr_data_h as usize) << 16) | (self.ptr_data_l as usize)) << 4
     }
 
-    fn get_sample_data(&self, data: &[u8]) -> Result<SampleDataType, DecodeError> {
+    fn get_sample_data(&self, data: &[u8]) -> Result<SampleDataType, ImportError> {
         // The `pack` byte is essentially never honoured by real
         // S3M decoders. ScreamTracker 3 itself documented it as
         // `0=normal(disk), 1=amiga(module), 2=ADPCM`, but
@@ -114,7 +187,7 @@ impl S3mPcmInstr {
         let offset = self.get_sample_offset();
 
         if offset > data.len() {
-            return Err(DecodeError::Other("S3M sample offset out of bounds"));
+            return Err(ImportError::Other("S3M sample offset out of bounds"));
         }
         let available = data.len() - offset;
 
@@ -153,9 +226,9 @@ impl S3mPcmInstr {
         Ok(dst)
     }
 
-    fn convert_u8_to_u16_vec(input: &[u8]) -> Result<Vec<u16>, DecodeError> {
+    fn convert_u8_to_u16_vec(input: &[u8]) -> Result<Vec<u16>, ImportError> {
         if !input.len().is_multiple_of(2) {
-            return Err(DecodeError::Other("input is odd!"));
+            return Err(ImportError::Other("input is odd!"));
         }
 
         let mut output = Vec::with_capacity(input.len() / 2);
@@ -224,8 +297,9 @@ const fn u16_pcm_to_i16(u: u16) -> i16 {
     (u ^ 0x8000) as i16
 }
 
-#[repr(C)]
-#[derive(Deserialize, Debug)]
+/// S3M AdLib (OPL) instrument record (offset `+13` past the
+/// discriminator + 12-byte filename prefix).
+#[derive(Debug)]
 struct S3mOplInstr {
     reserved1: [u8; 3],
 
@@ -247,11 +321,56 @@ struct S3mOplInstr {
     reserved2: u16,
     c2spd: u32,
     internal: [u8; 12],
-    #[serde(deserialize_with = "deserialize_string_28")]
     pub title: String,
     /// SCRI
-    #[serde(deserialize_with = "deserialize_string_4")]
     sig: String,
+}
+
+impl S3mOplInstr {
+    fn read(r: &mut BinReader) -> Result<Self, ImportError> {
+        let reserved1: [u8; 3] = r.read_array()?;
+        let mod0 = r.read_u8()?;
+        let car1 = r.read_u8()?;
+        let mod2 = r.read_u8()?;
+        let car3 = r.read_u8()?;
+        let mod4 = r.read_u8()?;
+        let car5 = r.read_u8()?;
+        let mod6 = r.read_u8()?;
+        let car7 = r.read_u8()?;
+        let mod8 = r.read_u8()?;
+        let car9 = r.read_u8()?;
+        let mod10 = r.read_u8()?;
+        let unused11 = r.read_u8()?;
+        let volume = r.read_u8()?;
+        let dsk = r.read_u8()?;
+        let reserved2 = r.read_u16_le()?;
+        let c2spd = r.read_u32_le()?;
+        let internal: [u8; 12] = r.read_array()?;
+        let title_bytes: [u8; 28] = r.read_array()?;
+        let sig_bytes: [u8; 4] = r.read_array()?;
+        Ok(Self {
+            reserved1,
+            mod0,
+            car1,
+            mod2,
+            car3,
+            mod4,
+            car5,
+            mod6,
+            car7,
+            mod8,
+            car9,
+            mod10,
+            unused11,
+            volume,
+            dsk,
+            reserved2,
+            c2spd,
+            internal,
+            title: bytes_to_trimmed_string(&title_bytes),
+            sig: bytes_to_trimmed_string(&sig_bytes),
+        })
+    }
 }
 
 impl S3mOplInstr {
@@ -308,17 +427,15 @@ impl S3mOplInstr {
     }
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Debug)]
 enum S3mInstrument {
     PcmInstrument(S3mPcmInstr),
     OplInstrument(S3mOplInstr),
 }
 
-#[repr(C)]
-#[derive(Deserialize, Debug)]
+#[derive(Debug)]
 struct S3mMetaInstrument {
     discriminator: u8,
-    #[serde(deserialize_with = "deserialize_string_12")]
     filename: String,
     value: S3mInstrument,
     sample: Option<SampleDataType>,
@@ -337,42 +454,38 @@ impl S3mMetaInstrument {
         }
     }
 
-    fn new(data: &[u8], offset: usize) -> Result<Self, DecodeError> {
+    fn new(data: &[u8], offset: usize) -> Result<Self, ImportError> {
+        if offset + 13 > data.len() {
+            return Err(ImportError::OutOfRange(
+                "S3M instrument offset out of range",
+            ));
+        }
         let discriminator = data[offset];
-        let filename = String::from_utf8_lossy(&data[offset + 1..offset + 13])
-            .trim_end_matches('\0')
-            .to_string();
+        let filename_bytes: [u8; 12] = {
+            let mut b = [0u8; 12];
+            b.copy_from_slice(&data[offset + 1..offset + 13]);
+            b
+        };
+        let filename = bytes_to_trimmed_string(&filename_bytes);
         let mut sample = None;
+        let mut r = BinReader::new(&data[offset + 13..]);
         let value = match discriminator {
             0 => {
                 // Empty Instrument, we use PcmInstrument not to forget informations
-                let i = bincode::serde::decode_from_slice::<S3mPcmInstr, _>(
-                    &data[offset + 13..],
-                    bincode::config::legacy(),
-                )?
-                .0;
-                S3mInstrument::PcmInstrument(i)
+                S3mInstrument::PcmInstrument(S3mPcmInstr::read(&mut r)?)
             }
             1 => {
-                let i = bincode::serde::decode_from_slice::<S3mPcmInstr, _>(
-                    &data[offset + 13..],
-                    bincode::config::legacy(),
-                )?
-                .0;
+                let i = S3mPcmInstr::read(&mut r)?;
                 if i.sig != "SCRS" {
-                    return Err(DecodeError::Other("Not a SCRS instr?"));
+                    return Err(ImportError::InvalidMagic("Not a SCRS instr?"));
                 }
                 sample = Some(i.get_sample_data(data)?);
                 S3mInstrument::PcmInstrument(i)
             }
             2..=7 => {
-                let i = bincode::serde::decode_from_slice::<S3mOplInstr, _>(
-                    &data[offset + 13..],
-                    bincode::config::legacy(),
-                )?
-                .0;
+                let i = S3mOplInstr::read(&mut r)?;
                 if i.sig != "SCRI" {
-                    return Err(DecodeError::Other("Not a SCRI instr?"));
+                    return Err(ImportError::InvalidMagic("Not a SCRI instr?"));
                 }
                 S3mInstrument::OplInstrument(i)
             }
@@ -387,7 +500,7 @@ impl S3mMetaInstrument {
     }
 }
 
-#[derive(Default, Deserialize, Debug)]
+#[derive(Default, Debug)]
 pub struct S3mModule {
     header: S3mHeader,
     positions: Vec<u8>,
@@ -401,7 +514,7 @@ pub struct S3mModule {
 }
 
 impl S3mModule {
-    pub fn load(ser_s3m_module: &[u8]) -> Result<S3mModule, DecodeError> {
+    pub fn load(ser_s3m_module: &[u8]) -> Result<S3mModule, ImportError> {
         let mut s3m = S3mModule {
             ..Default::default()
         };
@@ -410,22 +523,21 @@ impl S3mModule {
 
         let s = 96;
         if ser_s3m_module.len() < s {
-            return Result::Err(DecodeError::Other("Not an S3M module?"));
+            return Result::Err(ImportError::Other("Not an S3M module?"));
         }
-        let data = &ser_s3m_module[0..s];
-        s3m.header =
-            bincode::serde::decode_from_slice::<S3mHeader, _>(data, bincode::config::legacy())?.0;
+        let mut r = BinReader::new(&ser_s3m_module[0..s]);
+        s3m.header = S3mHeader::read(&mut r)?;
         let data = &ser_s3m_module[s..];
 
         if s3m.header.sig1 != 0x1A || s3m.header.song_type != 0x10 || s3m.header.sig2 != "SCRM" {
-            return Result::Err(DecodeError::Other("Not an S3M module?"));
+            return Result::Err(ImportError::InvalidMagic("Not an S3M module?"));
         }
 
         // === positions offsets
 
         let s = s3m.header.order_count as usize;
         if data.len() < s {
-            return Result::Err(DecodeError::Other("Not an S3M module?"));
+            return Result::Err(ImportError::Other("Not an S3M module?"));
         }
         s3m.positions = data[0..s].to_vec();
         let data = &data[s..];
@@ -444,7 +556,7 @@ impl S3mModule {
 
         let s = 2 * s3m.header.instrument_count as usize;
         if data.len() < s {
-            return Result::Err(DecodeError::Other("Not an S3M module?"));
+            return Result::Err(ImportError::Other("Not an S3M module?"));
         }
         let sample_offsets: Vec<u32> = data[0..s]
             .chunks(2)
@@ -456,7 +568,7 @@ impl S3mModule {
 
         let s = 2 * s3m.header.pattern_count as usize;
         if data.len() < s {
-            return Result::Err(DecodeError::Other("Not an S3M module?"));
+            return Result::Err(ImportError::Other("Not an S3M module?"));
         }
         let pattern_offsets: Vec<u32> = data[0..s]
             .chunks(2)
@@ -514,7 +626,7 @@ impl S3mModule {
         // distribution and decides per-file, so all paths are
         // covered without hard-coding CP437.
         //
-        // The byte offsets used below match the bincode layout
+        // The byte offsets used below match the on-disk layout
         // of `S3mHeader`, `S3mPcmInstr`, and `S3mOplInstr`. In
         // every PCM/OPL instrument record the title is 28 bytes
         // at offset `+48` past the parapointer (`13` for the
@@ -663,7 +775,7 @@ impl S3mModule {
     }
 
     // load one pattern row
-    fn process_pattern_row(data: &[u8]) -> Result<(Vec<PatternSlot>, &[u8]), DecodeError> {
+    fn process_pattern_row(data: &[u8]) -> Result<(Vec<PatternSlot>, &[u8]), ImportError> {
         let mut d2 = data;
         // IMPORTANT: 255 is the sentinel for "no volume command". Using 0
         // here would be interpreted by `s3m_walk_volume` as an explicit

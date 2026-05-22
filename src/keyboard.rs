@@ -14,7 +14,6 @@
 //! takes the lookup tables out of the already-busy `InstrDefault`.
 
 use serde::{Deserialize, Serialize};
-use serde_big_array::BigArray;
 
 /// Per-input-note keyboard layout.
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -30,7 +29,7 @@ pub struct Keyboard {
     /// drum-kit author wired in); the `sample` half lands here.
     /// Other formats (XM/MOD/S3M/Amiga) leave `note_for_pitch` at
     /// `None` and the playback note is the input note itself.
-    #[serde(with = "BigArray")]
+    #[serde(with = "big_array_120")]
     pub sample_for_pitch: [Option<usize>; 120],
 
     /// Per-input-note transposition map: `note_for_pitch[input_note]
@@ -50,7 +49,7 @@ pub struct Keyboard {
     /// doesn't need to materialise a `Pitch` per entry. The
     /// player's `played_pitch_for` helper handles the `Pitch`
     /// conversion lazily on lookup.
-    #[serde(with = "BigArray")]
+    #[serde(with = "big_array_120")]
     pub note_for_pitch: [Option<u8>; 120],
 }
 
@@ -72,5 +71,65 @@ impl Keyboard {
         self.sample_for_pitch
             .iter_mut()
             .for_each(|elem| *elem = Some(sample_index));
+    }
+}
+
+/// Inline replacement for `serde_big_array::BigArray` specialised
+/// for the keyboard's `[T; 120]` shape. Serde supports `[T; N]`
+/// natively only for `N ≤ 32`, so we provide our own (de)serialiser
+/// for `[Option<usize>; 120]` and `[Option<u8>; 120]`. Replaces a
+/// whole crate dep for ~50 lines.
+mod big_array_120 {
+    use core::fmt;
+    use core::marker::PhantomData;
+    use serde::de::{Error, SeqAccess, Visitor};
+    use serde::ser::SerializeTuple;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    const N: usize = 120;
+
+    pub fn serialize<S, T>(arr: &[T; N], ser: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+        T: Serialize,
+    {
+        let mut tup = ser.serialize_tuple(N)?;
+        for v in arr {
+            tup.serialize_element(v)?;
+        }
+        tup.end()
+    }
+
+    pub fn deserialize<'de, D, T>(de: D) -> Result<[T; N], D::Error>
+    where
+        D: Deserializer<'de>,
+        T: Deserialize<'de> + Default + Copy,
+    {
+        struct ArrayVisitor<T> {
+            _t: PhantomData<T>,
+        }
+
+        impl<'de, T> Visitor<'de> for ArrayVisitor<T>
+        where
+            T: Deserialize<'de> + Default + Copy,
+        {
+            type Value = [T; N];
+
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                write!(f, "an array of length {N}")
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<[T; N], A::Error> {
+                let mut out = [T::default(); N];
+                for (i, slot) in out.iter_mut().enumerate() {
+                    *slot = seq
+                        .next_element()?
+                        .ok_or_else(|| A::Error::invalid_length(i, &self))?;
+                }
+                Ok(out)
+            }
+        }
+
+        de.deserialize_tuple(N, ArrayVisitor { _t: PhantomData })
     }
 }

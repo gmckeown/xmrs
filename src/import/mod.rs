@@ -16,6 +16,18 @@
 // that a `--no-default-features` build without any format stays
 // lean (these helpers disappear too).
 
+/// Cursor-based binary reader (LE primitives + fixed-size name
+/// fields). Replaces the bincode-via-serde decoding shim used by
+/// every importer for its C-packed header structs.
+#[cfg(any(
+    feature = "import_mod",
+    feature = "import_xm",
+    feature = "import_s3m",
+    feature = "import_it",
+    feature = "import_sid",
+))]
+pub mod bin_reader;
+
 /// Per-channel / per-song effect-memory bookkeeping shared by all
 /// PCM-style importers (MOD, XM, S3M, IT, SID).
 #[cfg(any(

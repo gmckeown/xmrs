@@ -1,17 +1,18 @@
-use alloc::string::ToString;
 use alloc::vec;
 use alloc::vec::Vec;
-use bincode::error::DecodeError;
-use serde::Deserialize;
 
+use crate::import::bin_reader::{BinReader, ImportError};
 use crate::mix_plugin::{
     MixPlugin as PublicMixPlugin, MixPluginInfo, MixPlugins as PublicMixPlugins,
 };
 
 const MAX_MIXPLUGINS: usize = 64;
 
-#[derive(Deserialize, Debug, Clone)]
-#[repr(C)]
+/// On-disk size of an `FXxx` plugin's `SndMixPluginInfo`: four
+/// `u32` + four reserved `u32` = 32 bytes.
+const SND_MIX_PLUGIN_INFO_SIZE: usize = 32;
+
+#[derive(Debug, Clone)]
 pub struct SndMixPluginInfo {
     pub id1: u32,
     pub id2: u32,
@@ -20,8 +21,29 @@ pub struct SndMixPluginInfo {
     pub reserved: [u32; 4],
 }
 
-#[derive(Deserialize, Debug, Clone)]
-#[repr(C)]
+impl SndMixPluginInfo {
+    fn read(r: &mut BinReader) -> Result<Self, ImportError> {
+        let id1 = r.read_u32_le()?;
+        let id2 = r.read_u32_le()?;
+        let input_routing = r.read_u32_le()?;
+        let output_routing = r.read_u32_le()?;
+        let reserved = [
+            r.read_u32_le()?,
+            r.read_u32_le()?,
+            r.read_u32_le()?,
+            r.read_u32_le()?,
+        ];
+        Ok(Self {
+            id1,
+            id2,
+            input_routing,
+            output_routing,
+            reserved,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct MixPlugin {
     pub info: SndMixPluginInfo,
     pub data: Option<Vec<u8>>,
@@ -59,7 +81,7 @@ impl Plugins {
         Self::default()
     }
 
-    pub fn load(source: &[u8]) -> Result<(Self, usize), DecodeError> {
+    pub fn load(source: &[u8]) -> Result<(Self, usize), ImportError> {
         let mut data = source;
         let mut plugins = Self::new();
 
@@ -68,9 +90,7 @@ impl Plugins {
             let plugin_size = u32::from_le_bytes(data[4..8].try_into().unwrap()) as usize;
 
             if data.len() < plugin_size {
-                return Err(DecodeError::OtherString(
-                    "Plugin Size too big!?".to_string(),
-                ));
+                return Err(ImportError::OutOfRange("Plugin Size too big!?"));
             }
 
             if plugin_id == u32::from_le_bytes(*b"CHFX") {
@@ -80,7 +100,7 @@ impl Plugins {
                         plugins.channel_settings[ch] =
                             u32::from_le_bytes(data[ch * 4..(ch + 1) * 4].try_into().unwrap());
                     } else {
-                        return Err(DecodeError::LimitExceeded);
+                        return Err(ImportError::UnexpectedEof);
                     }
                 }
                 data = &data[plugin_size..];
@@ -88,22 +108,15 @@ impl Plugins {
                 let plugin_index = ((data[2] - b'0') * 10 + (data[3] - b'0')) as usize;
                 data = &data[8..];
                 if plugin_index >= MAX_MIXPLUGINS {
-                    return Err(DecodeError::OtherString(
-                        "Plugin Index overflow!?".to_string(),
-                    ));
+                    return Err(ImportError::OutOfRange("Plugin Index overflow!?"));
                 }
-                let info: (SndMixPluginInfo, usize) =
-                    bincode::serde::decode_from_slice::<SndMixPluginInfo, _>(
-                        data,
-                        bincode::config::legacy(),
-                    )?;
-                plugins.mix[plugin_index].info = info.0;
-                data = &data[info.1..];
+                let mut r = BinReader::new(data);
+                plugins.mix[plugin_index].info = SndMixPluginInfo::read(&mut r)?;
+                data = &data[SND_MIX_PLUGIN_INFO_SIZE..];
 
-                let extra_size = plugin_size - info.1;
+                let extra_size = plugin_size - SND_MIX_PLUGIN_INFO_SIZE;
                 if extra_size != 0 {
-                    let d = &data[0..extra_size].to_vec();
-                    plugins.mix[plugin_index].data = Some(d.clone());
+                    plugins.mix[plugin_index].data = Some(data[0..extra_size].to_vec());
                 }
                 data = &data[extra_size..];
             } else {

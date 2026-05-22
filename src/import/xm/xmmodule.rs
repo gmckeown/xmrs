@@ -1,6 +1,5 @@
 /// Original XM Module
-use bincode::error::DecodeError;
-use serde::{Deserialize, Serialize};
+use crate::import::bin_reader::ImportError;
 
 use alloc::format;
 use alloc::{vec, vec::Vec};
@@ -19,7 +18,7 @@ use crate::import::patternslot::PatternSlot;
 use crate::module::Module;
 use crate::period_helper::FrequencyType;
 
-#[derive(Default, Serialize, Deserialize, Debug)]
+#[derive(Default, Debug)]
 pub struct XmModule {
     pub header: XmHeader,
     pub pattern_order: Vec<u8>,
@@ -28,7 +27,7 @@ pub struct XmModule {
 }
 
 impl XmModule {
-    pub fn load(data: &[u8]) -> Result<Self, DecodeError> {
+    pub fn load(data: &[u8]) -> Result<Self, ImportError> {
         // Keep the original slice for the post-load codepage pass —
         // we need byte-accurate offsets back into the file to
         // re-decode every name field under the detected codepage.
@@ -91,8 +90,8 @@ impl XmModule {
         // `instr_start + instrument_header_len + sample_i * 40
         // + 18`) — and picks the single codepage that best
         // fits the aggregate byte distribution. The constants
-        // below come from the bincode-serialised layouts of
-        // `XmHeader`, `XmInstrumentHeader`, and `XmSampleHeader`.
+        // below come from the on-disk layouts of `XmHeader`,
+        // `XmInstrumentHeader`, and `XmSampleHeader`.
         const HEADER_NAME_OFF: usize = 17;
         const HEADER_NAME_LEN: usize = 20;
         const HEADER_TRACKER_NAME_OFF: usize = 38;
