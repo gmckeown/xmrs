@@ -43,11 +43,11 @@ fn fingerprint(m: &Module) -> String {
     let mut s = String::new();
     write!(
         &mut s,
-        "name={};bpm={};speed={};profile_hash={:?};",
+        "name={};bpm={};speed={};quirks_hash={:?};",
         m.name,
         m.default_bpm,
         m.default_tempo,
-        format!("{:?}", m.profile)
+        format!("{:?}", m.quirks)
     )
     .unwrap();
     for (i, t) in m.tracks.iter().enumerate() {
@@ -82,16 +82,17 @@ fn fingerprint(m: &Module) -> String {
         .unwrap();
     }
     for (i, l) in m.automation.iter().enumerate() {
+        let points = l.points().unwrap_or(&[]);
         write!(
             &mut s,
             "l{}={{target={:?} pts={} en={}}};",
             i,
             l.target,
-            l.points.len(),
+            points.len(),
             l.enabled
         )
         .unwrap();
-        for (j, p) in l.points.iter().enumerate() {
+        for (j, p) in points.iter().enumerate() {
             write!(&mut s, "p{}={{t={} v={:?}}};", j, p.tick, p.value).unwrap();
         }
     }
@@ -104,7 +105,7 @@ fn clone_module(m: &Module) -> Module {
         name: m.name.clone(),
         default_bpm: m.default_bpm,
         default_tempo: m.default_tempo,
-        profile: m.profile,
+        quirks: m.quirks,
         tracks: m.tracks.clone(),
         clips: m.clips.clone(),
         automation: m.automation.clone(),
@@ -125,7 +126,7 @@ fn clone_module(m: &Module) -> Module {
 /// against an arbitrary module. We don't need 100% success — Err
 /// returns just leave the Module unchanged.
 fn arb_edit_command() -> impl Strategy<Value = EditCommand> {
-    use xmrs::daw::automation::{AutomationPoint, AutomationTarget, AutomationValue};
+    use xmrs::core::daw::automation::{AutomationPoint, AutomationTarget, AutomationValue};
     prop_oneof![
         // Track creation
         (0u32..4u32, "[a-z]{1,8}", 1u32..32u32).prop_map(|(instr, name, len)| {
@@ -159,7 +160,7 @@ fn arb_edit_command() -> impl Strategy<Value = EditCommand> {
             EditCommand::InsertRow {
                 track: t,
                 row_offset: r,
-                content: TrackUnit::default(),
+                content: Cell::default(),
             }
         }),
         // Delete row
@@ -174,7 +175,7 @@ fn arb_edit_command() -> impl Strategy<Value = EditCommand> {
             EditCommand::SetCell {
                 track: t,
                 row_offset: r,
-                content: TrackUnit::default(),
+                content: Cell::default(),
             }
         }),
         // Create clip
@@ -256,7 +257,7 @@ proptest! {
             length_rows: 8,
         });
         let _ = module.apply(EditCommand::CreateAutomationLane {
-            target: xmrs::daw::automation::AutomationTarget::Bpm,
+            target: xmrs::core::daw::automation::AutomationTarget::Bpm,
         });
 
         for cmd in commands {

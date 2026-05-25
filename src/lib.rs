@@ -1,119 +1,69 @@
 #![forbid(unsafe_code)]
 #![allow(dead_code)]
 
+//! # xmrs — A Safe SoundTracker Library
 //!
-//! XMrs is a Safe SoundTracker Library
+//! ## Architecture
 //!
 //! ```text
-//! Module+--->Instrument+--->InstrDefault+--->VoiceSetup+--->Envelope (Volume, Panning, Pitch)
-//!       |              |                |              +--->Vibrato
-//!       |              |                +--->InstrumentBehavior (NNA, DCT, DCA)
-//!       |              |                +--->Keyboard (sample_for_pitch, note_for_pitch)
-//!       |              |                +--->InstrMidi
-//!       |              |                +--->Sample (Loop, Sustain Loop)
-//!       |              +--->InstrEkn (Euclidean Rhythm Instrument, wraps another Instrument)
-//!       |              +--->InstrMidi
-//!       |              +--->InstrOpl (Yamaha OPL)
-//!       |              +--->InstrSid (MOS6581 SID Voices)
-//!       |              +-+->InstrRobSid+--->InstrSid
-//!       +--->Track+--->TrackUnit+--->CellNote (Empty, Play(Pitch), KeyOff, NoteCut, NoteFade)
-//!       |          +--->TrackEffect
-//!       |          +--->GlobalEffect
-//!       +--->Clip (placement of a Track on the timeline)
-//!       +--->AutomationLane (continuous parameter curves)
-//!       +--->TimelineMap (linearised playback order)
+//! xmrs
+//! ├── core/                        ← Modern DAW data model (format-agnostic)
+//! │   ├── module::Module
+//! │   │    ├── instrument: Vec<Instrument>
+//! │   │    ├── tracks: Vec<Track> ──► Cell { event, effects: Vec<TrackEffect> }
+//! │   │    ├── clips: SortedClips
+//! │   │    ├── automation: Vec<AutomationLane>
+//! │   │    ├── timeline_map: TimelineMap
+//! │   │    └── quirks: PlaybackQuirks (default all-off)
+//! │   ├── compatibility::{PlaybackQuirks, PanResetPolicy}
+//! │   ├── daw/                     ← AutomationLane, Clip, Track, TimelineMap, Euclidean
+//! │   └── fixed/                   ← Q-format primitives
+//! │
+//! └── tracker/                     ← Historical-format support
+//!     ├── format::ModuleFormat     ← (gated on any `import_*`)
+//!     ├── profiles::{ft2, it214, st3, pt}    ← preset quirks
+//!     ├── period::FrequencyType
+//!     ├── codepage                 ← CP437 / Latin-1
+//!     ├── mix_plugin               ← IT OpenMPT extension (cfg import_it)
+//!     ├── instr_{opl, sid, robsid} ← cfg-gated per importer
+//!     └── import/                  ← XM / IT / S3M / MOD / SID readers
+//!         ├── build/               ← Pattern → Tracks + Clips + TimelineMap
+//!         └── extract/             ← TrackImportUnit → AutomationLane
 //! ```
 //!
-//! You can load historical IT, S3M, SID, MOD, XM files using `import` (see `README.md`)
+//! ## Features
 //!
-//! You can serialize your work using serde
+//! Default `std + import` matches the desktop / server case. For a
+//! clean no-tracker build:
 //!
+//! ```toml
+//! [dependencies]
+//! xmrs = { version = "0.13", default-features = false, features = ["std"] }
+//! ```
+//!
+//! In this mode `Module` carries only the universal fields; no
+//! `origin`, no `mix_plugins`, no `Opl/Sid/RobSid` instrument
+//! variants. The historical presets in `tracker::profiles` are
+//! absent — quirks are all-off by default.
+//!
+//! You can serialize your work using serde.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
 extern crate alloc;
 
-/// A typical Note
-pub mod cell_note;
-/// Detect the legacy 8-bit codepage of a name field and decode it
-/// to UTF-8 (CP437 vs Latin-1 vs ASCII).
-pub mod codepage;
-/// Compatibility profile (named bundles of format + playback quirks).
-pub mod compatibility_profile;
-/// Playback-duration estimator (walks the row scheduler).
-pub mod duration;
-/// All effects
-pub mod effect;
-/// Envelope with Steroid
-pub mod envelope;
-/// Fixed-point primitives, domain newtypes, lookup tables and tracker-byte
-/// conversions. Provides the integer-only substrate `xmrs` uses to run
-/// on FPU-less targets — every former `f32` site on the runtime path
-/// has been folded onto these types. See [`fixed`] for the layer-by-
-/// layer breakdown.
-pub mod fixed;
-/// Instrument handling samples
-pub mod instr_default;
-/// Euclidean Rhythm Instrument
-pub mod instr_ekn;
-/// Midi Instrument
-pub mod instr_midi;
-/// Yamaha OPL Instrument
-pub mod instr_opl;
-/// Rob Hubbard Instrument
-pub mod instr_robsid;
-/// MOS6581 SID Instrument
-pub mod instr_sid;
-/// Instrument with Steroid
-pub mod instrument;
-/// New-Note Action / Duplicate Check rules for `InstrDefault`.
-pub mod instrument_behavior;
-/// IT-style keyboard remap: per-input-note sample + transposition.
-pub mod keyboard;
-/// IT-style mix-plugin table (OpenMPT extension).
-pub mod mix_plugin;
-/// SoundTracker Module with Steroid
-pub mod module;
-/// Period Helper
-pub mod period_helper;
+/// Core data model — format-agnostic.
+pub mod core;
 
-/// DAW layer: tracks, clips, automation lanes, timeline cache,
-/// build pipeline, and Euclidean detection.
-pub mod daw;
+/// Format-tied items: presets, importers, format-specific instruments.
+/// Each sub-module is gated behind one or more `import_*` features.
+pub mod tracker;
+
 /// Edit command API (atomic, undoable mutations of `Module`)
 pub mod edit;
-pub mod pitch;
-/// Sample with Steroid
-pub mod sample;
-/// A slot
-pub mod track_unit;
-/// Vibrato with Steroid
-pub mod vibrato;
-/// Voice-shaping parameters (envelopes, vibrato, filter, panning).
-pub mod voice_setup;
-/// All Waveform type
-pub mod waveform;
-/// A simple way for random values
-pub mod xorshift;
 
 /// The Xmrs Prelude
 pub mod prelude;
-
-/// Import historical files.
-/// Do not use it directly: see Module load* fn impl.
-///
-/// Compiled whenever at least one historical-format importer is
-/// enabled. Granular selection lives behind the `import_mod`,
-/// `import_xm`, `import_s3m`, `import_it`, and `import_sid` features;
-/// the umbrella `import` feature turns them all on.
-#[cfg(any(
-    feature = "import_mod",
-    feature = "import_xm",
-    feature = "import_s3m",
-    feature = "import_it",
-    feature = "import_sid",
-))]
-pub mod import;
 
 #[cfg(test)]
 mod tests {
@@ -126,7 +76,7 @@ mod tests {
     #[test]
     fn load_empty_xm() {
         let data = include_bytes!("../examples/empty.xm");
-        let module = crate::module::Module::load_xm(data);
+        let module = crate::core::module::Module::load_xm(data);
         assert!(
             module.is_ok(),
             "Failed to load empty.xm: {:?}",
@@ -138,7 +88,7 @@ mod tests {
     #[test]
     fn load_note_xm() {
         let data = include_bytes!("../examples/note.xm");
-        let module = crate::module::Module::load_xm(data).expect("Failed to load note.xm");
+        let module = crate::core::module::Module::load_xm(data).expect("Failed to load note.xm");
         assert!(
             !module.instrument.is_empty(),
             "Module should have instruments"
@@ -156,7 +106,7 @@ mod tests {
     #[cfg(feature = "import_sid")]
     #[test]
     fn load_sid_commando_has_consistent_layer() {
-        let sid = crate::import::sid::sid_module::SidModule::get_sid_commando();
+        let sid = crate::tracker::import::sid::sid_module::SidModule::get_sid_commando();
         let modules = sid.to_modules(false);
         assert!(
             !modules.is_empty(),
@@ -177,7 +127,7 @@ mod tests {
     #[test]
     fn load_empty_xm_has_consistent_layer() {
         let data = include_bytes!("../examples/empty.xm");
-        let module = crate::module::Module::load_xm(data).expect("load");
+        let module = crate::core::module::Module::load_xm(data).expect("load");
         module
             .verify_layers_consistent()
             .expect("DAW layer should be consistent on empty.xm");
@@ -187,7 +137,7 @@ mod tests {
     #[test]
     fn load_xi_instrument() {
         let data = include_bytes!("../examples/instr.xi");
-        let xmi = crate::import::xm::xi_instrument::XiInstrument::load(data);
+        let xmi = crate::tracker::import::xm::xi_instrument::XiInstrument::load(data);
         assert!(xmi.is_ok(), "Failed to load instr.xi: {:?}", xmi.err());
     }
 
@@ -195,7 +145,7 @@ mod tests {
     #[test]
     fn autodetect_xm() {
         let data = include_bytes!("../examples/note.xm");
-        let module = crate::module::Module::load(data);
+        let module = crate::core::module::Module::load(data);
         assert!(module.is_ok(), "Autodetect should find XM format");
     }
 }

@@ -7,19 +7,28 @@
 //! `extra_assert` structural check holds. PCM-level
 //! cycle-exactness lives in `xmrsplayer/tests/cycle_exact_pcm.rs`.
 
-#![cfg(feature = "std")]
+#![cfg(all(
+    feature = "std",
+    any(
+        feature = "import_mod",
+        feature = "import_xm",
+        feature = "import_s3m",
+        feature = "import_it",
+        feature = "import_sid",
+    )
+))]
 #![allow(deprecated)]
 
-use xmrs::daw::build_timeline::Pattern;
-use xmrs::fixed::fixed::{Q15, Q8_8};
+use xmrs::core::fixed::fixed::{Q15, Q8_8};
 use xmrs::prelude::*;
+use xmrs::tracker::import::build::Pattern;
 
 mod builder {
     use super::*;
 
     /// Synthetic-module builder. Accumulates pattern data locally
     /// then folds it into a Module's DAW layer via
-    /// [`xmrs::daw::build_timeline::build_timeline_layer`]. Post-3b the
+    /// [`xmrs::tracker::import::build::build_timeline_layer`]. Post-3b the
     /// Module struct itself no longer carries `pattern` /
     /// `pattern_order` — they live here as builder-local scaffolding.
     pub struct ModuleBuilder {
@@ -37,8 +46,8 @@ mod builder {
             }
         }
 
-        pub fn with_profile(mut self, p: CompatibilityProfile) -> Self {
-            self.module.profile = p;
+        pub fn with_quirks(mut self, q: PlaybackQuirks) -> Self {
+            self.module.quirks = q;
             self
         }
 
@@ -49,13 +58,23 @@ mod builder {
 
         pub fn with_pattern(mut self, channels: usize, rows: usize) -> Self {
             let pat: Pattern = (0..rows)
-                .map(|_| (0..channels).map(|_| TrackUnit::default()).collect())
+                .map(|_| {
+                    (0..channels)
+                        .map(|_| xmrs::tracker::import::unit::TrackImportUnit::default())
+                        .collect()
+                })
                 .collect();
             self.patterns.push(pat);
             self
         }
 
-        pub fn set_cell(mut self, pat: usize, row: usize, ch: usize, cell: TrackUnit) -> Self {
+        pub fn set_cell(
+            mut self,
+            pat: usize,
+            row: usize,
+            ch: usize,
+            cell: xmrs::tracker::import::unit::TrackImportUnit,
+        ) -> Self {
             self.patterns[pat][row][ch] = cell;
             self
         }
@@ -75,8 +94,18 @@ mod builder {
             self
         }
 
+        /// Push a runtime [`TrackEffect`] onto the row, converting it
+        /// to the [`TrackImportEffect`] shape the build pipeline now
+        /// consumes (DAW migration Phase 1+2). The converter is a
+        /// small partial inverse of `TrackImportEffect::to_track_
+        /// effects` — sufficient for the variants used by this test
+        /// suite. The resulting Cell produced by `build_timeline_layer`
+        /// round-trips to the same `TrackEffect` so test assertions
+        /// can still match the runtime variant.
         pub fn add_effect(mut self, pat: usize, row: usize, ch: usize, fx: TrackEffect) -> Self {
-            self.patterns[pat][row][ch].effects.push(fx);
+            self.patterns[pat][row][ch]
+                .effects
+                .push(track_effect_to_import(fx));
             self
         }
 
@@ -85,9 +114,9 @@ mod builder {
             pat: usize,
             row: usize,
             ch: usize,
-            fx: GlobalEffect,
+            fx: impl Into<GlobalEffect>,
         ) -> Self {
-            self.patterns[pat][row][ch].global_effects.push(fx);
+            self.patterns[pat][row][ch].push_global(fx.into());
             self
         }
 
@@ -103,12 +132,72 @@ mod builder {
         /// accumulated pattern data so the returned Module is
         /// ready to consume.
         pub fn build(mut self) -> Module {
-            xmrs::daw::build_timeline::build_timeline_layer(
+            xmrs::tracker::import::build::build_timeline_layer(
                 &mut self.module,
                 &self.pattern_order,
                 &self.patterns,
             );
             self.module
+        }
+    }
+
+    /// Map a runtime [`TrackEffect`] (the shape the test cases author)
+    /// to the corresponding [`xmrs::tracker::import::effect::TrackImportEffect`]
+    /// the build pipeline consumes. Covers exactly the variants used by
+    /// this suite; unhandled variants panic to flag missing entries
+    /// when new cases are added.
+    fn track_effect_to_import(te: TrackEffect) -> xmrs::tracker::import::effect::TrackImportEffect {
+        use xmrs::tracker::import::effect::TrackImportEffect as Tie;
+        match te {
+            TrackEffect::Arpeggio { half1, half2 } => Tie::Arpeggio(half1, half2),
+            TrackEffect::Tremor { on_time, off_time } => Tie::Tremor(on_time, off_time),
+            TrackEffect::Volume { value, tick } => Tie::Volume(value, tick),
+            TrackEffect::Panning(p) => Tie::Panning(p),
+            TrackEffect::Glissando(b) => Tie::Glissando(b),
+            TrackEffect::NoteCut { tick, past } => Tie::NoteCut(tick, past),
+            TrackEffect::NoteDelay(t) => Tie::NoteDelay(t),
+            TrackEffect::NoteOff { tick, past } => Tie::NoteOff(tick, past),
+            TrackEffect::NoteFadeOut { tick, past } => Tie::NoteFadeOut(tick, past),
+            TrackEffect::NoteRetrig {
+                speed,
+                volume_modifier: _,
+            } => Tie::NoteRetrig(speed),
+            TrackEffect::ChannelVolume(v) => Tie::ChannelVolume(v),
+            TrackEffect::InstrumentSampleOffset(o) => Tie::InstrumentSampleOffset(o),
+            TrackEffect::InstrumentFineTune(f) => Tie::InstrumentFineTune(f),
+            TrackEffect::InstrumentNewNoteAction(nna) => Tie::InstrumentNewNoteAction(nna),
+            TrackEffect::InstrumentSurround(b) => Tie::InstrumentSurround(b),
+            TrackEffect::InstrumentVolumeEnvelope(b) => Tie::InstrumentVolumeEnvelope(b),
+            TrackEffect::InstrumentVolumeEnvelopePosition(p) => {
+                Tie::InstrumentVolumeEnvelopePosition(p)
+            }
+            TrackEffect::InstrumentPanningEnvelope(b) => Tie::InstrumentPanningEnvelope(b),
+            TrackEffect::InstrumentPanningEnvelopePosition(p) => {
+                Tie::InstrumentPanningEnvelopePosition(p)
+            }
+            TrackEffect::InstrumentPitchEnvelope(b) => Tie::InstrumentPitchEnvelope(b),
+            other => panic!(
+                "track_effect_to_import: variant not yet covered for the test suite: {:?}",
+                other
+            ),
+        }
+    }
+
+    /// Push a [`TrackImportEffect`] onto a row directly — useful for
+    /// the lane-extracted families (Vibrato* / Tremolo* / Panbrello* /
+    /// Portamento* / TonePortamento / VolumeSlide* / ChannelVolumeSlide* /
+    /// PanningSlide*) that no longer have a `TrackEffect` shape after
+    /// DAW migration Phase 3c.3.
+    impl ModuleBuilder {
+        pub fn add_import_effect(
+            mut self,
+            pat: usize,
+            row: usize,
+            ch: usize,
+            fx: xmrs::tracker::import::effect::TrackImportEffect,
+        ) -> Self {
+            self.patterns[pat][row][ch].effects.push(fx);
+            self
         }
     }
 
@@ -178,18 +267,15 @@ fn quirk_cases() -> Vec<TestCase> {
             name: "ft2_pitch_slide_overflow_on",
             build: || {
                 ModuleBuilder::new()
-                    .with_profile(CompatibilityProfile::ft2())
+                    .with_quirks(xmrs::tracker::profiles::ft2())
                     .with_instrument(test_instrument())
                     .with_pattern(1, 16)
                     .set_note(0, 0, 0, Pitch::B9, 0)
-                    .add_effect(
+                    .add_import_effect(
                         0,
                         0,
                         0,
-                        TrackEffect::Portamento {
-                            speed: 127,
-                            fine: false,
-                        },
+                        xmrs::tracker::import::effect::TrackImportEffect::PortamentoDown(127),
                     )
                     .with_order(0, vec![0])
                     .build()
@@ -200,12 +286,12 @@ fn quirk_cases() -> Vec<TestCase> {
             name: "ft2_arpeggio_lut_on",
             build: || {
                 ModuleBuilder::new()
-                    .with_profile(CompatibilityProfile::ft2())
+                    .with_quirks(xmrs::tracker::profiles::ft2())
                     .with_instrument(test_instrument())
                     .with_pattern(1, 8)
                     .set_note(0, 0, 0, Pitch::C4, 0)
                     .add_effect(0, 0, 0, TrackEffect::Arpeggio { half1: 4, half2: 7 })
-                    .add_global_effect(0, 0, 0, GlobalEffect::Speed(15))
+                    .add_global_effect(0, 0, 0, SongLevelEffect::Speed(15))
                     .with_order(0, vec![0])
                     .build()
             },
@@ -215,11 +301,11 @@ fn quirk_cases() -> Vec<TestCase> {
             name: "speed_zero_ends_song_pt",
             build: || {
                 ModuleBuilder::new()
-                    .with_profile(CompatibilityProfile::pt())
+                    .with_quirks(xmrs::tracker::profiles::pt())
                     .with_instrument(test_instrument())
                     .with_pattern(1, 8)
                     .set_note(0, 0, 0, Pitch::C4, 0)
-                    .add_global_effect(0, 4, 0, GlobalEffect::Speed(0))
+                    .add_global_effect(0, 4, 0, SongLevelEffect::Speed(0))
                     .with_order(0, vec![0])
                     .build()
             },
@@ -229,11 +315,11 @@ fn quirk_cases() -> Vec<TestCase> {
             name: "speed_zero_no_quirk_modern",
             build: || {
                 ModuleBuilder::new()
-                    .with_profile(CompatibilityProfile::modern())
+                    .with_quirks(xmrs::core::compatibility::PlaybackQuirks::default())
                     .with_instrument(test_instrument())
                     .with_pattern(1, 8)
                     .set_note(0, 0, 0, Pitch::C4, 0)
-                    .add_global_effect(0, 4, 0, GlobalEffect::Speed(0))
+                    .add_global_effect(0, 4, 0, SongLevelEffect::Speed(0))
                     .with_order(0, vec![0])
                     .build()
             },
@@ -243,18 +329,18 @@ fn quirk_cases() -> Vec<TestCase> {
             name: "it_old_effects_profile",
             build: || {
                 ModuleBuilder::new()
-                    .with_profile(CompatibilityProfile::it214())
+                    .with_quirks(xmrs::tracker::profiles::it214())
                     .with_instrument(test_instrument())
                     .with_pattern(1, 8)
                     .set_note(0, 0, 0, Pitch::C4, 0)
-                    .add_effect(
+                    .add_import_effect(
                         0,
                         0,
                         0,
-                        TrackEffect::Vibrato {
-                            speed: Q8_8::from_int(4),
-                            depth: PitchDelta::from_semitones(1),
-                        },
+                        xmrs::tracker::import::effect::TrackImportEffect::Vibrato(
+                            Q8_8::from_int(4),
+                            PitchDelta::from_semitones(1),
+                        ),
                     )
                     .with_order(0, vec![0])
                     .build()
@@ -265,7 +351,7 @@ fn quirk_cases() -> Vec<TestCase> {
             name: "it215_profile",
             build: || {
                 ModuleBuilder::new()
-                    .with_profile(CompatibilityProfile::it215())
+                    .with_quirks(xmrs::tracker::profiles::it215())
                     .with_instrument(test_instrument())
                     .with_pattern(1, 8)
                     .set_note(0, 0, 0, Pitch::C4, 0)
@@ -278,7 +364,7 @@ fn quirk_cases() -> Vec<TestCase> {
             name: "st3_profile",
             build: || {
                 ModuleBuilder::new()
-                    .with_profile(CompatibilityProfile::st3())
+                    .with_quirks(xmrs::tracker::profiles::st3())
                     .with_instrument(test_instrument())
                     .with_pattern(1, 8)
                     .set_note(0, 0, 0, Pitch::C4, 0)
@@ -295,6 +381,8 @@ fn quirk_cases() -> Vec<TestCase> {
 // =====================================================================
 
 fn track_effect_cases() -> Vec<TestCase> {
+    use xmrs::tracker::import::effect::TrackImportEffect as Tie;
+
     // The `build: fn() -> Module` signature forbids captured state,
     // so each case is expanded by a macro into a fresh `fn` body.
     macro_rules! trackfx_case {
@@ -315,56 +403,42 @@ fn track_effect_cases() -> Vec<TestCase> {
         };
     }
 
+    /// Lane-extracted family — feed `TrackImportEffect` directly.
+    macro_rules! tie_case {
+        ($name_lit:expr, $tie:expr) => {
+            TestCase {
+                name: $name_lit,
+                build: || {
+                    ModuleBuilder::new()
+                        .with_instrument(test_instrument())
+                        .with_pattern(1, 16)
+                        .set_note(0, 0, 0, Pitch::C4, 0)
+                        .add_import_effect(0, 0, 0, $tie)
+                        .with_order(0, vec![0])
+                        .build()
+                },
+                extra_assert: None,
+            }
+        };
+    }
+
     vec![
         trackfx_case!(
             arp,
             "trackfx_arpeggio",
             TrackEffect::Arpeggio { half1: 4, half2: 7 }
         ),
-        trackfx_case!(
-            porta_up,
-            "trackfx_portamento_up",
-            TrackEffect::Portamento {
-                speed: -32,
-                fine: false
-            }
-        ),
-        trackfx_case!(
-            porta_down,
-            "trackfx_portamento_down",
-            TrackEffect::Portamento {
-                speed: 32,
-                fine: false
-            }
-        ),
-        trackfx_case!(
-            porta_fine,
-            "trackfx_portamento_fine",
-            TrackEffect::Portamento {
-                speed: 16,
-                fine: true
-            }
-        ),
-        trackfx_case!(
-            tone_porta,
-            "trackfx_tone_portamento",
-            TrackEffect::TonePortamento(32)
-        ),
-        trackfx_case!(
-            vibrato,
+        tie_case!("trackfx_portamento_up", Tie::PortamentoUp(-32)),
+        tie_case!("trackfx_portamento_down", Tie::PortamentoDown(32)),
+        tie_case!("trackfx_portamento_fine", Tie::PortamentoFineUp(16)),
+        tie_case!("trackfx_tone_portamento", Tie::TonePortamento(32)),
+        tie_case!(
             "trackfx_vibrato",
-            TrackEffect::Vibrato {
-                speed: Q8_8::from_int(4),
-                depth: PitchDelta::from_semitones(1)
-            }
+            Tie::Vibrato(Q8_8::from_int(4), PitchDelta::from_semitones(1))
         ),
-        trackfx_case!(
-            tremolo,
+        tie_case!(
             "trackfx_tremolo",
-            TrackEffect::Tremolo {
-                speed: Q8_8::from_int(4),
-                depth: Q15::from_ratio(1, 4)
-            }
+            Tie::Tremolo(Q8_8::from_int(4), Q15::from_ratio(1, 4))
         ),
         trackfx_case!(
             tremor,
@@ -374,13 +448,9 @@ fn track_effect_cases() -> Vec<TestCase> {
                 off_time: 2
             }
         ),
-        trackfx_case!(
-            volume_slide,
+        tie_case!(
             "trackfx_volume_slide",
-            TrackEffect::VolumeSlide {
-                speed: Q15::from_ratio(1, 32),
-                fine: false
-            }
+            Tie::VolumeSlideN(Q15::from_ratio(1, 32))
         ),
         trackfx_case!(
             volume_set,
@@ -395,21 +465,13 @@ fn track_effect_cases() -> Vec<TestCase> {
             "trackfx_panning",
             TrackEffect::Panning(Panning::from_ratio(3, 4))
         ),
-        trackfx_case!(
-            panning_slide,
+        tie_case!(
             "trackfx_panning_slide",
-            TrackEffect::PanningSlide {
-                speed: Q15::from_ratio(1, 32),
-                fine: false
-            }
+            Tie::PanningSlideN(Q15::from_ratio(1, 32))
         ),
-        trackfx_case!(
-            panbrello,
+        tie_case!(
             "trackfx_panbrello",
-            TrackEffect::Panbrello {
-                speed: Q8_8::from_int(4),
-                depth: Q15::from_ratio(1, 4)
-            }
+            Tie::Panbrello(Q8_8::from_int(4), Q15::from_ratio(1, 4))
         ),
         trackfx_case!(
             glissando,
@@ -454,19 +516,15 @@ fn track_effect_cases() -> Vec<TestCase> {
             "trackfx_channel_volume",
             TrackEffect::ChannelVolume(ChannelVolume::from_byte_64(32))
         ),
-        trackfx_case!(
-            channel_volume_slide,
+        tie_case!(
             "trackfx_channel_volume_slide",
-            TrackEffect::ChannelVolumeSlide {
-                speed: Q15::from_ratio(1, 64),
-                fine: false
-            }
+            Tie::ChannelVolumeSlideN(Q15::from_ratio(1, 64))
         ),
     ]
 }
 
 // =====================================================================
-// 10.3.3 — GlobalEffect variants
+// 10.3.3 — Global effect variants (NavigationEffect + SongLevelEffect)
 // =====================================================================
 
 fn global_effect_cases() -> Vec<TestCase> {
@@ -489,20 +547,28 @@ fn global_effect_cases() -> Vec<TestCase> {
     }
 
     vec![
-        gfx_case!("globalfx_bpm", 0, GlobalEffect::Bpm(140)),
-        gfx_case!("globalfx_bpm_slide", 0, GlobalEffect::BpmSlide(5)),
-        gfx_case!("globalfx_speed", 0, GlobalEffect::Speed(4)),
-        gfx_case!("globalfx_pattern_break", 2, GlobalEffect::PatternBreak(0)),
-        gfx_case!("globalfx_position_jump", 2, GlobalEffect::PositionJump(0)),
+        gfx_case!("globalfx_bpm", 0, SongLevelEffect::Bpm(140)),
+        gfx_case!("globalfx_bpm_slide", 0, SongLevelEffect::BpmSlide(5)),
+        gfx_case!("globalfx_speed", 0, SongLevelEffect::Speed(4)),
+        gfx_case!(
+            "globalfx_pattern_break",
+            2,
+            NavigationEffect::PatternBreak(0)
+        ),
+        gfx_case!(
+            "globalfx_position_jump",
+            2,
+            NavigationEffect::PositionJump(0)
+        ),
         gfx_case!(
             "globalfx_pattern_loop_anchor",
             1,
-            GlobalEffect::PatternLoop(0)
+            NavigationEffect::PatternLoop(0)
         ),
         gfx_case!(
             "globalfx_pattern_delay",
             0,
-            GlobalEffect::PatternDelay {
+            NavigationEffect::PatternDelay {
                 quantity: 2,
                 tempo: false
             }
@@ -510,12 +576,12 @@ fn global_effect_cases() -> Vec<TestCase> {
         gfx_case!(
             "globalfx_volume_set",
             0,
-            GlobalEffect::Volume(Volume::from_ratio(48, 64))
+            SongLevelEffect::Volume(Volume::from_ratio(48, 64))
         ),
         gfx_case!(
             "globalfx_volume_slide",
             0,
-            GlobalEffect::VolumeSlide {
+            SongLevelEffect::VolumeSlide {
                 speed: Q15::from_ratio(1, 64),
                 fine: false
             }
@@ -528,8 +594,8 @@ fn global_effect_cases() -> Vec<TestCase> {
                     .with_instrument(test_instrument())
                     .with_pattern(1, 8)
                     .set_note(0, 0, 0, Pitch::C4, 0)
-                    .add_global_effect(0, 1, 0, GlobalEffect::PatternLoop(0))
-                    .add_global_effect(0, 4, 0, GlobalEffect::PatternLoop(3))
+                    .add_global_effect(0, 1, 0, NavigationEffect::PatternLoop(0))
+                    .add_global_effect(0, 4, 0, NavigationEffect::PatternLoop(3))
                     .with_order(0, vec![0])
                     .build()
             },
@@ -674,7 +740,7 @@ fn structural_cases() -> Vec<TestCase> {
                         0,
                         4,
                         0,
-                        TrackUnit {
+                        xmrs::tracker::import::unit::TrackImportUnit {
                             note: CellNote::KeyOff,
                             ..Default::default()
                         },
@@ -695,7 +761,7 @@ fn structural_cases() -> Vec<TestCase> {
                         0,
                         4,
                         0,
-                        TrackUnit {
+                        xmrs::tracker::import::unit::TrackImportUnit {
                             note: CellNote::NoteCut,
                             ..Default::default()
                         },
@@ -782,15 +848,18 @@ fn structural_cases() -> Vec<TestCase> {
                 // position. With the old (buggy)
                 // `start_row_in_source_pattern`-based resolution one
                 // of the lookups returned None.
+                // `row_at` returns `Vec<(Cell, Option<usize>)>` since
+                // DAW migration Phase 1+2 — the second element is
+                // the Track-level instrument, irrelevant here.
                 let cell_a = m.row_at(0, 0, 0); // pat 0 row 0
                 let cell_b = m.row_at(0, 1, 4); // pat 1 row 4
                 assert!(
-                    matches!(cell_a[0].note, CellNote::Play(_)),
-                    "pat 0 row 0 should resolve to a Play(_)"
+                    matches!(cell_a[0].0.event, CellEvent::NoteOn { .. }),
+                    "pat 0 row 0 should resolve to a NoteOn"
                 );
                 assert!(
-                    matches!(cell_b[0].note, CellNote::Play(_)),
-                    "pat 1 row 4 should resolve to a Play(_) after dedup"
+                    matches!(cell_b[0].0.event, CellEvent::NoteOn { .. }),
+                    "pat 1 row 4 should resolve to a NoteOn after dedup"
                 );
             }),
         },
@@ -801,8 +870,8 @@ fn structural_cases() -> Vec<TestCase> {
                     .with_instrument(test_instrument())
                     .with_pattern(1, 8)
                     .set_note(0, 0, 0, Pitch::C4, 0)
-                    .add_global_effect(0, 0, 0, GlobalEffect::PatternLoop(0))
-                    .add_global_effect(0, 3, 0, GlobalEffect::PatternLoop(2))
+                    .add_global_effect(0, 0, 0, NavigationEffect::PatternLoop(0))
+                    .add_global_effect(0, 3, 0, NavigationEffect::PatternLoop(2))
                     .with_order(0, vec![0])
                     .build()
             },
@@ -821,7 +890,7 @@ fn structural_cases() -> Vec<TestCase> {
                     .with_pattern(1, 8)
                     .set_note(0, 0, 0, Pitch::C4, 0)
                     // PatternBreak at the end of pattern 0 to row 3 of pattern 1
-                    .add_global_effect(0, 7, 0, GlobalEffect::PatternBreak(3))
+                    .add_global_effect(0, 7, 0, NavigationEffect::PatternBreak(3))
                     .set_note(1, 0, 0, Pitch::C4, 0)
                     .with_order(0, vec![0, 1])
                     .build()
@@ -851,7 +920,7 @@ fn structural_cases() -> Vec<TestCase> {
                     .with_pattern(1, 4)
                     .with_pattern(1, 4)
                     .set_note(0, 0, 0, Pitch::C4, 0)
-                    .add_global_effect(0, 0, 0, GlobalEffect::PositionJump(2))
+                    .add_global_effect(0, 0, 0, NavigationEffect::PositionJump(2))
                     .with_order(0, vec![0, 1, 2])
                     .build()
             },
@@ -877,7 +946,7 @@ fn structural_cases() -> Vec<TestCase> {
                     .with_instrument(test_instrument())
                     .with_pattern(1, 4)
                     .set_note(0, 0, 0, Pitch::C4, 0)
-                    .add_global_effect(0, 0, 0, GlobalEffect::PositionJump(99))
+                    .add_global_effect(0, 0, 0, NavigationEffect::PositionJump(99))
                     .with_order(0, vec![0])
                     .build()
             },
@@ -906,7 +975,7 @@ fn structural_cases() -> Vec<TestCase> {
                     .with_pattern(1, 8)
                     .with_pattern(1, 8)
                     .set_note(0, 0, 0, Pitch::C4, 0)
-                    .add_global_effect(0, 7, 0, GlobalEffect::PatternBreak(5))
+                    .add_global_effect(0, 7, 0, NavigationEffect::PatternBreak(5))
                     .set_note(1, 5, 0, Pitch::C4, 0)
                     .with_order(0, vec![0, 1])
                     .build()
@@ -935,7 +1004,7 @@ fn structural_cases() -> Vec<TestCase> {
                         0,
                         0,
                         0,
-                        GlobalEffect::PatternDelay {
+                        NavigationEffect::PatternDelay {
                             quantity: 3,
                             tempo: false,
                         },
@@ -965,7 +1034,7 @@ fn structural_cases() -> Vec<TestCase> {
                     .with_instrument(test_instrument())
                     .with_pattern(1, 4)
                     .set_note(0, 0, 0, Pitch::C4, 0)
-                    .add_global_effect(0, 1, 0, GlobalEffect::Speed(4))
+                    .add_global_effect(0, 1, 0, SongLevelEffect::Speed(4))
                     .with_order(0, vec![0])
                     .build()
             },
@@ -984,7 +1053,7 @@ fn structural_cases() -> Vec<TestCase> {
                     .with_instrument(test_instrument())
                     .with_pattern(1, 4)
                     .set_note(0, 0, 0, Pitch::C4, 0)
-                    .add_global_effect(0, 1, 0, GlobalEffect::Bpm(160))
+                    .add_global_effect(0, 1, 0, SongLevelEffect::Bpm(160))
                     .with_order(0, vec![0])
                     .build()
             },
@@ -1007,8 +1076,8 @@ fn structural_cases() -> Vec<TestCase> {
                     .with_pattern(1, 4)
                     .with_pattern(1, 4)
                     .set_note(0, 0, 0, Pitch::C4, 0)
-                    .add_global_effect(0, 0, 0, GlobalEffect::PatternLoop(0))
-                    .add_global_effect(0, 3, 0, GlobalEffect::PatternLoop(2))
+                    .add_global_effect(0, 0, 0, NavigationEffect::PatternLoop(0))
+                    .add_global_effect(0, 3, 0, NavigationEffect::PatternLoop(2))
                     .with_order(0, vec![0, 1])
                     .build()
             },
@@ -1038,8 +1107,8 @@ fn structural_cases() -> Vec<TestCase> {
                     .with_pattern(1, 4)
                     .with_pattern(1, 4)
                     .set_note(0, 0, 0, Pitch::C4, 0)
-                    .add_global_effect(0, 0, 0, GlobalEffect::PositionJump(2))
-                    .add_global_effect(0, 0, 0, GlobalEffect::PatternBreak(0))
+                    .add_global_effect(0, 0, 0, NavigationEffect::PositionJump(2))
+                    .add_global_effect(0, 0, 0, NavigationEffect::PatternBreak(0))
                     .with_order(0, vec![0, 1, 2])
                     .build()
             },
@@ -1218,7 +1287,7 @@ fn structural_cases() -> Vec<TestCase> {
             },
             extra_assert: Some(|m| {
                 let cells = m.row_at(0, 99, 99);
-                assert!(cells.iter().all(|c| matches!(c.note, CellNote::Empty)));
+                assert!(cells.iter().all(|c| matches!(c.0.event, CellEvent::None)));
             }),
         },
     ]

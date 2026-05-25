@@ -37,10 +37,20 @@ Module ─┬─ Instrument ─┬─ InstrDefault ─┬─ VoiceSetup     (env
         │              ├─ InstrOpl       (Yamaha OPL)
         │              ├─ InstrSid       (MOS6581 SID voice)
         │              └─ InstrRobSid ── InstrSid  (Rob Hubbard-style)
-        └─ Track ─ Vec<TrackUnit> ─┬─ CellNote        (Empty, Play(Pitch), KeyOff, NoteCut, NoteFade)
-                                   ├─ TrackEffect
-                                   └─ GlobalEffect
+        └─ Track ─ Vec<Cell> ──────┬─ CellEvent       (None, NoteOn{pitch,velocity}, NoteOnGhost{…}, InstrReset, NoteOff{retrig}, NoteCut, NoteFade)
+                                   └─ Vec<TrackEffect>  (discrete / per-trigger effects only — see below)
 ```
+
+The continuous-modulation families (Vibrato* / Tremolo* /
+Panbrello* / Portamento* / TonePortamento / VolumeSlide* /
+ChannelVolumeSlide* / PanningSlide*) and every song-level global
+(Bpm / Speed / GlobalVolume + slides) live on
+`Module::automation: Vec<AutomationLane>` instead, extracted upstream
+from `TrackImportUnit` at import time. The `MidiMacro` global effect
+relocates to `Cell::effects` as `TrackEffect::MidiMacro` during
+materialisation. Navigation globals (`PatternBreak` / `PositionJump` /
+`PatternLoop` / `PatternDelay`) are absorbed into
+[`TimelineMap`](#the-daw-timeline-layer) at import time.
 
 Tracks are arranged on the timeline by `Clip`s; see
 [*The DAW timeline layer*](#the-daw-timeline-layer) below for the
@@ -81,13 +91,16 @@ importers (or on demand via
 [`xmrs::daw::build_timeline::build_timeline_layer`]):
 
 ```text
-Module ─┬─ tracks       : Vec<Track>     (one per song + instrument)
-        ├─ clips        : SortedClips    (placements on the timeline)
-        ├─ automation   : Vec<AutomationLane>  (edit-API output)
-        └─ timeline_map : TimelineMap    (linearised pattern_order)
+Module ─┬─ tracks        : Vec<Track>            (one per song + instrument)
+        ├─ clips         : SortedClips           (placements on the timeline)
+        ├─ automation    : Vec<AutomationLane>   (lanes for every continuous modulation
+        │                                         + Bpm / Speed / GlobalVolume song-levels,
+        │                                         extracted at import or via the edit API)
+        ├─ timeline_map  : TimelineMap           (linearised pattern_order)
+        └─ song_loop_to  : Option<u32>           (XM/MOD restart byte, as an absolute tick)
 ```
 
-- **`Track`** owns the actual `Vec<TrackUnit>` for a given
+- **`Track`** owns the actual `Vec<Cell>` for a given
   (song, instrument) pair. Two special `instrument` values are
   reserved: `EFFECT_ONLY_INSTRUMENT` for segments that carry only
   effects (no note/instrument), and the index of an
@@ -100,21 +113,35 @@ Module ─┬─ tracks       : Vec<Track>     (one per song + instrument)
   `(song, target_channel, position_tick)` and exposes
   `from_unsorted`, `lane`, `active_at`, `modify`, `insert`.
 - **`TimelineMap`** flattens the `pattern_order` into absolute ticks
-  and survives `Bxx` / `Dxx` / restart jumps via
-  `find_entry_at_order`.
+  and absorbs every navigation effect (`Bxx` / `Dxx` / `E6y` / `EEy`
+  + restart byte) at import time — the player navigates through
+  `timeline_map.entries` linearly, no row-by-row jump interpretation.
+- **`AutomationLane`** carries the modulation curves: `Points` for
+  typed `(tick, value)` curves (Bpm/Speed/GlobalVolume), `Lfo` for
+  Vibrato/Tremolo/Panbrello, `Slide` for VolumeSlide/Portamento/
+  ChannelVolumeSlide/PanningSlide/BpmSlide/GlobalVolumeSlide,
+  `Glide` for TonePortamento.
 
 The import pipeline (run by every `import_*` feature) is:
 
 ```text
-build_timeline_map → extract_tracks_and_clips → dedupe_tracks_by_content
-                  → (optional) auto_convert_strict_euclidean_tracks
+build_timeline_map        ── linearise order + absorb navigation
+  → extract_tracks_and_clips     ── split by instrument, emit clips
+  → dedupe_tracks_by_content     ── fuse bit-identical tracks
+  → auto_convert_strict_euclidean_tracks    ── collapse Bjorklund tracks
+  → extract_per_track_lanes_from_patterns   ── Vibrato/Tremolo/Panbrello/
+                                              Portamento/TonePortamento/
+                                              VolumeSlide/ChannelVolumeSlide/
+                                              PanningSlide → AutomationLanes
+  → extract_song_lanes_from_patterns        ── Bpm/Speed/GlobalVolume + slides
 ```
 
 [`Module::row_at(song, pattern, row)`] is the single cell-resolution
 API. It looks up the absolute tick in `timeline_map`, picks the
 active clip on each `(song, target_channel)` lane via
-`SortedClips::active_at`, and returns one `TrackUnit` per channel —
-all reads go through the DAW layer, there is no legacy fallback. The
+`SortedClips::active_at`, and returns one `(Cell, Option<usize>)` per
+channel (the `Option<usize>` is the active Track's instrument index).
+All reads go through the DAW layer; there is no legacy fallback. The
 [`xmrs::edit`] module exposes incremental commands
 (`cmd_create_clip`, `cmd_duplicate_clip`, …) for editor / DAW UIs,
 with apply/undo round-trip verified by a proptest suite.
@@ -122,11 +149,10 @@ with apply/undo round-trip verified by a proptest suite.
 ### Euclidean rhythm instruments
 
 `InstrEkn` (`InstrumentType::Euclidean`) stores
-`(events, steps, rotation, prototype)`: a single `TrackUnit`
-prototype plus a Bjorklund pattern. When a strict
-single-note repetition is detected,
-`auto_convert_strict_euclidean_tracks` collapses the Track to one
-row and routes the cells through a canonical
+`(events, steps, rotation, prototype)`: a single `Cell` prototype
+plus a Bjorklund pattern. When a strict single-note repetition is
+detected, `auto_convert_strict_euclidean_tracks` collapses the
+Track to one row and routes the cells through a canonical
 `euclidean_pattern(events, steps)` generator at playback time.
 Bit-identical to the original — but the on-disk track is one row
 instead of N.

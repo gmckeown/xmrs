@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
-use xmrs::import::bin_reader::ImportError;
-use xmrs::import::xm::xi_instrument::XiInstrument;
+use xmrs::tracker::import::bin_reader::ImportError;
+use xmrs::tracker::import::xm::xi_instrument::XiInstrument;
 
 const XI: &[u8] = include_bytes!("instr.xi");
 
