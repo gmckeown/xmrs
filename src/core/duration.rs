@@ -53,7 +53,12 @@ impl ModuleDuration for Module {
 /// extension trait. Returns [`Duration::ZERO`] when `song` has no
 /// entries in `module.timeline_map`.
 pub fn compute_duration(module: &Module, song: usize) -> Duration {
-    let song_u16 = song.min(u16::MAX as usize) as u16;
+    // `song` is u16-wide in `TimelineMap`; anything past u16::MAX is
+    // an out-of-range request and yields ZERO (no such song).
+    if song > u16::MAX as usize {
+        return Duration::ZERO;
+    }
+    let song_u16 = song as u16;
     let mut total_nanos: u64 = 0;
     for e in &module.timeline_map.entries {
         if e.song != song_u16 {

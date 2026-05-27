@@ -32,13 +32,13 @@ Module ─┬─ Instrument ─┬─ InstrDefault ─┬─ VoiceSetup     (env
         │              │                ├─ Keyboard       (per-input-note sample + transposition)
         │              │                ├─ InstrMidi
         │              │                └─ Sample         (loop & sustain-loop)
-        │              ├─ InstrEkn       (Euclidean-rhythm instrument)
         │              ├─ InstrMidi      (MIDI instrument)
         │              ├─ InstrOpl       (Yamaha OPL)
         │              ├─ InstrSid       (MOS6581 SID voice)
         │              └─ InstrRobSid ── InstrSid  (Rob Hubbard-style)
-        └─ Track ─ Vec<Cell> ──────┬─ CellEvent       (None, NoteOn{pitch,velocity}, NoteOnGhost{…}, InstrReset, NoteOff{retrig}, NoteCut, NoteFade)
-                                   └─ Vec<TrackEffect>  (discrete / per-trigger effects only — see below)
+        └─ Track ─┬─ Notes { rows: Vec<Cell> } ──┬─ CellEvent       (None, NoteOn{pitch,velocity}, NoteOnGhost{…}, InstrReset, NoteOff{retrig}, NoteCut, NoteFade)
+                  │                              └─ Vec<TrackEffect>  (discrete / per-trigger effects only — see below)
+                  └─ Euclidean { events, steps, rotation, prototype: Cell, humanize_* }  (Bjorklund generator)
 ```
 
 The continuous-modulation families (Vibrato* / Tremolo* /
@@ -100,12 +100,17 @@ Module ─┬─ tracks        : Vec<Track>            (one per song + instrumen
         └─ song_loop_to  : Option<u32>           (XM/MOD restart byte, as an absolute tick)
 ```
 
-- **`Track`** owns the actual `Vec<Cell>` for a given
-  (song, instrument) pair. Two special `instrument` values are
-  reserved: `EFFECT_ONLY_INSTRUMENT` for segments that carry only
-  effects (no note/instrument), and the index of an
-  `InstrumentType::Euclidean(…)` wrapper for collapsed Euclidean
-  rhythm tracks.
+- **`Track`** is an enum with two shapes. `Track::Notes` owns the
+  per-row `Vec<Cell>` (the classic tracker representation, produced
+  by every importer and by manual editing). `Track::Euclidean` is a
+  Bjorklund generator — `(events, steps, rotation)` plus a single
+  prototype `Cell` — and synthesises one cell per row at playback
+  time (see [*Euclidean rhythm tracks*](#euclidean-rhythm-tracks)).
+  Both variants carry a fixed `instrument` index, invariant for the
+  Track's lifetime; a change of instrument starts a new Track. One
+  special `instrument` value is reserved: `EFFECT_ONLY_INSTRUMENT`
+  marks segments that carry only effects (no note/instrument) and
+  modify a voice inherited from a previous pattern.
 - **`Clip`** places a `Track` onto a `(song, target_channel)` lane at
   a given `position_tick`, with `end_tick` stored at extract time so
   half-open `active_at` lookups are exact.
@@ -146,16 +151,22 @@ All reads go through the DAW layer; there is no legacy fallback. The
 (`cmd_create_clip`, `cmd_duplicate_clip`, …) for editor / DAW UIs,
 with apply/undo round-trip verified by a proptest suite.
 
-### Euclidean rhythm instruments
+### Euclidean rhythm tracks
 
-`InstrEkn` (`InstrumentType::Euclidean`) stores
-`(events, steps, rotation, prototype)`: a single `Cell` prototype
-plus a Bjorklund pattern. When a strict single-note repetition is
-detected, `auto_convert_strict_euclidean_tracks` collapses the
-Track to one row and routes the cells through a canonical
-`euclidean_pattern(events, steps)` generator at playback time.
-Bit-identical to the original — but the on-disk track is one row
-instead of N.
+Euclidean rhythms are a *Track* kind, not an instrument kind:
+`Track::Euclidean` stores `(events, steps, rotation, prototype)` —
+a single `Cell` prototype plus the Bjorklund parameters — alongside
+the same `instrument` / `muted` / `name` fields as `Track::Notes`.
+When a `Track::Notes` whose cells match a canonical Bjorklund
+pattern (uniform pitch, uniform velocity, no per-cell effects) is
+detected at import, `auto_convert_strict_euclidean_tracks` rewrites
+it in place as a `Track::Euclidean`. The row resolver expands the
+pattern at playback time via the canonical
+`euclidean_pattern(events, steps)` generator — bit-identical to the
+original, but the on-disk Track holds parameters instead of N
+explicit rows. Two optional fields (`humanize_advance_max_ticks` /
+`humanize_probability`) carry pulse-level humanisation that the
+player applies only when the user opts in.
 
 ## Loading a file
 

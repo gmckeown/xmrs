@@ -12,7 +12,7 @@
 //!    sub-module).
 //! 4. [`crate::core::daw::euclidean::auto_convert_strict_euclidean_tracks`]
 //!    rewrites tracks whose cells form a strict Bjorklund pattern
-//!    into an `InstrumentType::Euclidean` wrapper (lossless).
+//!    in place as a `Track::Euclidean` variant (lossless).
 //!
 //! `split_rows_by_instrument` is also exposed for track-native
 //! importers (SID) that don't go through a pattern grid.
@@ -69,6 +69,13 @@ pub const EFFECT_ONLY_INSTRUMENT: usize = usize::MAX;
 ///
 /// Defensive interpretation of `restart_byte`:
 ///
+/// * `song_loop_to` already populated — no-op. An in-pattern `Bxx` /
+///   `Dxx` jump that points back into walked rows takes precedence
+///   over the header byte: actual playback follows the in-row
+///   effect first and never observes the natural end-of-timeline
+///   where the restart byte would kick in. `build_timeline_layer`
+///   sets this from the walker, so this helper just respects what
+///   was decided there.
 /// * `0` — no-op. The default wrap-to-order-0 already does this.
 /// * out-of-range — no-op. Covers ProTracker's `0x7F` sentinel
 ///   and any other byte whose order has no `(row=0, loop_iter=0)`
@@ -77,6 +84,9 @@ pub const EFFECT_ONLY_INSTRUMENT: usize = usize::MAX;
 /// Must be called **after** [`build_timeline_layer`] so the
 /// timeline_map is populated.
 pub fn set_song_loop_to_restart_byte(module: &mut Module, song: u16, restart_byte: usize) {
+    if module.song_loop_to.is_some() {
+        return;
+    }
     if restart_byte == 0 {
         return;
     }
@@ -105,15 +115,35 @@ pub fn set_song_loop_to_restart_byte(module: &mut Module, song: u16, restart_byt
 ///
 /// The 4th pass
 /// ([`crate::core::daw::euclidean::auto_convert_strict_euclidean_tracks`])
-/// runs after dedup: any Track whose cells form a strict Bjorklund
-/// pattern is rewritten lossless to an `InstrumentType::Euclidean`
-/// wrapper.
+/// runs after dedup: any [`Track::Notes`] whose cells form a strict
+/// Bjorklund pattern is rewritten lossless to a [`Track::Euclidean`].
+///
+/// [`Track::Notes`]: crate::core::daw::track::Track::Notes
+/// [`Track::Euclidean`]: crate::core::daw::track::Track::Euclidean
 pub fn build_timeline_layer(
     module: &mut Module,
     pattern_order: &[Vec<usize>],
     pattern: &[Pattern],
 ) {
-    module.timeline_map = build_timeline_map(module, pattern_order, pattern);
+    // The walker, in addition to producing the linearised timeline,
+    // tells us the tick of the row that the song's first explicit
+    // `Bxx` / `Dxx` jump re-entered (if any). That tick is the
+    // natural end-of-song wrap target — it matches what every other
+    // tracker (PT/FT2/OpenMPT/Schism) would observe at runtime when
+    // playback hits the jump. We forward it to `song_loop_to` so the
+    // sequencer wraps to that row instead of restarting at order 0.
+    //
+    // The restart byte (XM `restart_position` / MOD restart byte) is
+    // applied separately by the importer via
+    // `set_song_loop_to_restart_byte`; that helper now defers to a
+    // walker-detected wrap (Bxx in the song body takes precedence
+    // over the header byte — playback never reaches the natural
+    // end-of-timeline when an in-pattern jump fires first).
+    let (timeline_map, walker_wrap_tick) = build_timeline_map(module, pattern_order, pattern);
+    module.timeline_map = timeline_map;
+    if let Some(tick) = walker_wrap_tick {
+        module.song_loop_to = Some(tick);
+    }
     let (tracks, clips) = extract_tracks_and_clips(pattern, &module.timeline_map);
     module.tracks = tracks;
     module.clips = crate::core::daw::sorted_clips::SortedClips::from_unsorted(clips);

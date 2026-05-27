@@ -95,14 +95,13 @@ impl TrackImportUnit {
     /// [`crate::core::cell::Cell`] in one step:
     ///
     /// * `(note, instrument, velocity)` folds into a single
-    ///   [`CellEvent`] via [`CellEvent::from_legacy`].
+    ///   [`CellEvent`] via [`CellEvent::from_columns`].
     /// * `self.effects` are converted to runtime [`TrackEffect`]s
-    ///   via [`TrackImportEffect::to_track_effects`] — which since
-    ///   DAW migration Phase 3c.3 skips the migrated families
-    ///   (Vibrato* / Tremolo* / Panbrello* / Portamento /
-    ///   TonePortamento / VolumeSlide / ChannelVolumeSlide /
-    ///   PanningSlide). Those live on
-    ///   [`crate::core::daw::automation::AutomationLane`]s only.
+    ///   via [`TrackImportEffect::to_track_effects`], which omits the
+    ///   automation-only families (Vibrato* / Tremolo* / Panbrello* /
+    ///   Portamento / TonePortamento / VolumeSlide /
+    ///   ChannelVolumeSlide / PanningSlide). Those live exclusively
+    ///   on [`crate::core::daw::automation::AutomationLane`]s.
     /// * Every MIDI macro in `self.midi_macros` is appended to
     ///   `cell.effects` as [`TrackEffect::MidiMacro`] — the runtime
     ///   reads MidiMacro from `cell.effects` exclusively.
@@ -117,7 +116,7 @@ impl TrackImportUnit {
             effects.push(TrackEffect::MidiMacro(m.clone()));
         }
         Cell {
-            event: CellEvent::from_legacy(self.note, self.instrument, self.velocity),
+            event: CellEvent::from_columns(self.note, self.instrument, self.velocity),
             effects,
         }
     }

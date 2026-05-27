@@ -321,6 +321,25 @@ impl AmigaModule {
             amiga.samples[i].name = codepage.decode_name(&ser_amiga_module[off..off + 22]);
         }
 
+        // After the sample-header loop, the header block continues:
+        //   1 byte  song_length
+        //   1 byte  restart_position
+        //   128     positions (order list)
+        //   4       optional tag (31-sample variants only)
+        // The previous code indexed these directly. `validate_structure`
+        // checks the *total* expected size but a malformed sample
+        // record could still consume more bytes than expected, so we
+        // re-check that the remaining slice is large enough.
+        let trailer_len = 2
+            + 128
+            + if amiga.get_number_of_samples() != 15 {
+                4
+            } else {
+                0
+            };
+        if data.len() < trailer_len {
+            return Err(ImportError::UnexpectedEof);
+        }
         amiga.song_length = data[0];
         amiga.restart_position = data[1];
         data = &data[2..];

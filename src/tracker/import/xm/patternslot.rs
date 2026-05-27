@@ -15,59 +15,35 @@ impl PatternSlot {
     pub fn load_xm(src: &[u8]) -> Result<(&[u8], PatternSlot), ImportError> {
         let mut dst: [u8; 5] = [0; 5];
         let mut i = 0;
-        let mut j = 0;
 
-        let note = src[i];
-        i += 1;
+        let take = |i: &mut usize| -> Result<u8, ImportError> {
+            let b = *src.get(*i).ok_or(ImportError::UnexpectedEof)?;
+            *i += 1;
+            Ok(b)
+        };
+
+        let note = take(&mut i)?;
         if note & 0b1000_0000 != 0 {
-            dst[j] = if note & 0b0000_0001 != 0 {
-                i += 1;
-                src[i - 1]
-            } else {
-                0
-            };
-            j += 1;
-            dst[j] = if note & 0b0000_0010 != 0 {
-                i += 1;
-                src[i - 1]
-            } else {
-                0
-            };
-            j += 1;
-            dst[j] = if note & 0b0000_0100 != 0 {
-                i += 1;
-                src[i - 1]
-            } else {
-                0
-            };
-            j += 1;
-            dst[j] = if note & 0b0000_1000 != 0 {
-                i += 1;
-                src[i - 1]
-            } else {
-                0
-            };
-            j += 1;
-            dst[j] = if note & 0b0001_0000 != 0 {
-                i += 1;
-                src[i - 1]
-            } else {
-                0
-            };
+            for (j, mask) in [
+                0b0000_0001,
+                0b0000_0010,
+                0b0000_0100,
+                0b0000_1000,
+                0b0001_0000,
+            ]
+            .iter()
+            .enumerate()
+            {
+                if note & mask != 0 {
+                    dst[j] = take(&mut i)?;
+                }
+            }
         } else {
-            dst[j] = note;
-            j += 1;
-            dst[j] = src[i];
-            i += 1;
-            j += 1;
-            dst[j] = src[i];
-            i += 1;
-            j += 1;
-            dst[j] = src[i];
-            i += 1;
-            j += 1;
-            dst[j] = src[i];
-            i += 1;
+            dst[0] = note;
+            dst[1] = take(&mut i)?;
+            dst[2] = take(&mut i)?;
+            dst[3] = take(&mut i)?;
+            dst[4] = take(&mut i)?;
         }
 
         Ok((

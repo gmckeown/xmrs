@@ -3,7 +3,7 @@
 //! and tempo/BPM changes. Drives the first pass of
 //! [`super::build_timeline_layer`].
 
-use alloc::collections::BTreeSet;
+use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use crate::core::daw::timeline::{TimelineEntry, TimelineMap};
@@ -23,28 +23,47 @@ const MAX_ROWS: usize = 1 << 20;
 /// read only for its `default_tempo` / `default_bpm` /
 /// `profile.quirks` (the navigation effects don't depend on the DAW
 /// layer).
+///
+/// Returns the populated map plus, for song 0 only, the absolute
+/// tick of the row the walker re-entered when it terminated on a
+/// cycle (typically a `Bxx` / `Dxx` jumping back into already-walked
+/// territory). The caller is expected to forward that tick to
+/// [`crate::core::module::Module::song_loop_to`] so the sequencer
+/// wraps to that row at end-of-timeline. `None` means the walker
+/// fell off the end of the order table without ever re-entering a
+/// visited row — there's no in-song loop point to honour.
 pub fn build_timeline_map(
     module: &Module,
     pattern_order: &[Vec<usize>],
     pattern: &[Pattern],
-) -> TimelineMap {
+) -> (TimelineMap, Option<u32>) {
     let mut entries: Vec<TimelineEntry> = Vec::new();
+    let mut wrap_tick_song0: Option<u32> = None;
     for song in 0..pattern_order.len() {
-        walk_one_song(module, pattern_order, pattern, song, &mut entries);
+        let wrap = walk_one_song(module, pattern_order, pattern, song, &mut entries);
+        if song == 0 {
+            wrap_tick_song0 = wrap;
+        }
     }
-    TimelineMap { entries }
+    (TimelineMap { entries }, wrap_tick_song0)
 }
 
+/// Walk one sub-song. Returns `Some(tick)` when the walker
+/// terminated on a cycle — that tick is the row the walker would
+/// have re-played if it had been allowed to keep going, so it is
+/// the natural end-of-timeline wrap target for that sub-song.
+/// Returns `None` when the walker fell off the end of the order
+/// table (no in-pattern jump pointed back into visited rows).
 fn walk_one_song(
     module: &Module,
     pattern_order: &[Vec<usize>],
     patterns: &[Pattern],
     song: usize,
     out: &mut Vec<TimelineEntry>,
-) {
+) -> Option<u32> {
     let order = &pattern_order[song];
     if order.is_empty() || patterns.is_empty() {
-        return;
+        return None;
     }
     let song_u16 = song.min(u16::MAX as usize) as u16;
 
@@ -56,12 +75,17 @@ fn walk_one_song(
     let mut loop_iters_left: Option<usize> = None;
     let mut loop_iter_count: u16 = 0;
     let mut tick_acc: u32 = 0;
-    let mut visited: BTreeSet<(usize, usize, Option<usize>)> = BTreeSet::new();
+    // `visited` doubles as a cycle-detector AND a (key → tick)
+    // lookup: when a jump (`Bxx` / `Dxx`) sends us back into a row
+    // that was already walked, the value stored against that key is
+    // the absolute tick the row was emitted at on its first visit.
+    // That tick is what the player should wrap to at end-of-timeline.
+    let mut visited: BTreeMap<(usize, usize, Option<usize>), u32> = BTreeMap::new();
     let mut rows_processed: usize = 0;
 
     loop {
         if order_idx >= order.len() || rows_processed >= MAX_ROWS {
-            break;
+            return None;
         }
         let pat_idx = order[order_idx];
         if pat_idx >= patterns.len() {
@@ -81,9 +105,12 @@ fn walk_one_song(
         }
 
         let key = (order_idx, row_idx, loop_iters_left);
-        if !visited.insert(key) {
-            break;
+        if let Some(&first_tick) = visited.get(&key) {
+            // Re-entered an already-walked row — that's the natural
+            // wrap target for the sub-song.
+            return Some(first_tick);
         }
+        visited.insert(key, tick_acc);
         rows_processed += 1;
 
         let row = &pattern[row_idx];
@@ -148,7 +175,8 @@ fn walk_one_song(
         tick_acc = tick_acc.saturating_add(speed as u32 * row_repeats as u32);
 
         if song_end_requested {
-            break;
+            // `F00` (or equivalent) cut the song. No wrap.
+            return None;
         }
 
         if let Some(pos) = do_jump {
@@ -201,5 +229,72 @@ fn walk_one_song(
             loop_iter_count = 0;
             loop_anchor = 0;
         }
+    }
+}
+
+#[cfg(test)]
+mod walker_wrap_tests {
+    use super::*;
+    use crate::core::effect::NavigationEffect;
+    use crate::core::module::Module;
+    use crate::tracker::import::unit::TrackImportUnit;
+    use alloc::vec;
+
+    fn empty_row() -> Vec<TrackImportUnit> {
+        vec![TrackImportUnit::default()]
+    }
+
+    /// A pattern of `rows` empty rows.
+    fn empty_pat(rows: usize) -> Pattern {
+        (0..rows).map(|_| empty_row()).collect()
+    }
+
+    /// `walk_one_song` returns the tick of the row that an explicit
+    /// `Bxx` (position jump) re-enters, so the caller can plumb it
+    /// into `Module::song_loop_to`.
+    #[test]
+    fn position_jump_back_records_first_visit_tick_as_wrap() {
+        // Two single-channel patterns, 4 rows each. Order = [0, 1].
+        // Last row of pattern 1 has a `B01` jumping to order 1
+        // (= the second order, which is pattern 1 again). The
+        // intended loop is therefore "order 0 once, then order 1
+        // forever".
+        let mut pat_a = empty_pat(4);
+        let mut pat_b = empty_pat(4);
+        // Bxx on the last row of pattern 1, channel 0.
+        let mut bxx_unit = TrackImportUnit::default();
+        bxx_unit.navigation.push(NavigationEffect::PositionJump(1));
+        pat_b[3][0] = bxx_unit;
+
+        let module = Module::default();
+        let order = vec![0usize, 1];
+        let patterns = vec![pat_a.clone(), pat_b.clone()];
+        let mut out = Vec::new();
+        let wrap = walk_one_song(&module, &[order], &patterns, 0, &mut out);
+
+        // 8 rows × 6 ticks/row (default tempo) = 48 ticks total.
+        assert_eq!(out.len(), 8, "every order-0 + order-1 row plays once");
+        // Order 1 row 0 lives at row index 4 (after the 4 rows of
+        // order 0). Its tick is 4 × 6 = 24.
+        let expected_wrap_tick = 4 * module.default_tempo as u32;
+        assert_eq!(
+            wrap,
+            Some(expected_wrap_tick),
+            "B01 on last row should record order-1-row-0 tick as wrap target",
+        );
+    }
+
+    /// Without any in-pattern jump, the walker falls off the end of
+    /// the order table and reports `None` — no in-song loop point.
+    /// The caller is free to fall back to the restart-byte tick.
+    #[test]
+    fn linear_song_without_jumps_reports_no_wrap() {
+        let module = Module::default();
+        let order = vec![0usize, 1];
+        let patterns = vec![empty_pat(4), empty_pat(4)];
+        let mut out = Vec::new();
+        let wrap = walk_one_song(&module, &[order], &patterns, 0, &mut out);
+        assert_eq!(out.len(), 8);
+        assert_eq!(wrap, None);
     }
 }

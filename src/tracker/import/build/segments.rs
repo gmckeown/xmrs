@@ -166,7 +166,7 @@ pub fn extract_tracks_and_clips(
                 let track_idx = tracks.len() as u32;
                 let length = seg.rows.len() as u32;
                 let name = make_track_name(song, pattern_idx, ch as u32, seg_idx as u32);
-                tracks.push(Track {
+                tracks.push(Track::Notes {
                     name,
                     instrument: seg.instrument,
                     rows: materialise_segment_rows(seg.rows),

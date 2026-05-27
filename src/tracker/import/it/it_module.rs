@@ -142,7 +142,12 @@ impl ItModule {
             data = &data[4..]; // skip "PNAM"
                                // After the 4-byte tag, the next 4 bytes are the
                                // length; the actual name data starts at `+8`.
-            let length = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
+            let length_bytes: [u8; 4] = data
+                .get(0..4)
+                .ok_or(ImportError::UnexpectedEof)?
+                .try_into()
+                .unwrap();
+            let length = u32::from_le_bytes(length_bytes) as usize;
             pattern_names_bytes = Some((chunk_start + 8, length));
             let (pattern_names, l) = ItXNames::load(data, 32)?;
             data = &data[l..];
@@ -157,7 +162,12 @@ impl ItModule {
         let channel_names = if ItXNames::is_cnam(data) {
             let chunk_start = ser_it_module.len() - data.len();
             data = &data[4..]; // skip "CNAM"
-            let length = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
+            let length_bytes: [u8; 4] = data
+                .get(0..4)
+                .ok_or(ImportError::UnexpectedEof)?
+                .try_into()
+                .unwrap();
+            let length = u32::from_le_bytes(length_bytes) as usize;
             channel_names_bytes = Some((chunk_start + 8, length));
             let (channel_names, l) = ItXNames::load(data, 20)?;
             data = &data[l..];

@@ -31,7 +31,6 @@ pub use crate::{
         SampleRate, Volume,
     },
     core::instr_default::{DuplicateCheckAction, DuplicateCheckType, InstrDefault, NewNoteAction},
-    core::instr_ekn::InstrEkn,
     core::instr_midi::InstrMidi,
     core::instrument::{Instrument, InstrumentType},
     core::instrument_behavior::InstrumentBehavior,

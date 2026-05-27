@@ -5,14 +5,15 @@
 //!
 //! - [`TrackEffect`] — per-cell, per-trigger effects (Volume,
 //!   Panning, ChannelVolume, Arpeggio, Tremor, NoteCut, NoteDelay,
-//!   NoteRetrig, MidiMacro, instrument knobs, …). Continuous classes
-//!   (Vibrato* / Tremolo* / Panbrello* / Portamento / TonePortamento
-//!   / VolumeSlide / ChannelVolumeSlide / PanningSlide) were migrated
-//!   to [`AutomationLane`]s in DAW migration Phase 3c.3 and no
-//!   longer live on the cell.
+//!   NoteRetrig, MidiMacro, instrument knobs, …). Continuous
+//!   families (Vibrato* / Tremolo* / Panbrello* / Portamento /
+//!   TonePortamento / VolumeSlide / ChannelVolumeSlide /
+//!   PanningSlide) do not live on the cell — they live exclusively
+//!   on [`AutomationLane`]s.
 //! - [`NavigationEffect`] — flow-control on the order list
-//!   (PatternBreak, PatternDelay, PatternLoop, PositionJump). Absorbed
-//!   into the [`TimelineMap`] at import time; never read at runtime.
+//!   (PatternBreak, PatternDelay, PatternLoop, PositionJump).
+//!   Absorbed into the [`TimelineMap`] at import time; never read at
+//!   runtime.
 //! - [`SongLevelEffect`] — song-wide rate / amplitude controls (Bpm,
 //!   Speed, Volume, BpmSlide, VolumeSlide). Drives the song-wide
 //!   [`AutomationLane`]s at extraction time.
@@ -47,14 +48,12 @@ pub enum NoteRetrigOperator {
 
 /// Per-cell effect catalogue.
 ///
-/// Since DAW migration Phase 3c.3, the continuous families
-/// (Vibrato* / Tremolo* / Panbrello* / Portamento / TonePortamento /
-/// VolumeSlide / ChannelVolumeSlide / PanningSlide) are gone from
-/// this enum — they live exclusively on
-/// [`crate::core::daw::automation::AutomationLane`]s extracted upstream
-/// from [`crate::tracker::import::unit::TrackImportUnit::effects`].
-/// The runtime player consults the lanes; the cell only carries the
-/// **discrete / per-trigger** effects below.
+/// The continuous families (Vibrato* / Tremolo* / Panbrello* /
+/// Portamento / TonePortamento / VolumeSlide / ChannelVolumeSlide /
+/// PanningSlide) are **not** in this enum — they live exclusively on
+/// [`crate::core::daw::automation::AutomationLane`]s. The runtime
+/// player consults the lanes for those; the cell only carries the
+/// discrete / per-trigger effects below.
 #[repr(u8)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum TrackEffect {
@@ -177,17 +176,14 @@ pub enum TrackEffect {
         tick: usize,
     },
 
-    /// MIDI macro invocation — relocated from
-    /// [`TrackImportUnit::midi_macros`] (DAW migration Phase 3b /
-    /// "split de GlobalEffect") by
-    /// [`crate::tracker::import::unit::TrackImportUnit::prepare_cell`].
-    /// Despite IT's classification of the macro effect as global,
-    /// it is **per-channel-scoped at runtime**: the macro byte
-    /// stream substitutes the channel's note / volume / pan /
-    /// instrument fields, and writes through to the channel's
-    /// filter envelope or MIDI-out port.
-    ///
-    /// [`TrackImportUnit::midi_macros`]: crate::tracker::import::unit::TrackImportUnit::midi_macros
+    /// MIDI macro invocation. Despite IT's classification of the
+    /// macro effect as global, it is **per-channel-scoped at
+    /// runtime**: the macro byte stream substitutes the channel's
+    /// note / volume / pan / instrument fields, and writes through
+    /// to the channel's filter envelope or MIDI-out port. The
+    /// importer
+    /// ([`crate::tracker::import::unit::TrackImportUnit::prepare_cell`])
+    /// is the only producer.
     MidiMacro(MidiMacroType),
 }
 
@@ -213,13 +209,12 @@ pub enum MidiMacroType {
 
 /// Navigation effects — control which row/order/pattern plays next.
 ///
-/// DAW migration "split de GlobalEffect" (optional cosmetic split):
-/// these four variants were previously folded into `GlobalEffect`;
-/// they are now a distinct type so the
-/// [`crate::tracker::import::build::build_timeline_map`] walker (the
-/// **only** consumer) sees a type-checked sum. After timeline build
-/// they are dropped — runtime navigation is driven by
-/// [`crate::core::daw::timeline::TimelineMap`] + [`crate::core::module::Module::song_loop_to`].
+/// Consumed exclusively by
+/// [`crate::tracker::import::build::build_timeline_map`]: the walker
+/// absorbs them into the
+/// [`crate::core::daw::timeline::TimelineMap`], after which they are
+/// dropped. Runtime navigation is driven by the timeline map plus
+/// [`crate::core::module::Module::song_loop_to`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum NavigationEffect {
     /// `pattern-position`, jump to the next pattern and play from the specified position.
@@ -252,13 +247,11 @@ pub enum NavigationEffect {
 /// Song-level effects — drive the song-wide [`AutomationLane`]s
 /// ([`Bpm`] / [`Speed`] / [`GlobalVolume`]) at extraction time.
 ///
-/// DAW migration "split de GlobalEffect" (optional cosmetic split):
-/// these five variants were previously folded into `GlobalEffect`;
-/// they are now a distinct type consumed exclusively by
-/// [`crate::tracker::import::extract`] (and by `import::memory`
-/// for the slide-memory back-fill, a `pub(crate)` helper). Build-
-/// timeline reads two of them (`Speed`, `Bpm`) too — they set the
-/// per-row tick spacing alongside their lane representation.
+/// Consumed exclusively by [`crate::tracker::import::extract`] (and
+/// by `import::memory` for the slide-memory back-fill, a
+/// `pub(crate)` helper). The build-timeline pass reads `Speed` and
+/// `Bpm` too — they set per-row tick spacing alongside their lane
+/// representation.
 ///
 /// [`Bpm`]: crate::core::daw::automation::AutomationTarget::Bpm
 /// [`Speed`]: crate::core::daw::automation::AutomationTarget::Speed
@@ -300,7 +293,7 @@ pub enum SongLevelEffect {
 /// downstream consumers (`build_timeline_map`,
 /// `automation_extract`, `import_memory`) see the dedicated
 /// [`NavigationEffect`] / [`SongLevelEffect`] / [`MidiMacroType`]
-/// types directly. DAW migration "split de GlobalEffect".
+/// types directly.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum GlobalEffect {
     Navigation(NavigationEffect),
@@ -367,39 +360,33 @@ impl TrackEffect {
                 TrackEffect::InstrumentVolumeEnvelopePosition(h1),
                 TrackEffect::InstrumentVolumeEnvelopePosition(o1),
             ) => Some(TrackEffect::InstrumentVolumeEnvelopePosition(h1 + o1)),
+            // NoteCut / NoteFadeOut / NoteOff: ticks accumulate
+            // additively, `past` flags OR together (a `past:true`
+            // operand wins).
             (
-                TrackEffect::NoteCut {
-                    tick: h1,
-                    past: _h2,
-                },
+                TrackEffect::NoteCut { tick: h1, past: h2 },
                 TrackEffect::NoteCut { tick: o1, past: o2 },
             ) => Some(TrackEffect::NoteCut {
                 tick: h1 + o1,
-                past: *o2,
+                past: *h2 || *o2,
+            }),
+            (
+                TrackEffect::NoteFadeOut { tick: h1, past: h2 },
+                TrackEffect::NoteFadeOut { tick: o1, past: o2 },
+            ) => Some(TrackEffect::NoteFadeOut {
+                tick: h1 + o1,
+                past: *h2 || *o2,
+            }),
+            (
+                TrackEffect::NoteOff { tick: h1, past: h2 },
+                TrackEffect::NoteOff { tick: o1, past: o2 },
+            ) => Some(TrackEffect::NoteOff {
+                tick: h1 + o1,
+                past: *h2 || *o2,
             }),
             (TrackEffect::NoteDelay(h1), TrackEffect::NoteDelay(o1)) => {
                 Some(TrackEffect::NoteDelay(h1 + o1))
             }
-            (
-                TrackEffect::NoteFadeOut {
-                    tick: h1,
-                    past: _h2,
-                },
-                TrackEffect::NoteFadeOut { tick: o1, past: o2 },
-            ) => Some(TrackEffect::NoteFadeOut {
-                tick: h1 + o1,
-                past: *o2,
-            }),
-            (
-                TrackEffect::NoteOff {
-                    tick: h1,
-                    past: _h2,
-                },
-                TrackEffect::NoteOff { tick: o1, past: o2 },
-            ) => Some(TrackEffect::NoteOff {
-                tick: h1 + o1,
-                past: *o2,
-            }),
             (
                 TrackEffect::NoteRetrig {
                     speed: h1,

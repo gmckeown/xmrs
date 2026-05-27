@@ -111,6 +111,14 @@ impl Plugins {
                 }
                 data = &data[plugin_size..];
             } else if data[0] == b'F' && data[1] == b'X' && data[2] >= b'0' && data[3] >= b'0' {
+                // ASCII digits only — letters past '9' would overflow
+                // the u8 arithmetic below.
+                if data[2] > b'9' || data[3] > b'9' {
+                    return Err(ImportError::OutOfRange("FX plugin index"));
+                }
+                if plugin_size < SND_MIX_PLUGIN_INFO_SIZE {
+                    return Err(ImportError::OutOfRange("FX plugin size"));
+                }
                 let plugin_index = ((data[2] - b'0') * 10 + (data[3] - b'0')) as usize;
                 data = &data[8..];
                 if plugin_index >= MAX_MIXPLUGINS {
@@ -121,6 +129,9 @@ impl Plugins {
                 data = &data[SND_MIX_PLUGIN_INFO_SIZE..];
 
                 let extra_size = plugin_size - SND_MIX_PLUGIN_INFO_SIZE;
+                if extra_size > data.len() {
+                    return Err(ImportError::UnexpectedEof);
+                }
                 if extra_size != 0 {
                     plugins.mix[plugin_index].data = Some(data[0..extra_size].to_vec());
                 }

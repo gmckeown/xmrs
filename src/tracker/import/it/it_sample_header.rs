@@ -582,7 +582,7 @@ impl ItSampleHeader {
                     .ok_or(ImportError::Other("IT sample decoder bit budget exceeded"))?
                     as u16;
 
-                if left < 7 {
+                if (1..7).contains(&left) {
                     // Type A
                     if 1_u16 << (left - 1) == bits {
                         bits = bit_reader
@@ -684,7 +684,7 @@ impl ItSampleHeader {
                     .read_bits(left)
                     .ok_or(ImportError::Other("IT sample decoder bit budget exceeded"))?;
 
-                if left < 7 {
+                if (1..7).contains(&left) {
                     // Type A
                     if 1_u32 << (left - 1) == bits {
                         bits = bit_reader

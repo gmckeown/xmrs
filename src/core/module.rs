@@ -7,7 +7,7 @@
 //!
 //! A `Module` is constructed three ways:
 //! - via importers (`Module::load`, `load_xm`, `load_it`, …) which
-//!   parse a historical file and call
+//!   parse a tracker file (XM / IT / S3M / MOD / SID) and call
 //!   [`crate::tracker::import::build::build_timeline_layer`];
 //! - via `Module::default()` for editor-authored content;
 //! - via deserialisation from any serde format (postcard / json /
@@ -240,10 +240,22 @@ pub struct Module {
 
     /// Absolute tick the song loops back to once playback runs off
     /// the end of [`Self::timeline_map`]. Encodes the historical
-    /// XM / MOD "restart byte". `None` means the song stops after
-    /// the last entry. The XM and Amiga MOD importers set this via
-    /// [`crate::tracker::import::build::set_song_loop_to_restart_byte`];
-    /// the sequencer honours it natively at end-of-song wrap.
+    /// XM / MOD "restart byte" — and also any in-pattern `Bxx` /
+    /// `Dxx` jump that loops back into already-walked rows (detected
+    /// by [`crate::tracker::import::build::build_timeline_map`] and
+    /// forwarded here at import time; the in-row jump takes
+    /// precedence over the header byte).
+    ///
+    /// `None` means the sequencer falls back to "wrap to the first
+    /// entry of the current sub-song" at end-of-timeline.
+    ///
+    /// **Scope**: this is a single tick, conceptually keyed against
+    /// sub-song 0. Multi-sub-song layouts (XM / IT splits on `0xFE`
+    /// / `0xFF` order markers) are uncommon — every historical
+    /// tracker (FT2 / OpenMPT / Schism) treats those markers as
+    /// skip / end inside a single playable song — and a per-sub-song
+    /// wrap table is not modelled here. Sub-songs > 0 fall back to
+    /// wrap-to-first-entry.
     #[serde(default)]
     pub song_loop_to: Option<u32>,
 }
@@ -335,10 +347,7 @@ impl Module {
                 let mut col: Vec<Cell> = Vec::with_capacity(len);
                 let track = self.tracks.get(t as usize);
                 for r in row_start..row_end {
-                    let cell = track
-                        .and_then(|tr| tr.rows.get(r as usize))
-                        .cloned()
-                        .unwrap_or_default();
+                    let cell = track.map(|tr| tr.cell_at(r)).unwrap_or_default();
                     col.push(cell);
                 }
                 col
@@ -447,9 +456,9 @@ impl Module {
     /// `Vec<(Cell, Option<usize>)>` of length `num_channels`. The
     /// second value is the instrument the playing Track binds to
     /// (when one is active); the replayer carries this alongside
-    /// the [`Cell`] because `Cell.event` no longer surfaces the
-    /// per-cell instrument index since DAW migration Phase 1+2.
-    /// Channels with no active clip get
+    /// the [`Cell`] because the cell event itself does not carry a
+    /// per-cell instrument index — the instrument is invariant for
+    /// a track. Channels with no active clip get
     /// `(Cell::default(), None)`.
     ///
     /// # Per-channel resolution
@@ -467,20 +476,15 @@ impl Module {
     ///
     /// # Two dispatch paths
     ///
-    /// 1. **Standard track** (`Track.instrument` references a
-    ///    sample-based / wrapped instrument): the cell at
-    ///    `track.rows[row_in_track]` is cloned into the output.
+    /// 1. [`Track::Notes`]: the cell at `rows[row_in_track]` is
+    ///    cloned into the output.
     ///
-    /// 2. **Euclidean track** (`Track.instrument` references an
-    ///    [`InstrumentType::Euclidean`](crate::core::instrument::InstrumentType::Euclidean)
-    ///    wrapper): the track has been collapsed to a single
-    ///    prototype cell at import; the per-row content is
-    ///    *generated* from the wrapper's
-    ///    `(events, steps, rotation)`. The prototype is emitted on
-    ///    Bjorklund pulse positions, `Empty` elsewhere. The
-    ///    rhythm's duration is bounded by the clip's
-    ///    `[position_tick, end_tick)`, looping every `steps` rows
-    ///    if the clip outlives a single cycle.
+    /// 2. [`Track::Euclidean`]: the per-row content is *generated*
+    ///    from the variant's `(events, steps, rotation)`. The
+    ///    prototype is emitted on Bjorklund pulse positions,
+    ///    `Empty` elsewhere. The rhythm loops every `steps` rows;
+    ///    its duration is bounded by the clip's
+    ///    `[position_tick, end_tick)`.
     ///
     /// # Complexity
     ///
@@ -537,39 +541,39 @@ impl Module {
             // instrument — it surfaces as `None` so the player
             // dispatches the cell's effects without trying to load
             // a sample.
+            let track_instr_idx = track.instrument();
             let track_instr =
-                if track.instrument == crate::tracker::import::build::EFFECT_ONLY_INSTRUMENT {
+                if track_instr_idx == crate::tracker::import::build::EFFECT_ONLY_INSTRUMENT {
                     None
                 } else {
-                    Some(track.instrument)
+                    Some(track_instr_idx)
                 };
-            // Euclidean (generative) branch: the Track was collapsed
-            // to a single prototype cell at conversion time; per-row
-            // playback content is derived from the wrapper's
-            // `(events, steps, rotation)`. Emit the prototype on
-            // Bjorklund pulse positions, Empty elsewhere.
-            if let Some(crate::core::instrument::InstrumentType::Euclidean(ekn)) =
-                self.instrument.get(track.instrument).map(|i| &i.instr_type)
-            {
-                let steps = ekn.steps.max(1) as u32;
-                let pos = (row_in_track) % steps;
-                let rot = (ekn.rotation as u32) % steps;
-                let bjork_idx = ((pos + steps - rot) % steps) as usize;
-                let canonical =
-                    crate::core::daw::euclidean::euclidean_pattern(ekn.events, ekn.steps);
-                if canonical.get(bjork_idx).copied().unwrap_or(false) {
-                    if let Some(proto) = track.rows.first() {
-                        slot.0 = proto.clone();
+            match track {
+                Track::Notes { rows, .. } => {
+                    if (row_in_track as usize) >= rows.len() {
+                        continue;
+                    }
+                    slot.0 = rows[row_in_track as usize].clone();
+                    slot.1 = track_instr;
+                }
+                Track::Euclidean {
+                    events,
+                    steps,
+                    rotation,
+                    prototype,
+                    ..
+                } => {
+                    let steps_u32 = (*steps).max(1) as u32;
+                    let pos = row_in_track % steps_u32;
+                    let rot = (*rotation as u32) % steps_u32;
+                    let bjork_idx = ((pos + steps_u32 - rot) % steps_u32) as usize;
+                    let canonical = crate::core::daw::euclidean::euclidean_pattern(*events, *steps);
+                    if canonical.get(bjork_idx).copied().unwrap_or(false) {
+                        slot.0 = prototype.clone();
                         slot.1 = track_instr;
                     }
                 }
-                continue;
             }
-            if (row_in_track as usize) >= track.rows.len() {
-                continue;
-            }
-            slot.0 = track.rows[row_in_track as usize].clone();
-            slot.1 = track_instr;
         }
         out
     }
@@ -629,16 +633,14 @@ impl Module {
         // `EFFECT_ONLY_INSTRUMENT` sentinel marks a track whose
         // cells modify a voice inherited from a prior pattern; it
         // intentionally points at no real instrument.
-        //
-        // DAW migration Phase 1+2 dropped the per-cell
-        // `instrument: Option<usize>` from `Cell`, so the legacy
-        // "cell instr matches track instr" cross-check is gone — a
-        // `Track`'s instrument is now the single source of truth.
+        // A `Track`'s instrument is the single source of truth —
+        // cells do not carry one.
         for (i, t) in self.tracks.iter().enumerate() {
-            if t.instrument == crate::tracker::import::build::EFFECT_ONLY_INSTRUMENT {
+            let instr = t.instrument();
+            if instr == crate::tracker::import::build::EFFECT_ONLY_INSTRUMENT {
                 continue;
             }
-            if t.instrument >= self.instrument.len() && !self.instrument.is_empty() {
+            if instr >= self.instrument.len() {
                 return Err(LayerInconsistency::TrackInstrumentMismatch {
                     track_idx: i,
                     row: 0,

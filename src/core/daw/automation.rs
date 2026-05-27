@@ -15,13 +15,17 @@
 //!       └─ enabled: bool
 //! ```
 //!
-//! Since DAW migration Phase 3c.3 the lanes are the **authoritative
-//! source** for every continuous modulation (Vibrato/Tremolo/Panbrello/
-//! Portamento/TonePortamento/VolumeSlide/ChannelVolumeSlide/PanningSlide
-//! at the per-Track level; Bpm/BpmSlide/Speed/GlobalVolume/GlobalVolumeSlide
-//! at the song level). They are extracted upstream from
-//! `TrackImportUnit` by [`crate::tracker::import::extract`] and consumed
-//! by the player without any cell-side fallback.
+//! Lanes are the **authoritative source** for every continuous
+//! modulation:
+//!
+//! - per-Track: Vibrato / Tremolo / Panbrello / Portamento /
+//!   TonePortamento / VolumeSlide / ChannelVolumeSlide / PanningSlide.
+//! - song-level: Bpm / BpmSlide / Speed / GlobalVolume /
+//!   GlobalVolumeSlide.
+//!
+//! They are extracted upstream from `TrackImportUnit` by
+//! [`crate::tracker::import::extract`] and consumed by the player
+//! without any cell-side fallback.
 
 use crate::core::fixed::fixed::{Q15, Q8_8};
 use crate::core::pitch::Pitch;
@@ -41,11 +45,12 @@ pub enum AutomationTarget {
     /// Song-level speed in ticks/row (1..=31). Drives
     /// `SongLevelEffect::Speed`.
     Speed,
-    /// Per-channel volume (S3M Mxx). Kept for completeness — the
-    /// `TrackChannelVolume(u32)` variant is the Phase 3 successor
-    /// keyed on Track index instead of channel index.
+    /// Per-channel volume (S3M Mxx), keyed on raw channel index.
+    /// Kept for completeness; the per-Track equivalent is
+    /// [`Self::TrackChannelVolume`].
     ChannelVolume(u8),
-    /// Per-channel panning. Same caveat as `ChannelVolume`.
+    /// Per-channel panning, keyed on raw channel index. Per-Track
+    /// equivalent is [`Self::TrackPanning`].
     ChannelPanning(u8),
     /// Per-Track volume — receives Tremolo (LFO), VolumeSlide
     /// (Slide).
@@ -54,13 +59,11 @@ pub enum AutomationTarget {
     /// (Slide).
     TrackPanning(u32),
     /// Per-Track pitch in semitones (Q8.8 delta) — receives Vibrato
-    /// (LFO), Portamento (Slide), TonePortamento (Glide). Added in
-    /// DAW migration Phase 3a.
+    /// (LFO), Portamento (Slide), TonePortamento (Glide).
     TrackPitch(u32),
     /// Per-Track channel volume — receives ChannelVolumeSlide
-    /// (Slide). Added in DAW migration Phase 3a; superset of the
-    /// legacy `ChannelVolume(u8)` keyed on Track index instead of
-    /// the raw channel byte.
+    /// (Slide). Keyed on Track index (vs. `ChannelVolume(u8)` which
+    /// is keyed on the raw channel byte).
     TrackChannelVolume(u32),
 }
 
@@ -117,7 +120,7 @@ pub struct AutomationPoint {
 
 /// LFO modulation events — vibrato / tremolo / panbrello. The
 /// runtime keeps the phase state machine; events tell it when to
-/// arm / update / clear that machine. See DAW migration Phase 3a.
+/// arm / update / clear that machine.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
 pub enum LfoEvent {
     /// (Re-)initialise every LFO parameter. Emitted by
@@ -142,15 +145,10 @@ pub enum LfoEvent {
     /// per-channel retrig-on-new-note flag) change. Emitted by a
     /// standalone `VibratoWaveform` / `TremoloWaveform` /
     /// `PanbrelloWaveform` row — i.e. a row that touches the LFO
-    /// shape without also re-arming the modulation. The
-    /// runtime's `WaveformState` is updated immediately;
-    /// subsequent `Set`s on the same lane will carry the new
-    /// waveform in their `Set::waveform` slot.
-    ///
-    /// Added in DAW migration Phase 3c.1 to close a divergence
-    /// between the cell-driven runtime (which updates waveform
-    /// inline) and the lane mirror (which previously stashed the
-    /// new waveform until the next `Set`).
+    /// shape without also re-arming the modulation. The runtime's
+    /// `WaveformState` is updated immediately; subsequent `Set`s on
+    /// the same lane will carry the new waveform in their
+    /// `Set::waveform` slot.
     WaveformOnly {
         tick: u32,
         waveform: Waveform,
@@ -214,13 +212,13 @@ impl GlideEvent {
 
 /// The payload of an [`AutomationLane`]. One variant per modulation
 /// class; the lane's `target` constrains which variants are
-/// semantically valid. See DAW migration Phase 3a.
+/// semantically valid.
 ///
-/// `Points` is the original (Phase 0) typed-value curve.
-/// `Lfo` / `Slide` / `Glide` are the continuous-modulation payloads
-/// extracted upstream from `TrackImportUnit.effects` /
-/// `TrackImportUnit.song_level` by
-/// [`crate::tracker::import::extract`].
+/// - `Points` — typed-value curve, the editor-native form.
+/// - `Lfo` / `Slide` / `Glide` — continuous-modulation payloads
+///   extracted from `TrackImportUnit.effects` /
+///   `TrackImportUnit.song_level` by
+///   [`crate::tracker::import::extract`].
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum LaneKind {
     Points(Vec<AutomationPoint>),
@@ -241,10 +239,9 @@ impl Default for LaneKind {
 /// other fields are last-known values that should not be read.
 ///
 /// Used by [`AutomationLane::lfo_state_at`] to reconstruct, from
-/// the event stream alone, the equivalent of what the legacy
-/// cell-side Vibrato / Tremolo / Panbrello effects would have set
-/// — the runtime player consumes it directly (no cell fallback)
-/// since DAW migration Phase 3c.3.
+/// the event stream alone, the active Vibrato / Tremolo / Panbrello
+/// parameters at a given tick. The runtime player consumes it
+/// directly — there is no cell fallback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LfoState {
     pub armed: bool,
@@ -357,8 +354,8 @@ pub struct AutomationLane {
 
 impl AutomationLane {
     /// Build an empty [`LaneKind::Points`] lane for `target`. The
-    /// historical (Phase 0) entry point; preserved for backwards
-    /// compatibility with the `edit.rs` API surface.
+    /// `edit.rs` API surface uses this as the constructor for
+    /// editor-authored automation curves.
     pub fn new(target: AutomationTarget) -> Self {
         Self {
             target,
@@ -368,7 +365,7 @@ impl AutomationLane {
     }
 
     /// Build an empty lane of the given kind for `target`. Used by
-    /// the Phase 3b extractor to seed Lfo / Slide / Glide lanes.
+    /// the extractor to seed Lfo / Slide / Glide lanes.
     pub fn new_with_kind(target: AutomationTarget, kind: LaneKind) -> Self {
         Self {
             target,
@@ -413,47 +410,41 @@ impl AutomationLane {
     }
 
     /// Iterate every event of the lane whose `tick ∈ [start_tick,
-    /// end_tick)`, sorted ascending by tick. Used by the runtime
-    /// (Phase 3c) to advance its state machines tick-by-tick.
+    /// end_tick)`, sorted ascending by tick. Used by the runtime to
+    /// advance its state machines tick-by-tick.
     ///
     /// Allocates a `Vec` of references for the half-open window —
     /// the caller is expected to consume it before the next call;
     /// the runtime typically reads a single-tick window and so
     /// pays for ≤ 1-2 elements per call in practice.
     pub fn events_in(&self, start_tick: u32, end_tick: u32) -> alloc::vec::Vec<LaneEvent<'_>> {
+        let in_window = |t: u32| t >= start_tick && t < end_tick;
         let mut out: alloc::vec::Vec<LaneEvent<'_>> = alloc::vec::Vec::new();
         match &self.kind {
-            LaneKind::Points(points) => {
-                for p in points {
-                    if p.tick >= start_tick && p.tick < end_tick {
-                        out.push(LaneEvent::Point(p));
-                    }
-                }
-            }
-            LaneKind::Lfo { events } => {
-                for e in events {
-                    let t = e.tick();
-                    if t >= start_tick && t < end_tick {
-                        out.push(LaneEvent::Lfo(e));
-                    }
-                }
-            }
-            LaneKind::Slide { events } => {
-                for e in events {
-                    let t = e.tick();
-                    if t >= start_tick && t < end_tick {
-                        out.push(LaneEvent::Slide(e));
-                    }
-                }
-            }
-            LaneKind::Glide { events } => {
-                for e in events {
-                    let t = e.tick();
-                    if t >= start_tick && t < end_tick {
-                        out.push(LaneEvent::Glide(e));
-                    }
-                }
-            }
+            LaneKind::Points(points) => out.extend(
+                points
+                    .iter()
+                    .filter(|p| in_window(p.tick))
+                    .map(LaneEvent::Point),
+            ),
+            LaneKind::Lfo { events } => out.extend(
+                events
+                    .iter()
+                    .filter(|e| in_window(e.tick()))
+                    .map(LaneEvent::Lfo),
+            ),
+            LaneKind::Slide { events } => out.extend(
+                events
+                    .iter()
+                    .filter(|e| in_window(e.tick()))
+                    .map(LaneEvent::Slide),
+            ),
+            LaneKind::Glide { events } => out.extend(
+                events
+                    .iter()
+                    .filter(|e| in_window(e.tick()))
+                    .map(LaneEvent::Glide),
+            ),
         }
         out
     }
@@ -681,7 +672,7 @@ mod tests {
         assert!(v.is_compatible_with(AutomationTarget::TrackChannelVolume(3)));
     }
 
-    // ----- Lane state replay (Phase 3c.1 prep) -----------------------------
+    // ----- Lane state replay -----------------------------------------------
 
     fn lfo_lane(events: Vec<LfoEvent>) -> AutomationLane {
         AutomationLane::new_with_kind(AutomationTarget::TrackPitch(0), LaneKind::Lfo { events })

@@ -1,7 +1,7 @@
 //! `InstrDefault` — the canonical xmrs instrument representation.
 //!
-//! The struct is now decomposed into three sub-types, each tackling
-//! one orthogonal concern:
+//! Decomposed into three sub-types, each tackling one orthogonal
+//! concern:
 //!
 //! - [`VoiceSetup`] — envelope, fadeout, vibrato, filter, panning,
 //!   random variations: everything that shapes the voice once it's
@@ -25,10 +25,7 @@ use crate::core::voice_setup::VoiceSetup;
 
 use alloc::vec::Vec;
 
-// Re-export the behavioural enums from their new home so existing
-// users that imported them from `instr_default` keep compiling.
-// The canonical location is `instrument_behavior`; these are just
-// convenience aliases.
+// Convenience re-exports — canonical home is `instrument_behavior`.
 pub use crate::core::instrument_behavior::{
     DuplicateCheckAction, DuplicateCheckType, NewNoteAction,
 };

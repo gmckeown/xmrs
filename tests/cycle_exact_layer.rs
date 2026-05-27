@@ -719,8 +719,8 @@ fn structural_cases() -> Vec<TestCase> {
                 // instrument 1. The two tracks point to different
                 // instruments so they don't dedupe.
                 assert_eq!(m.tracks.len(), 2);
-                assert_eq!(m.tracks[0].instrument, 0);
-                assert_eq!(m.tracks[1].instrument, 1);
+                assert_eq!(m.tracks[0].instrument(), 0);
+                assert_eq!(m.tracks[1].instrument(), 1);
                 assert_eq!(m.clips.len(), 2);
                 assert_eq!(m.clips[0].position_tick, 0);
                 // second segment starts at row 4 → 4 × speed_6 = 24 ticks
@@ -1138,7 +1138,8 @@ fn structural_cases() -> Vec<TestCase> {
             extra_assert: Some(|m| {
                 assert_eq!(m.tracks.len(), 2, "different instruments → two tracks");
                 assert_ne!(
-                    m.tracks[0].instrument, m.tracks[1].instrument,
+                    m.tracks[0].instrument(),
+                    m.tracks[1].instrument(),
                     "tracks must carry their respective instruments"
                 );
             }),
@@ -1162,7 +1163,7 @@ fn structural_cases() -> Vec<TestCase> {
                     .build()
             },
             extra_assert: Some(|m| {
-                let instr0_tracks = m.tracks.iter().filter(|t| t.instrument == 0).count();
+                let instr0_tracks = m.tracks.iter().filter(|t| t.instrument() == 0).count();
                 assert_eq!(instr0_tracks, 2, "lengths differ → no fusion");
             }),
         },
@@ -1182,11 +1183,10 @@ fn structural_cases() -> Vec<TestCase> {
                 m.build()
             },
             extra_assert: Some(|m| {
-                // The auto-conversion adds an Euclidean wrapper.
+                // The auto-conversion turns the Notes track into a
+                // Track::Euclidean variant in place.
                 assert!(
-                    m.instrument
-                        .iter()
-                        .any(|i| matches!(i.instr_type, InstrumentType::Euclidean(_))),
+                    m.tracks.iter().any(|t| t.is_euclidean()),
                     "Bjorklund(5,8) should auto-convert"
                 );
             }),
@@ -1205,9 +1205,7 @@ fn structural_cases() -> Vec<TestCase> {
             },
             extra_assert: Some(|m| {
                 assert!(
-                    m.instrument
-                        .iter()
-                        .any(|i| matches!(i.instr_type, InstrumentType::Euclidean(_))),
+                    m.tracks.iter().any(|t| t.is_euclidean()),
                     "Bjorklund(2,5) should auto-convert"
                 );
             }),
@@ -1228,9 +1226,7 @@ fn structural_cases() -> Vec<TestCase> {
             },
             extra_assert: Some(|m| {
                 assert!(
-                    !m.instrument
-                        .iter()
-                        .any(|i| matches!(i.instr_type, InstrumentType::Euclidean(_))),
+                    !m.tracks.iter().any(|t| t.is_euclidean()),
                     "clumped pattern should not look Euclidean"
                 );
             }),

@@ -220,17 +220,25 @@ impl Sample {
         // construction (`Q15` is in `[-1, +1)` always; the
         // domain newtypes' `from_*` constructors saturate),
         // so the runtime clamp is no-op and has been removed.
-        self.relative_pitch = self.relative_pitch.clamp(-95, 96);
+        // Documented range is `[-96, 95]` (see field doc above).
+        self.relative_pitch = self.relative_pitch.clamp(-96, 95);
 
-        if self.sustain_loop_start as usize > self.len() {
+        // Loop fields must satisfy `start < len` (strict) so that a
+        // non-empty loop has at least one frame. A `start == len`
+        // record arriving from a malformed XM/IT would otherwise
+        // survive into `calculate_loop`, where a Forward loop with
+        // length 0 collapses to a single-frame clamp at end-of-sample.
+        if self.sustain_loop_start as usize >= self.len() {
             self.sustain_loop_start = 0;
+            self.sustain_loop_length = 0;
         }
         if self.sustain_loop_start as usize + self.sustain_loop_length as usize > self.len() {
             self.sustain_loop_length = self.len() as u32 - self.sustain_loop_start;
         }
 
-        if self.loop_start as usize > self.len() {
+        if self.loop_start as usize >= self.len() {
             self.loop_start = 0;
+            self.loop_length = 0;
         }
         if self.loop_start as usize + self.loop_length as usize > self.len() {
             self.loop_length = self.len() as u32 - self.loop_start;

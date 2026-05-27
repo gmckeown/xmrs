@@ -31,7 +31,6 @@ use crate::core::daw::clip::Clip;
 use crate::core::daw::track::Track;
 use crate::core::effect::TrackEffect;
 use crate::core::fixed::fixed::Q15;
-use crate::core::instrument::InstrumentType;
 use crate::core::module::{Module, PatternHighlight};
 use crate::core::pitch::Pitch;
 
@@ -294,11 +293,12 @@ pub enum EditCommand {
         highlight: PatternHighlight,
     },
 
-    // ---- Instrument ----
-    /// Set the humanisation parameters of an `InstrEkn`. Errors if
-    /// `instrument` isn't an `InstrumentType::Euclidean`.
-    SetInstrumentEuclideanHumanize {
-        instrument: usize,
+    // ---- Track-level humanise ----
+    /// Set the humanisation parameters of a [`Track::Euclidean`].
+    /// Errors with [`EditError::TrackNotEuclidean`] if `track`
+    /// is not a Euclidean variant.
+    SetEuclideanHumanize {
+        track: u32,
         advance_max_ticks: u8,
         probability: Q15,
     },
@@ -373,9 +373,17 @@ pub enum EditError {
     InstrumentDoesNotExist {
         index: usize,
     },
-    /// The instrument exists but is not an `InstrumentType::Euclidean`.
-    InstrumentNotEuclidean {
-        index: usize,
+    /// The track exists but is not a [`Track::Notes`] — cell-editing
+    /// commands cannot apply to a generator variant
+    /// (e.g. [`Track::Euclidean`]).
+    TrackNotNotes {
+        index: u32,
+    },
+    /// The track exists but is not a [`Track::Euclidean`] — required
+    /// by Euclidean-only commands such as
+    /// [`EditCommand::SetEuclideanHumanize`].
+    TrackNotEuclidean {
+        index: u32,
     },
 }
 
@@ -423,9 +431,9 @@ pub enum EditUndoData {
     CellBefore { track: u32, row: u32, before: Cell },
     /// Global setting snapshot.
     GlobalSettingBefore(GlobalSettingSnapshot),
-    /// Previous humanize parameters of an `InstrEkn`.
-    InstrumentEuclideanHumanizeBefore {
-        instrument: usize,
+    /// Previous humanize parameters of a [`Track::Euclidean`].
+    EuclideanHumanizeBefore {
+        track: u32,
         advance_max_ticks: u8,
         probability: Q15,
     },
@@ -686,13 +694,13 @@ impl Module {
             EditCommand::SetPatternHighlight { highlight } => {
                 self.cmd_set_pattern_highlight(cmd, highlight, observer)
             }
-            EditCommand::SetInstrumentEuclideanHumanize {
-                instrument,
+            EditCommand::SetEuclideanHumanize {
+                track,
                 advance_max_ticks,
                 probability,
-            } => self.cmd_set_instrument_euclidean_humanize(
+            } => self.cmd_set_euclidean_humanize(
                 cmd,
-                instrument,
+                track,
                 advance_max_ticks,
                 probability,
                 observer,
@@ -741,14 +749,17 @@ impl Module {
                         what: "track",
                         index: *track,
                     })?;
-                if (*row as usize) >= t.rows.len() {
+                let rows = t
+                    .rows_mut()
+                    .ok_or(EditError::TrackNotNotes { index: *track })?;
+                if (*row as usize) >= rows.len() {
                     return Err(EditError::RowOutOfRange {
                         track: *track,
                         requested: *row,
-                        length: t.rows.len() as u32,
+                        length: rows.len() as u32,
                     });
                 }
-                t.rows[*row as usize] = before.clone();
+                rows[*row as usize] = before.clone();
                 Ok(())
             }
             // Clip created: remove from clips.
@@ -836,22 +847,30 @@ impl Module {
             }
             (
                 _,
-                EditUndoData::InstrumentEuclideanHumanizeBefore {
-                    instrument,
+                EditUndoData::EuclideanHumanizeBefore {
+                    track,
                     advance_max_ticks,
                     probability,
                 },
             ) => {
-                let instr = self
-                    .instrument
-                    .get_mut(*instrument)
-                    .ok_or(EditError::InstrumentDoesNotExist { index: *instrument })?;
-                if let InstrumentType::Euclidean(ekn) = &mut instr.instr_type {
-                    ekn.humanize_advance_max_ticks = *advance_max_ticks;
-                    ekn.humanize_probability = *probability;
-                    Ok(())
-                } else {
-                    Err(EditError::InstrumentNotEuclidean { index: *instrument })
+                let t = self
+                    .tracks
+                    .get_mut(*track as usize)
+                    .ok_or(EditError::IndexOutOfRange {
+                        what: "track",
+                        index: *track,
+                    })?;
+                match t {
+                    Track::Euclidean {
+                        humanize_advance_max_ticks,
+                        humanize_probability,
+                        ..
+                    } => {
+                        *humanize_advance_max_ticks = *advance_max_ticks;
+                        *humanize_probability = *probability;
+                        Ok(())
+                    }
+                    _ => Err(EditError::TrackNotEuclidean { index: *track }),
                 }
             }
         }
@@ -871,10 +890,10 @@ impl Module {
         length_rows: u32,
         observer: &mut dyn EditObserver,
     ) -> Result<EditReceipt, EditError> {
-        if !self.instrument.is_empty() && instrument >= self.instrument.len() {
+        if instrument >= self.instrument.len() {
             return Err(EditError::InstrumentDoesNotExist { index: instrument });
         }
-        let track = Track {
+        let track = Track::Notes {
             name,
             instrument,
             rows: alloc::vec![Cell::default(); length_rows as usize],
@@ -945,13 +964,22 @@ impl Module {
         })
     }
 
-    fn cmd_rename_track(
+    /// Shared envelope for "look up a track, snapshot, mutate, emit
+    /// `TracksChanged`, return TrackContentBefore". `apply` returns
+    /// either `Ok(())` (the track was mutated) or `Err(EditError)`
+    /// (e.g. wrong track kind for the operation — the snapshot is
+    /// discarded; the function caller must guarantee no partial
+    /// mutation has happened before returning `Err`).
+    fn with_track_mut<F>(
         &mut self,
         cmd: EditCommand,
         track: u32,
-        new_name: String,
         observer: &mut dyn EditObserver,
-    ) -> Result<EditReceipt, EditError> {
+        apply: F,
+    ) -> Result<EditReceipt, EditError>
+    where
+        F: FnOnce(&mut Track) -> Result<(), EditError>,
+    {
         let t = self
             .tracks
             .get_mut(track as usize)
@@ -960,7 +988,7 @@ impl Module {
                 index: track,
             })?;
         let before = t.clone();
-        t.name = new_name;
+        apply(t)?;
         observer.on_change(ChangeEvent::TracksChanged {
             indices: alloc::vec![track],
         });
@@ -970,6 +998,19 @@ impl Module {
                 index: track,
                 track: before,
             },
+        })
+    }
+
+    fn cmd_rename_track(
+        &mut self,
+        cmd: EditCommand,
+        track: u32,
+        new_name: String,
+        observer: &mut dyn EditObserver,
+    ) -> Result<EditReceipt, EditError> {
+        self.with_track_mut(cmd, track, observer, |t| {
+            *t.name_mut() = new_name;
+            Ok(())
         })
     }
 
@@ -980,29 +1021,14 @@ impl Module {
         new_instrument: usize,
         observer: &mut dyn EditObserver,
     ) -> Result<EditReceipt, EditError> {
-        if !self.instrument.is_empty() && new_instrument >= self.instrument.len() {
+        if new_instrument >= self.instrument.len() {
             return Err(EditError::InstrumentDoesNotExist {
                 index: new_instrument,
             });
         }
-        let t = self
-            .tracks
-            .get_mut(track as usize)
-            .ok_or(EditError::IndexOutOfRange {
-                what: "track",
-                index: track,
-            })?;
-        let before = t.clone();
-        t.instrument = new_instrument;
-        observer.on_change(ChangeEvent::TracksChanged {
-            indices: alloc::vec![track],
-        });
-        Ok(EditReceipt {
-            command: cmd,
-            undo_data: EditUndoData::TrackContentBefore {
-                index: track,
-                track: before,
-            },
+        self.with_track_mut(cmd, track, observer, |t| {
+            t.set_instrument(new_instrument);
+            Ok(())
         })
     }
 
@@ -1013,24 +1039,9 @@ impl Module {
         muted: bool,
         observer: &mut dyn EditObserver,
     ) -> Result<EditReceipt, EditError> {
-        let t = self
-            .tracks
-            .get_mut(track as usize)
-            .ok_or(EditError::IndexOutOfRange {
-                what: "track",
-                index: track,
-            })?;
-        let before = t.clone();
-        t.muted = muted;
-        observer.on_change(ChangeEvent::TracksChanged {
-            indices: alloc::vec![track],
-        });
-        Ok(EditReceipt {
-            command: cmd,
-            undo_data: EditUndoData::TrackContentBefore {
-                index: track,
-                track: before,
-            },
+        self.with_track_mut(cmd, track, observer, |t| {
+            t.set_muted(muted);
+            Ok(())
         })
     }
 
@@ -1041,29 +1052,17 @@ impl Module {
         new_length_rows: u32,
         observer: &mut dyn EditObserver,
     ) -> Result<EditReceipt, EditError> {
-        let t = self
-            .tracks
-            .get_mut(track as usize)
-            .ok_or(EditError::IndexOutOfRange {
-                what: "track",
-                index: track,
-            })?;
-        let before = t.clone();
-        let n = new_length_rows as usize;
-        if n > t.rows.len() {
-            t.rows.resize(n, Cell::default());
-        } else {
-            t.rows.truncate(n);
-        }
-        observer.on_change(ChangeEvent::TracksChanged {
-            indices: alloc::vec![track],
-        });
-        Ok(EditReceipt {
-            command: cmd,
-            undo_data: EditUndoData::TrackContentBefore {
-                index: track,
-                track: before,
-            },
+        self.with_track_mut(cmd, track, observer, |t| {
+            let rows = t
+                .rows_mut()
+                .ok_or(EditError::TrackNotNotes { index: track })?;
+            let n = new_length_rows as usize;
+            if n > rows.len() {
+                rows.resize(n, Cell::default());
+            } else {
+                rows.truncate(n);
+            }
+            Ok(())
         })
     }
 
@@ -1107,15 +1106,18 @@ impl Module {
                 what: "track",
                 index: track,
             })?;
-        if (row_offset as usize) > t.rows.len() {
+        let before = t.clone();
+        let rows = t
+            .rows_mut()
+            .ok_or(EditError::TrackNotNotes { index: track })?;
+        if (row_offset as usize) > rows.len() {
             return Err(EditError::RowOutOfRange {
                 track,
                 requested: row_offset,
-                length: t.rows.len() as u32,
+                length: rows.len() as u32,
             });
         }
-        let before = t.clone();
-        t.rows.insert(row_offset as usize, content);
+        rows.insert(row_offset as usize, content);
         observer.on_change(ChangeEvent::TracksChanged {
             indices: alloc::vec![track],
         });
@@ -1142,15 +1144,18 @@ impl Module {
                 what: "track",
                 index: track,
             })?;
-        if (row_offset as usize) >= t.rows.len() {
+        let before = t.clone();
+        let rows = t
+            .rows_mut()
+            .ok_or(EditError::TrackNotNotes { index: track })?;
+        if (row_offset as usize) >= rows.len() {
             return Err(EditError::RowOutOfRange {
                 track,
                 requested: row_offset,
-                length: t.rows.len() as u32,
+                length: rows.len() as u32,
             });
         }
-        let before = t.clone();
-        t.rows.remove(row_offset as usize);
+        rows.remove(row_offset as usize);
         observer.on_change(ChangeEvent::TracksChanged {
             indices: alloc::vec![track],
         });
@@ -1163,14 +1168,23 @@ impl Module {
         })
     }
 
-    fn cmd_set_cell(
+    /// Shared envelope for the four "mutate one cell" commands.
+    /// Validates track index, track kind, and row offset; clones the
+    /// pre-mutation cell for undo; runs `apply` on the cell; emits a
+    /// `TracksChanged` event and returns the receipt. `apply` may
+    /// reject (e.g. `cmd_remove_cell_effect` rejects an
+    /// out-of-range effect index) and the snapshot is discarded.
+    fn with_cell_mut<F>(
         &mut self,
         cmd: EditCommand,
         track: u32,
         row_offset: u32,
-        content: Cell,
         observer: &mut dyn EditObserver,
-    ) -> Result<EditReceipt, EditError> {
+        apply: F,
+    ) -> Result<EditReceipt, EditError>
+    where
+        F: FnOnce(&mut Cell) -> Result<(), EditError>,
+    {
         let t = self
             .tracks
             .get_mut(track as usize)
@@ -1178,15 +1192,19 @@ impl Module {
                 what: "track",
                 index: track,
             })?;
-        if (row_offset as usize) >= t.rows.len() {
+        let rows = t
+            .rows_mut()
+            .ok_or(EditError::TrackNotNotes { index: track })?;
+        if (row_offset as usize) >= rows.len() {
             return Err(EditError::RowOutOfRange {
                 track,
                 requested: row_offset,
-                length: t.rows.len() as u32,
+                length: rows.len() as u32,
             });
         }
-        let before = t.rows[row_offset as usize].clone();
-        t.rows[row_offset as usize] = content;
+        let cell = &mut rows[row_offset as usize];
+        let before = cell.clone();
+        apply(cell)?;
         observer.on_change(ChangeEvent::TracksChanged {
             indices: alloc::vec![track],
         });
@@ -1197,6 +1215,20 @@ impl Module {
                 row: row_offset,
                 before,
             },
+        })
+    }
+
+    fn cmd_set_cell(
+        &mut self,
+        cmd: EditCommand,
+        track: u32,
+        row_offset: u32,
+        content: Cell,
+        observer: &mut dyn EditObserver,
+    ) -> Result<EditReceipt, EditError> {
+        self.with_cell_mut(cmd, track, row_offset, observer, |cell| {
+            *cell = content;
+            Ok(())
         })
     }
 
@@ -1208,32 +1240,9 @@ impl Module {
         effect: TrackEffect,
         observer: &mut dyn EditObserver,
     ) -> Result<EditReceipt, EditError> {
-        let t = self
-            .tracks
-            .get_mut(track as usize)
-            .ok_or(EditError::IndexOutOfRange {
-                what: "track",
-                index: track,
-            })?;
-        if (row_offset as usize) >= t.rows.len() {
-            return Err(EditError::RowOutOfRange {
-                track,
-                requested: row_offset,
-                length: t.rows.len() as u32,
-            });
-        }
-        let before = t.rows[row_offset as usize].clone();
-        t.rows[row_offset as usize].effects.push(effect);
-        observer.on_change(ChangeEvent::TracksChanged {
-            indices: alloc::vec![track],
-        });
-        Ok(EditReceipt {
-            command: cmd,
-            undo_data: EditUndoData::CellBefore {
-                track,
-                row: row_offset,
-                before,
-            },
+        self.with_cell_mut(cmd, track, row_offset, observer, |cell| {
+            cell.effects.push(effect);
+            Ok(())
         })
     }
 
@@ -1245,39 +1254,15 @@ impl Module {
         effect_index: usize,
         observer: &mut dyn EditObserver,
     ) -> Result<EditReceipt, EditError> {
-        let t = self
-            .tracks
-            .get_mut(track as usize)
-            .ok_or(EditError::IndexOutOfRange {
-                what: "track",
-                index: track,
-            })?;
-        if (row_offset as usize) >= t.rows.len() {
-            return Err(EditError::RowOutOfRange {
-                track,
-                requested: row_offset,
-                length: t.rows.len() as u32,
-            });
-        }
-        let cell = &mut t.rows[row_offset as usize];
-        if effect_index >= cell.effects.len() {
-            return Err(EditError::IndexOutOfRange {
-                what: "effect",
-                index: effect_index as u32,
-            });
-        }
-        let before = cell.clone();
-        cell.effects.remove(effect_index);
-        observer.on_change(ChangeEvent::TracksChanged {
-            indices: alloc::vec![track],
-        });
-        Ok(EditReceipt {
-            command: cmd,
-            undo_data: EditUndoData::CellBefore {
-                track,
-                row: row_offset,
-                before,
-            },
+        self.with_cell_mut(cmd, track, row_offset, observer, |cell| {
+            if effect_index >= cell.effects.len() {
+                return Err(EditError::IndexOutOfRange {
+                    what: "effect",
+                    index: effect_index as u32,
+                });
+            }
+            cell.effects.remove(effect_index);
+            Ok(())
         })
     }
 
@@ -1289,32 +1274,9 @@ impl Module {
         effects: Vec<TrackEffect>,
         observer: &mut dyn EditObserver,
     ) -> Result<EditReceipt, EditError> {
-        let t = self
-            .tracks
-            .get_mut(track as usize)
-            .ok_or(EditError::IndexOutOfRange {
-                what: "track",
-                index: track,
-            })?;
-        if (row_offset as usize) >= t.rows.len() {
-            return Err(EditError::RowOutOfRange {
-                track,
-                requested: row_offset,
-                length: t.rows.len() as u32,
-            });
-        }
-        let before = t.rows[row_offset as usize].clone();
-        t.rows[row_offset as usize].effects = effects;
-        observer.on_change(ChangeEvent::TracksChanged {
-            indices: alloc::vec![track],
-        });
-        Ok(EditReceipt {
-            command: cmd,
-            undo_data: EditUndoData::CellBefore {
-                track,
-                row: row_offset,
-                before,
-            },
+        self.with_cell_mut(cmd, track, row_offset, observer, |cell| {
+            cell.effects = effects;
+            Ok(())
         })
     }
 
@@ -1336,7 +1298,7 @@ impl Module {
         let track_len = self
             .tracks
             .get(track as usize)
-            .map(|t| t.rows.len() as u32)
+            .map(|t| t.natural_length() as u32)
             .unwrap_or(0);
         let speed = (self.default_tempo as u32).max(1);
         let new_clip = Clip {
@@ -1402,14 +1364,22 @@ impl Module {
             what: "clip",
             index: clip,
         })?;
+        // Preserve duration: shift end_tick by the same signed delta
+        // as position_tick. Saturating arithmetic keeps the clip
+        // non-degenerate on overflow.
+        let duration = original.end_tick.saturating_sub(original.position_tick);
+        let new_end_tick = new_position_tick.saturating_add(duration);
         let mut candidate = original;
         candidate.position_tick = new_position_tick;
+        candidate.end_tick = new_end_tick;
         if let Some(i) = self.find_overlapping_clip(&candidate, &[clip]) {
             return Err(EditError::ClipOverlap { existing_clip: i });
         }
         let before = self.clips.snapshot();
-        self.clips
-            .modify(idx, |c| c.position_tick = new_position_tick);
+        self.clips.modify(idx, |c| {
+            c.position_tick = new_position_tick;
+            c.end_tick = new_end_tick;
+        });
         observer.on_change(ChangeEvent::ClipsChanged {
             indices: alloc::vec![],
         });
@@ -1568,7 +1538,7 @@ impl Module {
             position_tick: at_tick,
             speed_at_start: original.speed_at_start,
             track_row_offset: 0,
-            source_start_row: original.source_start_row + delta_rows,
+            source_start_row: original.source_start_row.saturating_add(delta_rows),
             end_tick: original.end_tick,
         };
         // Snapshot BEFORE any mutation so undo restores the full
@@ -1704,13 +1674,20 @@ impl Module {
                 index: content.len() as u32,
             });
         }
-        // Validate all track indices before touching anything.
+        // Validate every track index AND track kind before touching
+        // anything — the function documents "Module unchanged on
+        // Err", so we cannot start mutating and discover halfway
+        // through that a target track has no rows.
         for &t in &tracks {
-            if t as usize >= self.tracks.len() {
-                return Err(EditError::IndexOutOfRange {
+            let track = self
+                .tracks
+                .get(t as usize)
+                .ok_or(EditError::IndexOutOfRange {
                     what: "track",
                     index: t,
-                });
+                })?;
+            if track.rows().is_none() {
+                return Err(EditError::TrackNotNotes { index: t });
             }
         }
         // Snapshot every touched Track up-front so undo is a
@@ -1723,19 +1700,22 @@ impl Module {
 
         for (i, &t) in tracks.iter().enumerate() {
             let track = &mut self.tracks[t as usize];
+            let rows = track
+                .rows_mut()
+                .ok_or(EditError::TrackNotNotes { index: t })?;
             let cells = &content[i];
             let need = (row_offset as usize) + cells.len();
-            if track.rows.len() < need {
-                track.rows.resize(need, Cell::default());
+            if rows.len() < need {
+                rows.resize(need, Cell::default());
             }
             for (j, src) in cells.iter().enumerate() {
                 let row = row_offset as usize + j;
                 match mode {
                     PasteMode::Overwrite => {
-                        track.rows[row] = src.clone();
+                        rows[row] = src.clone();
                     }
                     PasteMode::Mix => {
-                        let tgt = &mut track.rows[row];
+                        let tgt = &mut rows[row];
                         if !matches!(src.event, CellEvent::None) {
                             tgt.event = src.event;
                         }
@@ -1801,8 +1781,13 @@ impl Module {
             Vec::new();
         for &t in &tracks {
             let track = &self.tracks[t as usize];
-            for r in (row_start as usize)..(row_end as usize).min(track.rows.len()) {
-                let cell = &track.rows[r];
+            let rows = match track.rows() {
+                Some(r) => r,
+                None => return Err(EditError::TrackNotNotes { index: t }),
+            };
+            #[allow(clippy::needless_range_loop)] // `r` is pushed as an index into `updates`
+            for r in (row_start as usize)..(row_end as usize).min(rows.len()) {
+                let cell = &rows[r];
                 let (pitch, vel, ghost) = match cell.event {
                     CellEvent::NoteOn { pitch, velocity } => (pitch, velocity, false),
                     CellEvent::NoteOnGhost { pitch, velocity } => (pitch, velocity, true),
@@ -1830,7 +1815,12 @@ impl Module {
         let mut full_before = self.tracks.clone();
         // Apply.
         for (t, r, p, v, ghost) in updates {
-            self.tracks[t].rows[r].event = if ghost {
+            // `rows_mut()` cannot fail here — the validation pass
+            // above already rejected non-Notes tracks.
+            let rows = self.tracks[t]
+                .rows_mut()
+                .expect("validated to be Track::Notes above");
+            rows[r].event = if ghost {
                 CellEvent::NoteOnGhost {
                     pitch: p,
                     velocity: v,
@@ -1893,13 +1883,6 @@ impl Module {
         kind: InterpolateEffectKind,
         observer: &mut dyn EditObserver,
     ) -> Result<EditReceipt, EditError> {
-        let t = self
-            .tracks
-            .get_mut(track as usize)
-            .ok_or(EditError::IndexOutOfRange {
-                what: "track",
-                index: track,
-            })?;
         if row_end <= row_start + 1 {
             return Err(EditError::IndexOutOfRange {
                 what: "row_end (must be > row_start + 1 for a non-empty interior)",
@@ -1907,63 +1890,57 @@ impl Module {
             });
         }
         let row_end_idx = row_end as usize - 1;
-        if row_end_idx >= t.rows.len() {
+
+        // Full validation up-front (no mutation, no clone) so an
+        // early Err doesn't pay for a Vec<Cell> allocation.
+        let t_ref = self
+            .tracks
+            .get(track as usize)
+            .ok_or(EditError::IndexOutOfRange {
+                what: "track",
+                index: track,
+            })?;
+        let rows_ref = t_ref
+            .rows()
+            .ok_or(EditError::TrackNotNotes { index: track })?;
+        if row_end_idx >= rows_ref.len() {
             return Err(EditError::RowOutOfRange {
                 track,
                 requested: row_end,
-                length: t.rows.len() as u32,
+                length: rows_ref.len() as u32,
             });
         }
-
-        let start_val = Self::pluck_scalar(&t.rows[row_start as usize], kind).ok_or(
+        let start_val = Self::pluck_scalar(&rows_ref[row_start as usize], kind).ok_or(
             EditError::IndexOutOfRange {
                 what: "row_start (endpoint must carry the matching effect)",
                 index: row_start,
             },
         )?;
         let end_val =
-            Self::pluck_scalar(&t.rows[row_end_idx], kind).ok_or(EditError::IndexOutOfRange {
+            Self::pluck_scalar(&rows_ref[row_end_idx], kind).ok_or(EditError::IndexOutOfRange {
                 what: "row_end - 1 (endpoint must carry the matching effect)",
                 index: row_end - 1,
             })?;
 
+        // All checks passed — now we commit (clone for undo + mutate).
+        let t = &mut self.tracks[track as usize];
         let before = t.clone();
+        let rows = t.rows_mut().expect("checked above");
+
         let span = (row_end_idx - row_start as usize) as i32; // ≥ 1
-                                                              // For each interior row: lerp(start, end, (i - row_start)
-                                                              // / span). Use i32 math, truncate-to-i16; rounding is a
-                                                              // wash for tracker-level precision.
+        #[allow(clippy::needless_range_loop)]
+        // `r` is used both to index `rows` and to compute the lerp offset
         for r in (row_start as usize + 1)..row_end_idx {
             let i = (r - row_start as usize) as i32;
             let val_i32 = start_val as i32 + ((end_val as i32 - start_val as i32) * i) / span;
             let val = val_i32.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
-            // Build the replacement effect.
-            let new_fx = match kind {
-                InterpolateEffectKind::Volume => TrackEffect::Volume {
-                    value: crate::core::fixed::units::Volume::from_q15_i16(val),
-                    tick: 0,
-                },
-                InterpolateEffectKind::Panning => {
-                    TrackEffect::Panning(crate::core::fixed::units::Panning::from_q15_i16(val))
-                }
-                InterpolateEffectKind::ChannelVolume => TrackEffect::ChannelVolume(
-                    crate::core::fixed::units::ChannelVolume::from_q15_i16(val),
-                ),
-            };
+            let new_fx = Self::build_interpolated_effect(kind, val);
             // Replace any existing effect of the same kind on this
             // row; otherwise push.
-            let row = &mut t.rows[r];
+            let row = &mut rows[r];
             let mut replaced = false;
             for fx in row.effects.iter_mut() {
-                let same_kind = matches!(
-                    (kind, &*fx),
-                    (InterpolateEffectKind::Volume, TrackEffect::Volume { .. })
-                        | (InterpolateEffectKind::Panning, TrackEffect::Panning(_))
-                        | (
-                            InterpolateEffectKind::ChannelVolume,
-                            TrackEffect::ChannelVolume(_),
-                        )
-                );
-                if same_kind {
+                if Self::effect_matches_kind(fx, kind) {
                     *fx = new_fx.clone();
                     replaced = true;
                     break;
@@ -1983,6 +1960,35 @@ impl Module {
                 track: before,
             },
         })
+    }
+
+    #[inline]
+    fn build_interpolated_effect(kind: InterpolateEffectKind, val: i16) -> TrackEffect {
+        match kind {
+            InterpolateEffectKind::Volume => TrackEffect::Volume {
+                value: crate::core::fixed::units::Volume::from_q15_i16(val),
+                tick: 0,
+            },
+            InterpolateEffectKind::Panning => {
+                TrackEffect::Panning(crate::core::fixed::units::Panning::from_q15_i16(val))
+            }
+            InterpolateEffectKind::ChannelVolume => TrackEffect::ChannelVolume(
+                crate::core::fixed::units::ChannelVolume::from_q15_i16(val),
+            ),
+        }
+    }
+
+    #[inline]
+    fn effect_matches_kind(fx: &TrackEffect, kind: InterpolateEffectKind) -> bool {
+        matches!(
+            (kind, fx),
+            (InterpolateEffectKind::Volume, TrackEffect::Volume { .. })
+                | (InterpolateEffectKind::Panning, TrackEffect::Panning(_))
+                | (
+                    InterpolateEffectKind::ChannelVolume,
+                    TrackEffect::ChannelVolume(_),
+                )
+        )
     }
 
     fn cmd_create_automation_lane(
@@ -2195,13 +2201,25 @@ impl Module {
     /// Insert an [`LfoEvent`] into an `Lfo`-kind lane,
     /// maintaining the by-tick sort. Rejects when the lane is a
     /// different kind.
-    fn cmd_add_lfo_event(
+    /// Shared body of the three `cmd_add_X_event` helpers
+    /// (`X ∈ {lfo, slide, glide}`). `extract` returns the inner
+    /// event Vec for the expected lane kind (or `None` on mismatch);
+    /// `tick_of` reads the per-element tick used for sorted insertion.
+    #[allow(clippy::too_many_arguments)] // Three of these are closures wiring the dispatch.
+    fn cmd_add_lane_event<E, F, T>(
         &mut self,
         cmd: EditCommand,
         lane: u32,
-        event: LfoEvent,
+        event: E,
+        kind_label: &'static str,
+        extract: F,
+        tick_of: T,
         observer: &mut dyn EditObserver,
-    ) -> Result<EditReceipt, EditError> {
+    ) -> Result<EditReceipt, EditError>
+    where
+        F: FnOnce(&mut LaneKind) -> Option<&mut Vec<E>>,
+        T: Fn(&E) -> u32,
+    {
         let l = self
             .automation
             .get_mut(lane as usize)
@@ -2209,20 +2227,14 @@ impl Module {
                 what: "lane",
                 index: lane,
             })?;
-        if !matches!(l.kind, LaneKind::Lfo { .. }) {
-            return Err(EditError::IndexOutOfRange {
-                what: "lane (kind is not Lfo)",
-                index: lane,
-            });
-        }
         let before = l.clone();
-        let events = match &mut l.kind {
-            LaneKind::Lfo { events } => events,
-            _ => unreachable!(),
-        };
-        let new_tick = event.tick();
+        let new_tick = tick_of(&event);
+        let events = extract(&mut l.kind).ok_or(EditError::IndexOutOfRange {
+            what: kind_label,
+            index: lane,
+        })?;
         let pos = events
-            .binary_search_by_key(&new_tick, |e| e.tick())
+            .binary_search_by_key(&new_tick, &tick_of)
             .unwrap_or_else(|i| i);
         events.insert(pos, event);
         observer.on_change(ChangeEvent::AutomationChanged {
@@ -2235,6 +2247,27 @@ impl Module {
                 lane: before,
             },
         })
+    }
+
+    fn cmd_add_lfo_event(
+        &mut self,
+        cmd: EditCommand,
+        lane: u32,
+        event: LfoEvent,
+        observer: &mut dyn EditObserver,
+    ) -> Result<EditReceipt, EditError> {
+        self.cmd_add_lane_event(
+            cmd,
+            lane,
+            event,
+            "lane (kind is not Lfo)",
+            |k| match k {
+                LaneKind::Lfo { events } => Some(events),
+                _ => None,
+            },
+            |e| e.tick(),
+            observer,
+        )
     }
 
     /// Insert a [`SlideEvent`] into a `Slide`-kind lane.
@@ -2245,39 +2278,18 @@ impl Module {
         event: SlideEvent,
         observer: &mut dyn EditObserver,
     ) -> Result<EditReceipt, EditError> {
-        let l = self
-            .automation
-            .get_mut(lane as usize)
-            .ok_or(EditError::IndexOutOfRange {
-                what: "lane",
-                index: lane,
-            })?;
-        if !matches!(l.kind, LaneKind::Slide { .. }) {
-            return Err(EditError::IndexOutOfRange {
-                what: "lane (kind is not Slide)",
-                index: lane,
-            });
-        }
-        let before = l.clone();
-        let events = match &mut l.kind {
-            LaneKind::Slide { events } => events,
-            _ => unreachable!(),
-        };
-        let new_tick = event.tick();
-        let pos = events
-            .binary_search_by_key(&new_tick, |e| e.tick())
-            .unwrap_or_else(|i| i);
-        events.insert(pos, event);
-        observer.on_change(ChangeEvent::AutomationChanged {
-            lane_indices: alloc::vec![lane],
-        });
-        Ok(EditReceipt {
-            command: cmd,
-            undo_data: EditUndoData::LaneContentBefore {
-                index: lane,
-                lane: before,
+        self.cmd_add_lane_event(
+            cmd,
+            lane,
+            event,
+            "lane (kind is not Slide)",
+            |k| match k {
+                LaneKind::Slide { events } => Some(events),
+                _ => None,
             },
-        })
+            |e| e.tick(),
+            observer,
+        )
     }
 
     /// Insert a [`GlideEvent`] into a `Glide`-kind lane.
@@ -2288,38 +2300,41 @@ impl Module {
         event: GlideEvent,
         observer: &mut dyn EditObserver,
     ) -> Result<EditReceipt, EditError> {
-        let l = self
-            .automation
-            .get_mut(lane as usize)
-            .ok_or(EditError::IndexOutOfRange {
-                what: "lane",
-                index: lane,
-            })?;
-        if !matches!(l.kind, LaneKind::Glide { .. }) {
-            return Err(EditError::IndexOutOfRange {
-                what: "lane (kind is not Glide)",
-                index: lane,
-            });
-        }
-        let before = l.clone();
-        let events = match &mut l.kind {
-            LaneKind::Glide { events } => events,
-            _ => unreachable!(),
-        };
-        let new_tick = event.tick();
-        let pos = events
-            .binary_search_by_key(&new_tick, |e| e.tick())
-            .unwrap_or_else(|i| i);
-        events.insert(pos, event);
-        observer.on_change(ChangeEvent::AutomationChanged {
-            lane_indices: alloc::vec![lane],
-        });
+        self.cmd_add_lane_event(
+            cmd,
+            lane,
+            event,
+            "lane (kind is not Glide)",
+            |k| match k {
+                LaneKind::Glide { events } => Some(events),
+                _ => None,
+            },
+            |e| e.tick(),
+            observer,
+        )
+    }
+
+    /// Shared envelope for the five "set one global field" commands.
+    /// Captures the snapshot of the affected field, applies the
+    /// mutation, then emits a `GlobalSettingChanged` event. All five
+    /// callers below are one-liners over this helper.
+    fn cmd_set_global<F, G>(
+        &mut self,
+        cmd: EditCommand,
+        observer: &mut dyn EditObserver,
+        snap_old: F,
+        apply: G,
+    ) -> Result<EditReceipt, EditError>
+    where
+        F: FnOnce(&Self) -> GlobalSettingSnapshot,
+        G: FnOnce(&mut Self),
+    {
+        let snap = snap_old(self);
+        apply(self);
+        observer.on_change(ChangeEvent::GlobalSettingChanged);
         Ok(EditReceipt {
             command: cmd,
-            undo_data: EditUndoData::LaneContentBefore {
-                index: lane,
-                lane: before,
-            },
+            undo_data: EditUndoData::GlobalSettingBefore(snap),
         })
     }
 
@@ -2329,16 +2344,15 @@ impl Module {
         bpm: usize,
         observer: &mut dyn EditObserver,
     ) -> Result<EditReceipt, EditError> {
-        let snap = GlobalSettingSnapshot {
-            default_bpm: Some(self.default_bpm),
-            ..Default::default()
-        };
-        self.default_bpm = bpm;
-        observer.on_change(ChangeEvent::GlobalSettingChanged);
-        Ok(EditReceipt {
-            command: cmd,
-            undo_data: EditUndoData::GlobalSettingBefore(snap),
-        })
+        self.cmd_set_global(
+            cmd,
+            observer,
+            |m| GlobalSettingSnapshot {
+                default_bpm: Some(m.default_bpm),
+                ..Default::default()
+            },
+            |m| m.default_bpm = bpm,
+        )
     }
 
     fn cmd_set_default_speed(
@@ -2347,16 +2361,15 @@ impl Module {
         speed: usize,
         observer: &mut dyn EditObserver,
     ) -> Result<EditReceipt, EditError> {
-        let snap = GlobalSettingSnapshot {
-            default_speed: Some(self.default_tempo),
-            ..Default::default()
-        };
-        self.default_tempo = speed;
-        observer.on_change(ChangeEvent::GlobalSettingChanged);
-        Ok(EditReceipt {
-            command: cmd,
-            undo_data: EditUndoData::GlobalSettingBefore(snap),
-        })
+        self.cmd_set_global(
+            cmd,
+            observer,
+            |m| GlobalSettingSnapshot {
+                default_speed: Some(m.default_tempo),
+                ..Default::default()
+            },
+            |m| m.default_tempo = speed,
+        )
     }
 
     fn cmd_set_playback_quirks(
@@ -2365,16 +2378,15 @@ impl Module {
         quirks: PlaybackQuirks,
         observer: &mut dyn EditObserver,
     ) -> Result<EditReceipt, EditError> {
-        let snap = GlobalSettingSnapshot {
-            quirks: Some(self.quirks),
-            ..Default::default()
-        };
-        self.quirks = quirks;
-        observer.on_change(ChangeEvent::GlobalSettingChanged);
-        Ok(EditReceipt {
-            command: cmd,
-            undo_data: EditUndoData::GlobalSettingBefore(snap),
-        })
+        self.cmd_set_global(
+            cmd,
+            observer,
+            |m| GlobalSettingSnapshot {
+                quirks: Some(m.quirks),
+                ..Default::default()
+            },
+            |m| m.quirks = quirks,
+        )
     }
 
     fn cmd_set_module_name(
@@ -2383,16 +2395,15 @@ impl Module {
         name: String,
         observer: &mut dyn EditObserver,
     ) -> Result<EditReceipt, EditError> {
-        let snap = GlobalSettingSnapshot {
-            name: Some(self.name.clone()),
-            ..Default::default()
-        };
-        self.name = name;
-        observer.on_change(ChangeEvent::GlobalSettingChanged);
-        Ok(EditReceipt {
-            command: cmd,
-            undo_data: EditUndoData::GlobalSettingBefore(snap),
-        })
+        self.cmd_set_global(
+            cmd,
+            observer,
+            |m| GlobalSettingSnapshot {
+                name: Some(m.name.clone()),
+                ..Default::default()
+            },
+            |m| m.name = name,
+        )
     }
 
     fn cmd_set_pattern_highlight(
@@ -2401,41 +2412,47 @@ impl Module {
         highlight: PatternHighlight,
         observer: &mut dyn EditObserver,
     ) -> Result<EditReceipt, EditError> {
-        let snap = GlobalSettingSnapshot {
-            pattern_highlight: Some(self.pattern_highlight),
-            ..Default::default()
-        };
-        self.pattern_highlight = highlight;
-        observer.on_change(ChangeEvent::GlobalSettingChanged);
-        Ok(EditReceipt {
-            command: cmd,
-            undo_data: EditUndoData::GlobalSettingBefore(snap),
-        })
+        self.cmd_set_global(
+            cmd,
+            observer,
+            |m| GlobalSettingSnapshot {
+                pattern_highlight: Some(m.pattern_highlight),
+                ..Default::default()
+            },
+            |m| m.pattern_highlight = highlight,
+        )
     }
 
-    fn cmd_set_instrument_euclidean_humanize(
+    fn cmd_set_euclidean_humanize(
         &mut self,
         cmd: EditCommand,
-        instrument: usize,
+        track: u32,
         advance_max_ticks: u8,
         probability: Q15,
         observer: &mut dyn EditObserver,
     ) -> Result<EditReceipt, EditError> {
-        let instr = self
-            .instrument
-            .get_mut(instrument)
-            .ok_or(EditError::InstrumentDoesNotExist { index: instrument })?;
-        let ekn = match &mut instr.instr_type {
-            InstrumentType::Euclidean(e) => e,
-            _ => return Err(EditError::InstrumentNotEuclidean { index: instrument }),
+        let t = self
+            .tracks
+            .get_mut(track as usize)
+            .ok_or(EditError::IndexOutOfRange {
+                what: "track",
+                index: track,
+            })?;
+        let (max_ticks, prob) = match t {
+            Track::Euclidean {
+                humanize_advance_max_ticks,
+                humanize_probability,
+                ..
+            } => (humanize_advance_max_ticks, humanize_probability),
+            _ => return Err(EditError::TrackNotEuclidean { index: track }),
         };
-        let before = EditUndoData::InstrumentEuclideanHumanizeBefore {
-            instrument,
-            advance_max_ticks: ekn.humanize_advance_max_ticks,
-            probability: ekn.humanize_probability,
+        let before = EditUndoData::EuclideanHumanizeBefore {
+            track,
+            advance_max_ticks: *max_ticks,
+            probability: *prob,
         };
-        ekn.humanize_advance_max_ticks = advance_max_ticks;
-        ekn.humanize_probability = probability;
+        *max_ticks = advance_max_ticks;
+        *prob = probability;
         observer.on_change(ChangeEvent::GlobalSettingChanged);
         Ok(EditReceipt {
             command: cmd,
@@ -2483,10 +2500,10 @@ mod tests {
                 &mut s,
                 " t{}={{name={} instr={} rows={} muted={}}}",
                 i,
-                t.name,
-                t.instrument,
-                t.rows.len(),
-                t.muted,
+                t.name(),
+                t.instrument(),
+                t.natural_length(),
+                t.muted(),
             );
         }
         for (i, c) in m.clips.iter().enumerate() {
@@ -2716,56 +2733,79 @@ mod tests {
 
     #[test]
     fn humanize_set_then_undo_round_trips() {
-        use crate::core::instr_ekn::InstrEkn;
         let mut m = Module::default();
-        m.instrument.push(Instrument {
+        m.instrument.push(Instrument::default());
+        m.tracks.push(Track::Euclidean {
             name: "ekn".into(),
-            instr_type: InstrumentType::Euclidean(InstrEkn::default()),
+            instrument: 0,
             muted: false,
+            events: 3,
+            steps: 8,
+            rotation: 0,
+            prototype: Cell::default(),
+            humanize_advance_max_ticks: 0,
+            humanize_probability: Q15::ZERO,
         });
 
         let receipt = m
-            .apply(EditCommand::SetInstrumentEuclideanHumanize {
-                instrument: 0,
+            .apply(EditCommand::SetEuclideanHumanize {
+                track: 0,
                 advance_max_ticks: 4,
                 probability: Q15::HALF,
             })
             .unwrap();
-        if let InstrumentType::Euclidean(e) = &m.instrument[0].instr_type {
-            assert_eq!(e.humanize_advance_max_ticks, 4);
-            assert_eq!(e.humanize_probability, Q15::HALF);
+        if let Track::Euclidean {
+            humanize_advance_max_ticks,
+            humanize_probability,
+            ..
+        } = &m.tracks[0]
+        {
+            assert_eq!(*humanize_advance_max_ticks, 4);
+            assert_eq!(*humanize_probability, Q15::HALF);
         } else {
             panic!("expected Euclidean");
         }
         m.undo(&receipt).unwrap();
-        if let InstrumentType::Euclidean(e) = &m.instrument[0].instr_type {
-            assert_eq!(e.humanize_advance_max_ticks, 0);
-            assert_eq!(e.humanize_probability, Q15::ZERO);
+        if let Track::Euclidean {
+            humanize_advance_max_ticks,
+            humanize_probability,
+            ..
+        } = &m.tracks[0]
+        {
+            assert_eq!(*humanize_advance_max_ticks, 0);
+            assert_eq!(*humanize_probability, Q15::ZERO);
         } else {
             panic!("expected Euclidean after undo");
         }
     }
 
     #[test]
-    fn humanize_rejects_non_euclidean_instrument() {
-        let mut m = fresh_module(); // instrument 0 is InstrumentType::Empty
-        let err = m.apply(EditCommand::SetInstrumentEuclideanHumanize {
+    fn humanize_rejects_non_euclidean_track() {
+        let mut m = fresh_module();
+        // CreateTrack always produces Track::Notes.
+        m.apply(EditCommand::CreateTrack {
             instrument: 0,
+            name: "n".into(),
+            length_rows: 4,
+        })
+        .unwrap();
+        let err = m.apply(EditCommand::SetEuclideanHumanize {
+            track: 0,
             advance_max_ticks: 4,
             probability: Q15::HALF,
         });
-        assert!(matches!(err, Err(EditError::InstrumentNotEuclidean { .. })));
+        assert!(matches!(err, Err(EditError::TrackNotEuclidean { .. })));
     }
 
     #[test]
-    fn humanize_rejects_missing_instrument() {
+    fn humanize_rejects_missing_track() {
         let mut m = Module::default();
-        let err = m.apply(EditCommand::SetInstrumentEuclideanHumanize {
-            instrument: 0,
+        let err = m.apply(EditCommand::SetEuclideanHumanize {
+            track: 0,
             advance_max_ticks: 4,
             probability: Q15::HALF,
         });
-        assert!(matches!(err, Err(EditError::InstrumentDoesNotExist { .. })));
+        assert!(matches!(err, Err(EditError::IndexOutOfRange { .. })));
     }
 
     // =====================================================================
@@ -2984,11 +3024,11 @@ mod tests {
             },
             ..Cell::default()
         };
-        m.tracks[0].rows[0] = c5;
+        m.tracks[0].expect_notes_rows_mut()[0] = c5;
         // Seed row 1 of track 0 with NoteOff.
-        m.tracks[0].rows[1].event = CellEvent::NoteOff { retrig: false };
+        m.tracks[0].expect_notes_rows_mut()[1].event = CellEvent::NoteOff { retrig: false };
         // Seed row 0 of track 1 with NoteOnGhost E5.
-        m.tracks[1].rows[0] = Cell {
+        m.tracks[1].expect_notes_rows_mut()[0] = Cell {
             event: CellEvent::NoteOnGhost {
                 pitch: Pitch::E5,
                 velocity: crate::core::fixed::units::Volume::FULL,
@@ -3034,11 +3074,11 @@ mod tests {
             })
             .expect("paste");
         assert!(matches!(
-            m.tracks[1].rows[2].event,
+            m.tracks[1].expect_notes_rows_mut()[2].event,
             CellEvent::NoteOn { .. }
         ));
         assert!(matches!(
-            m.tracks[1].rows[3].event,
+            m.tracks[1].expect_notes_rows_mut()[3].event,
             CellEvent::NoteOff { .. }
         ));
         // Undo restores the original cells.
@@ -3054,7 +3094,10 @@ mod tests {
                 mode: PasteMode::Overwrite,
             })
             .expect("paste 2");
-        assert!(matches!(m.tracks[1].rows[4].event, CellEvent::InstrReset));
+        assert!(matches!(
+            m.tracks[1].expect_notes_rows_mut()[4].event,
+            CellEvent::InstrReset
+        ));
         m.undo(&r2).expect("undo paste 2");
         assert_eq!(module_signature(&m), before);
         let _ = r;
@@ -3079,12 +3122,12 @@ mod tests {
         .expect("mix");
         // Event preserved.
         assert!(matches!(
-            m.tracks[1].rows[0].event,
+            m.tracks[1].expect_notes_rows_mut()[0].event,
             CellEvent::NoteOnGhost { .. }
         ));
         // Effect appended.
         assert!(matches!(
-            m.tracks[1].rows[0].effects[0],
+            m.tracks[1].expect_notes_rows_mut()[0].effects[0],
             TrackEffect::Arpeggio { half1: 1, half2: 2 }
         ));
     }
@@ -3092,7 +3135,7 @@ mod tests {
     #[test]
     fn paste_block_extends_short_track() {
         let mut m = module_with_two_tracks();
-        let original_len = m.tracks[1].rows.len();
+        let original_len = m.tracks[1].expect_notes_rows().len();
         // Paste a 4-row block starting at row 6 (last index is 7).
         // The paste extends to 6 + 4 = 10 rows.
         let block: Vec<Vec<Cell>> = vec![vec![Cell::default(); 4]];
@@ -3103,8 +3146,8 @@ mod tests {
             mode: PasteMode::Overwrite,
         })
         .expect("paste extending");
-        assert!(m.tracks[1].rows.len() >= 10);
-        assert!(m.tracks[1].rows.len() > original_len);
+        assert!(m.tracks[1].expect_notes_rows().len() >= 10);
+        assert!(m.tracks[1].expect_notes_rows().len() > original_len);
     }
 
     #[test]
@@ -3130,12 +3173,12 @@ mod tests {
         })
         .expect("transpose");
         // Track 0 row 0 was C5 (=60). After +12, should be C6 (=72).
-        match m.tracks[0].rows[0].event {
+        match m.tracks[0].expect_notes_rows_mut()[0].event {
             CellEvent::NoteOn { pitch, .. } => assert_eq!(pitch.value(), Pitch::C6.value()),
             _ => panic!("expected NoteOn"),
         }
         // Track 1 row 0 was NoteOnGhost(E5 = 64). After +12 → E6 (76).
-        match m.tracks[1].rows[0].event {
+        match m.tracks[1].expect_notes_rows_mut()[0].event {
             CellEvent::NoteOnGhost { pitch, .. } => {
                 assert_eq!(pitch.value(), Pitch::E6.value())
             }
@@ -3143,7 +3186,7 @@ mod tests {
         }
         // Track 0 row 1 was NoteOff — must stay NoteOff.
         assert!(matches!(
-            m.tracks[0].rows[1].event,
+            m.tracks[0].expect_notes_rows_mut()[1].event,
             CellEvent::NoteOff { .. }
         ));
     }
@@ -3160,7 +3203,7 @@ mod tests {
         });
         assert!(matches!(res, Err(EditError::IndexOutOfRange { .. })));
         // The cell wasn't touched.
-        match m.tracks[0].rows[0].event {
+        match m.tracks[0].expect_notes_rows_mut()[0].event {
             CellEvent::NoteOn { pitch, .. } => assert_eq!(pitch.value(), Pitch::C5.value()),
             _ => panic!("expected unchanged NoteOn"),
         }
@@ -3195,14 +3238,18 @@ mod tests {
         })
         .unwrap();
         // Endpoints: row 0 = Volume 0.0, row 4 = Volume 1.0.
-        m.tracks[0].rows[0].effects.push(TrackEffect::Volume {
-            value: crate::core::fixed::units::Volume::SILENT,
-            tick: 0,
-        });
-        m.tracks[0].rows[4].effects.push(TrackEffect::Volume {
-            value: crate::core::fixed::units::Volume::FULL,
-            tick: 0,
-        });
+        m.tracks[0].expect_notes_rows_mut()[0]
+            .effects
+            .push(TrackEffect::Volume {
+                value: crate::core::fixed::units::Volume::SILENT,
+                tick: 0,
+            });
+        m.tracks[0].expect_notes_rows_mut()[4]
+            .effects
+            .push(TrackEffect::Volume {
+                value: crate::core::fixed::units::Volume::FULL,
+                tick: 0,
+            });
         m
     }
 
@@ -3217,7 +3264,7 @@ mod tests {
         })
         .expect("interpolate");
         // Row 0: endpoint, untouched (volume 0).
-        let v0 = m.tracks[0].rows[0]
+        let v0 = m.tracks[0].expect_notes_rows_mut()[0]
             .effects
             .iter()
             .find_map(|fx| {
@@ -3230,7 +3277,7 @@ mod tests {
             .unwrap();
         assert_eq!(v0, 0);
         // Row 4: endpoint, untouched (volume Q15::ONE raw = i16::MAX = 32767).
-        let v4 = m.tracks[0].rows[4]
+        let v4 = m.tracks[0].expect_notes_rows_mut()[4]
             .effects
             .iter()
             .find_map(|fx| {
@@ -3246,7 +3293,7 @@ mod tests {
         // and roughly equal to i/4 of the way.
         let mut prev = 0i16;
         for r in 1..4 {
-            let val = m.tracks[0].rows[r]
+            let val = m.tracks[0].expect_notes_rows_mut()[r]
                 .effects
                 .iter()
                 .find_map(|fx| {
@@ -3299,10 +3346,12 @@ mod tests {
         let mut m = module_with_volume_endpoints();
         // Pre-seed row 2 with a Volume effect to verify it gets
         // replaced, not duplicated.
-        m.tracks[0].rows[2].effects.push(TrackEffect::Volume {
-            value: crate::core::fixed::units::Volume::FULL,
-            tick: 0,
-        });
+        m.tracks[0].expect_notes_rows_mut()[2]
+            .effects
+            .push(TrackEffect::Volume {
+                value: crate::core::fixed::units::Volume::FULL,
+                tick: 0,
+            });
         m.apply(EditCommand::InterpolateEffect {
             track: 0,
             row_start: 0,
@@ -3311,7 +3360,7 @@ mod tests {
         })
         .unwrap();
         // Row 2 should now carry exactly one Volume effect (replaced).
-        let volume_count = m.tracks[0].rows[2]
+        let volume_count = m.tracks[0].expect_notes_rows_mut()[2]
             .effects
             .iter()
             .filter(|fx| matches!(fx, TrackEffect::Volume { .. }))
@@ -3323,7 +3372,7 @@ mod tests {
     fn interpolate_preserves_other_effects() {
         let mut m = module_with_volume_endpoints();
         // Pre-seed row 2 with a non-Volume effect.
-        m.tracks[0].rows[2]
+        m.tracks[0].expect_notes_rows_mut()[2]
             .effects
             .push(TrackEffect::Arpeggio { half1: 4, half2: 7 });
         m.apply(EditCommand::InterpolateEffect {
@@ -3334,12 +3383,12 @@ mod tests {
         })
         .unwrap();
         // Arpeggio survives.
-        assert!(m.tracks[0].rows[2]
+        assert!(m.tracks[0].expect_notes_rows_mut()[2]
             .effects
             .iter()
             .any(|fx| matches!(fx, TrackEffect::Arpeggio { .. })));
         // Volume was added.
-        assert!(m.tracks[0].rows[2]
+        assert!(m.tracks[0].expect_notes_rows_mut()[2]
             .effects
             .iter()
             .any(|fx| matches!(fx, TrackEffect::Volume { .. })));

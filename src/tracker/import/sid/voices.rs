@@ -152,34 +152,38 @@ fn pick_phrase(phrases: &[Vec<PatternSlot>], idx: u8) -> &Vec<PatternSlot> {
 }
 
 fn decode_phrase(version: usize, source: &[u8]) -> Vec<PatternSlot> {
+    // Treat OOB reads as the 0xFF sentinel: a truncated phrase
+    // stream terminates instead of panicking.
+    let byte = |idx: usize| -> u8 { source.get(idx).copied().unwrap_or(0xFF) };
+
     let mut phrase: Vec<PatternSlot> = vec![];
     let mut index: usize = 0;
     let mut last_instr: Option<usize> = None;
 
-    while source[index] != 255 {
+    while byte(index) != 255 {
         let mut current = PatternSlot::default();
 
-        let length = source[index] & 0b0001_1111; // 0-31
-        let release = (source[index] & 0b0010_0000) == 0;
-        let append = (source[index] & 0b0100_0000) == 0;
-        let instr_or_portamento = (source[index] & 0b1000_0000) != 0;
+        let length = byte(index) & 0b0001_1111; // 0-31
+        let release = (byte(index) & 0b0010_0000) == 0;
+        let append = (byte(index) & 0b0100_0000) == 0;
+        let instr_or_portamento = (byte(index) & 0b1000_0000) != 0;
 
         if append {
             index += 1;
             if instr_or_portamento {
                 match version {
                     10 => {
-                        if source[index] & 0b1000_0000 == 0 {
-                            current.instrument = Some((source[index] & 0b0111_1111) as usize);
+                        if byte(index) & 0b1000_0000 == 0 {
+                            current.instrument = Some((byte(index) & 0b0111_1111) as usize);
                             last_instr = current.instrument;
                         } else {
                             // Portamento: bit 7 = portamento flag, bits 1-6 = speed,
                             // bit 0 = direction (0=up, 1=down).
                             // Speed is raw 16-bit freq delta per frame, >> 1 to scale for XM effects.
-                            let p = source[index] & 0b0111_1110;
+                            let p = byte(index) & 0b0111_1110;
                             if p != 0 {
                                 current.effect_parameter = p >> 1;
-                                if source[index] & 1 == 0 {
+                                if byte(index) & 1 == 0 {
                                     current.effect_type = 1; // portamento up
                                 } else {
                                     current.effect_type = 2; // portamento down
@@ -189,8 +193,8 @@ fn decode_phrase(version: usize, source: &[u8]) -> Vec<PatternSlot> {
                     }
                     15 => {
                         // Spellbound variant: byte 2 is always instrument, never portamento
-                        if source[index] & 0b1000_0000 == 0 {
-                            current.instrument = Some((source[index] & 0b0111_1111) as usize);
+                        if byte(index) & 0b1000_0000 == 0 {
+                            current.instrument = Some((byte(index) & 0b0111_1111) as usize);
                             last_instr = current.instrument;
                         }
                     }
@@ -198,8 +202,8 @@ fn decode_phrase(version: usize, source: &[u8]) -> Vec<PatternSlot> {
                         // Version 20+: portamento uses 14-bit value across 2 bytes
                         // Byte 1: bit 7=portamento, bit 6=direction, bits 5-0=high 6 bits
                         // Byte 2: low 8 bits of portamento speed
-                        if source[index] & 0b1000_0000 == 0 {
-                            current.instrument = Some((source[index] & 0b0111_1111) as usize);
+                        if byte(index) & 0b1000_0000 == 0 {
+                            current.instrument = Some((byte(index) & 0b0111_1111) as usize);
                             last_instr = current.instrument;
                         } else if index + 2 >= source.len() {
                             // International Karate v20 has phrase bytes that
@@ -208,11 +212,11 @@ fn decode_phrase(version: usize, source: &[u8]) -> Vec<PatternSlot> {
                             // outer loop's `index += 1` (at the phrase tail)
                             // lands on a sentinel — defensive but matches the
                             // observed playback in the original engine.
-                            index -= 2;
+                            index = index.saturating_sub(2);
                         } else {
-                            let direction_down = source[index] & 0b0100_0000 != 0;
-                            let p: u16 = ((source[index] as u16 & 0b0011_1111) << 8)
-                                | source[index + 1] as u16;
+                            let direction_down = byte(index) & 0b0100_0000 != 0;
+                            let p: u16 =
+                                ((byte(index) as u16 & 0b0011_1111) << 8) | byte(index + 1) as u16;
                             index += 1;
                             if p != 0 {
                                 // Scale 14-bit value (0-16383) to 8-bit (0-255)
@@ -234,7 +238,7 @@ fn decode_phrase(version: usize, source: &[u8]) -> Vec<PatternSlot> {
             // the player reads from memory locations instead of the
             // frequency table; the hardcoded fixups below reproduce
             // the original (buggy) behaviour.
-            let n = source[index] & 0b0111_1111;
+            let n = byte(index) & 0b0111_1111;
             let note = if n > 8 * 12 {
                 match n {
                     96 => 0,

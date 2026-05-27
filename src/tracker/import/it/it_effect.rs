@@ -449,9 +449,13 @@ impl ItEffect {
                             _ => None,
                         }
                     }
-                    0x8 => Some(vec![TrackImportEffect::Panning(Panning::from_ratio(
-                        param as i32,
-                        15,
+                    // S8x: 4-bit pan. ITTECH/Schism map this as
+                    // `pan = (param << 4) | param` (= param * 17),
+                    // landing on the full 0..=255 range with the
+                    // centre (S88) at byte 136 — not on the 16-step
+                    // ratio `param/15` (which has no exact centre).
+                    0x8 => Some(vec![TrackImportEffect::Panning(Panning::from_byte_255(
+                        ((param & 0x0F) << 4) | (param & 0x0F),
                     ))]),
                     0x9 => Some(vec![TrackImportEffect::InstrumentSurround(param == 1)]),
                     0xA => Some(vec![TrackImportEffect::InstrumentSampleOffsetAddHigh(
@@ -688,8 +692,15 @@ impl ItEffect {
             return Some(TrackImportEffect::Panning(p));
         }
 
+        // ITTECH vol-col layout in the non-volume / non-panning range:
+        //   65..=124  → A..F effects (`slot.volume - 'A'` → fx 0..=5)
+        //   125..=127 → reserved (no effect — drop)
+        //   193..=212 → G..H effects (high bit set)
+        //   213..=255 → reserved (already rejected by `> 212` above)
+        if (125..=127).contains(&slot.volume) {
+            return None;
+        }
         let temp = if slot.volume & 0x80 == 0 {
-            // ['A' 'B' 'C' 'D' 'E' 'F'] -> [0 1 2 3 4 5] (A B C D E F effects)
             slot.volume - b'A'
         } else {
             // [11+k*128 12+k*128]=[6 7] (G H effects)

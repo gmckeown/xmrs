@@ -123,8 +123,7 @@ impl WaveformState {
     }
 
     /// Current waveform shape. Mainly useful for diagnostics and
-    /// the DAW migration Phase 3c.1 dual-read validation that
-    /// compares the channel-side LFO state with the
+    /// for validating channel-side LFO state against the
     /// `AutomationLane` reconstruction.
     #[inline]
     pub fn waveform(&self) -> Waveform {

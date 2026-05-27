@@ -4,7 +4,6 @@
 //! Track contents whether or not dedup ran.
 
 use alloc::collections::{BTreeMap, BTreeSet};
-use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::core::cell::Cell;
@@ -89,10 +88,39 @@ pub fn dedupe_tracks_by_content(module: &mut Module) {
 
 fn hash_track(track: &Track) -> u64 {
     let mut h: u64 = 0xcbf29ce484222325;
-    fnv_mix_usize(&mut h, track.instrument);
-    fnv_mix_usize(&mut h, track.rows.len());
-    for cell in &track.rows {
-        hash_cell(&mut h, cell);
+    match track {
+        Track::Notes {
+            instrument, rows, ..
+        } => {
+            fnv_mix_byte(&mut h, 0);
+            fnv_mix_usize(&mut h, *instrument);
+            fnv_mix_usize(&mut h, rows.len());
+            for cell in rows {
+                hash_cell(&mut h, cell);
+            }
+        }
+        Track::Euclidean {
+            instrument,
+            events,
+            steps,
+            rotation,
+            prototype,
+            humanize_advance_max_ticks,
+            humanize_probability,
+            ..
+        } => {
+            fnv_mix_byte(&mut h, 1);
+            fnv_mix_usize(&mut h, *instrument);
+            fnv_mix_byte(&mut h, *events);
+            fnv_mix_byte(&mut h, *steps);
+            fnv_mix_byte(&mut h, *rotation);
+            fnv_mix_byte(&mut h, *humanize_advance_max_ticks);
+            let raw = humanize_probability.raw().to_le_bytes();
+            for b in raw {
+                fnv_mix_byte(&mut h, b);
+            }
+            hash_cell(&mut h, prototype);
+        }
     }
     h
 }
@@ -124,35 +152,18 @@ fn fnv_mix_usize(h: &mut u64, v: usize) {
 
 fn hash_cell(h: &mut u64, cell: &Cell) {
     use crate::core::cell::CellEvent;
-    use core::fmt::Write;
 
     match cell.event {
         CellEvent::None => fnv_mix_byte(h, 0),
         CellEvent::NoteOn { pitch, velocity } => {
             fnv_mix_byte(h, 1);
-            let mut s = String::new();
-            let _ = write!(&mut s, "{:?}", pitch);
-            for b in s.bytes() {
-                fnv_mix_byte(h, b);
-            }
-            let mut s = String::new();
-            let _ = write!(&mut s, "{:?}", velocity);
-            for b in s.bytes() {
-                fnv_mix_byte(h, b);
-            }
+            fnv_mix_u32(h, pitch.value() as u32);
+            fnv_mix_u32(h, velocity.to_byte_64() as u32);
         }
         CellEvent::NoteOnGhost { pitch, velocity } => {
             fnv_mix_byte(h, 2);
-            let mut s = String::new();
-            let _ = write!(&mut s, "{:?}", pitch);
-            for b in s.bytes() {
-                fnv_mix_byte(h, b);
-            }
-            let mut s = String::new();
-            let _ = write!(&mut s, "{:?}", velocity);
-            for b in s.bytes() {
-                fnv_mix_byte(h, b);
-            }
+            fnv_mix_u32(h, pitch.value() as u32);
+            fnv_mix_u32(h, velocity.to_byte_64() as u32);
         }
         CellEvent::InstrReset => fnv_mix_byte(h, 3),
         CellEvent::NoteOff { retrig: false } => fnv_mix_byte(h, 4),
@@ -162,46 +173,88 @@ fn hash_cell(h: &mut u64, cell: &Cell) {
     }
 
     fnv_mix_u32(h, cell.effects.len() as u32);
+    // Effect discriminants are enough to bucket cells; effect-level
+    // equality is re-checked by `cells_equal` so false collisions
+    // here are cheap.
     for fx in &cell.effects {
-        let mut s = String::new();
-        let _ = write!(&mut s, "{:?}", fx);
-        for b in s.bytes() {
-            fnv_mix_byte(h, b);
+        use core::hash::Hash;
+        let mut sub = FnvHasher(*h);
+        core::mem::discriminant(fx).hash(&mut sub);
+        *h = sub.0;
+    }
+}
+
+struct FnvHasher(u64);
+impl core::hash::Hasher for FnvHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 ^= b as u64;
+            self.0 = self.0.wrapping_mul(0x100000001b3);
         }
     }
 }
 
 fn tracks_equal_content(a: &Track, b: &Track) -> bool {
-    if a.instrument != b.instrument {
-        return false;
-    }
-    if a.rows.len() != b.rows.len() {
-        return false;
-    }
-    for (ua, ub) in a.rows.iter().zip(b.rows.iter()) {
-        if !cells_equal(ua, ub) {
-            return false;
+    match (a, b) {
+        (
+            Track::Notes {
+                instrument: ia,
+                rows: ra,
+                ..
+            },
+            Track::Notes {
+                instrument: ib,
+                rows: rb,
+                ..
+            },
+        ) => {
+            if ia != ib || ra.len() != rb.len() {
+                return false;
+            }
+            for (ua, ub) in ra.iter().zip(rb.iter()) {
+                if !cells_equal(ua, ub) {
+                    return false;
+                }
+            }
+            true
         }
+        (
+            Track::Euclidean {
+                instrument: ia,
+                events: ea,
+                steps: sa,
+                rotation: rota,
+                prototype: pa,
+                humanize_advance_max_ticks: ha,
+                humanize_probability: pra,
+                ..
+            },
+            Track::Euclidean {
+                instrument: ib,
+                events: eb,
+                steps: sb,
+                rotation: rotb,
+                prototype: pb,
+                humanize_advance_max_ticks: hb,
+                humanize_probability: prb,
+                ..
+            },
+        ) => {
+            ia == ib
+                && ea == eb
+                && sa == sb
+                && rota == rotb
+                && ha == hb
+                && pra == prb
+                && cells_equal(pa, pb)
+        }
+        _ => false,
     }
-    true
 }
 
 fn cells_equal(a: &Cell, b: &Cell) -> bool {
-    use core::fmt::Write;
-    if a.event != b.event {
-        return false;
-    }
-    if a.effects.len() != b.effects.len() {
-        return false;
-    }
-    for (ea, eb) in a.effects.iter().zip(b.effects.iter()) {
-        let mut sa = String::new();
-        let mut sb = String::new();
-        let _ = write!(&mut sa, "{:?}", ea);
-        let _ = write!(&mut sb, "{:?}", eb);
-        if sa != sb {
-            return false;
-        }
-    }
-    true
+    a == b
 }

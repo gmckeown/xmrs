@@ -598,6 +598,9 @@ impl Q16_16 {
     /// down (lower octave), positive shifts up.
     #[inline]
     pub const fn shift_octave(self, octaves: i8) -> Self {
+        if self.0 == 0 {
+            return Self(0);
+        }
         if octaves >= 0 {
             // Saturate on overflow.
             let shift = octaves as u32;

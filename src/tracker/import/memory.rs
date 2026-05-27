@@ -460,10 +460,14 @@ impl ImportMemory {
                             }
                         }
                         MemoryType::S3m => {
+                            // ST3 keeps both Qxy nibbles in a single
+                            // per-channel slot. Mirror that here so
+                            // recalling either half consults the same
+                            // channel's last Qxy.
                             if *speed == 0 {
-                                *speed = self.global[NOTE_RETRIG].2
+                                *speed = self.channel[index][NOTE_RETRIG].2
                             } else {
-                                self.global[NOTE_RETRIG].2 = *speed;
+                                self.channel[index][NOTE_RETRIG].2 = *speed;
                             }
                             if *vol == 0 {
                                 *vol = self.channel[index][NOTE_RETRIG].3
@@ -809,9 +813,15 @@ impl ImportMemory {
             }
             let pattern = &mut source[*o];
             pattern.iter_mut().for_each(|row| {
-                row.iter_mut()
-                    .enumerate()
-                    .for_each(|(index, tiu)| self.update_memory(&mem, index, tiu));
+                row.iter_mut().enumerate().for_each(|(index, tiu)| {
+                    // `self.channel` is dimensioned for 64 channels;
+                    // a format declaring more (e.g. an OpenMPT-extended
+                    // XM with >64 channels) plays back without
+                    // per-channel memory tracking instead of panicking.
+                    if index < 64 {
+                        self.update_memory(&mem, index, tiu)
+                    }
+                });
             });
         });
 

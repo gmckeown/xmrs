@@ -51,17 +51,18 @@ fn fingerprint(m: &Module) -> String {
     )
     .unwrap();
     for (i, t) in m.tracks.iter().enumerate() {
+        let rows: &[Cell] = t.rows().unwrap_or(&[]);
         write!(
             &mut s,
             "t{}={{n='{}' i={} rows={} mute={}}};",
             i,
-            t.name,
-            t.instrument,
-            t.rows.len(),
-            t.muted
+            t.name(),
+            t.instrument(),
+            rows.len(),
+            t.muted()
         )
         .unwrap();
-        for (r, cell) in t.rows.iter().enumerate() {
+        for (r, cell) in rows.iter().enumerate() {
             // Hash the cell via Debug (TrackUnit is Debug but not Eq).
             let cell_s = format!("{:?}", cell);
             // truncate to keep output reasonable

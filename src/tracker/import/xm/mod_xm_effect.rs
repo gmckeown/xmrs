@@ -21,13 +21,16 @@ pub struct ModXmEffect;
 
 impl ModXmEffect {
     fn mod_xm_volume_slide(param: u8) -> Option<Q15> {
-        let upper_nibble = param & 0xF0;
-        let lower_nibble = param & 0x0F;
+        let upper = param >> 4;
+        let lower = param & 0x0F;
 
-        match (upper_nibble, lower_nibble) {
-            (f, 0) => Some(Q15::from_ratio((f >> 4) as i32, 64)), // Slide up
-            (0, f) => Some(Q15::from_ratio(-(f as i32), 64)),     // Slide down
-            _ => None,
+        // FT2 semantics: when both nibbles are non-zero, the upper
+        // nibble wins (slide up). Matches MilkyTracker / FT2:
+        //   `if (sl >> 4) v += sl >> 4; else v -= sl & 0xF;`
+        match (upper, lower) {
+            (0, 0) => None,
+            (u, _) if u != 0 => Some(Q15::from_ratio(u as i32, 64)),
+            (_, l) => Some(Q15::from_ratio(-(l as i32), 64)),
         }
     }
 
@@ -217,22 +220,21 @@ impl ModXmEffect {
             0x15 => Some(vec![TrackImportEffect::InstrumentVolumeEnvelopePosition(
                 current.effect_parameter as usize,
             )]),
-            // Pxy: Panning slide
+            // Pxy: Panning slide. FT2 semantics: upper-nibble wins
+            // when both nibbles are non-zero (slide right).
             0x19 => {
                 let param = current.effect_parameter;
-                let upper_nibble = param & 0xF0;
-                let lower_nibble = param & 0x0F;
-
-                match (upper_nibble, lower_nibble) {
-                    (f, 0) => Some(vec![TrackImportEffect::PanningSlideN(Q15::from_ratio(
-                        (f >> 4) as i32,
+                let upper = param >> 4;
+                let lower = param & 0x0F;
+                match (upper, lower) {
+                    (0, 0) => None,
+                    (u, _) if u != 0 => Some(vec![TrackImportEffect::PanningSlideN(
+                        Q15::from_ratio(u as i32, 16),
+                    )]),
+                    (_, l) => Some(vec![TrackImportEffect::PanningSlideN(Q15::from_ratio(
+                        -(l as i32),
                         16,
-                    ))]), // Slide up
-                    (0, f) => Some(vec![TrackImportEffect::PanningSlideN(Q15::from_ratio(
-                        -(f as i32),
-                        16,
-                    ))]), // Slide down
-                    _ => None,
+                    ))]),
                 }
             }
             // Rxy: Multi retrig note
@@ -461,29 +463,18 @@ impl ModXmEffect {
                 SongLevelEffect::Volume(Volume::from_byte_64(current.effect_parameter.min(64)))
                     .into(),
             ),
-            // Hxy: Global volume slide
+            // Hxy: Global volume slide. FT2 semantics: upper-nibble
+            // wins when both nibbles are non-zero (slide up).
             0x11 => {
                 let param = current.effect_parameter;
-                let upper_nibble = param & 0xF0;
-                let lower_nibble = param & 0x0F;
-
-                match (upper_nibble, lower_nibble) {
-                    (0, f) => Some(
-                        SongLevelEffect::VolumeSlide {
-                            speed: Q15::from_ratio(-(f as i32), 64),
-                            fine: false,
-                        }
-                        .into(),
-                    ), // Slide down
-                    (f, 0) => Some(
-                        SongLevelEffect::VolumeSlide {
-                            speed: Q15::from_ratio((f >> 4) as i32, 64),
-                            fine: false,
-                        }
-                        .into(),
-                    ), // Slide up
-                    _ => None,
-                }
+                let upper = param >> 4;
+                let lower = param & 0x0F;
+                let speed = match (upper, lower) {
+                    (0, 0) => return None,
+                    (u, _) if u != 0 => Q15::from_ratio(u as i32, 64),
+                    (_, l) => Q15::from_ratio(-(l as i32), 64),
+                };
+                Some(SongLevelEffect::VolumeSlide { speed, fine: false }.into())
             }
             _ => None,
         }

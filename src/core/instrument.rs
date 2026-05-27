@@ -10,50 +10,42 @@
 //! - `Empty` — placeholder slot.
 //! - `Default(InstrDefault)` — the dominant case (sampled, XM/MOD/
 //!   S3M/IT).
-//! - `Euclidean(InstrEkn)` — wraps another instrument + a Bjorklund
-//!   pattern (synthetic rhythm).
 //! - `Midi(InstrMidi)` — routed to an external MIDI synth via the
 //!   player's observer chain.
 //! - `Opl(InstrOpl)` *(cfg `import_s3m`)* — Yamaha OPL FM, opaque
 //!   to the sample engine.
 //! - `Sid(InstrSid)` / `RobSid(InstrRobSid)` *(cfg `import_sid`)* —
 //!   MOS6581 / Rob-Hubbard-style C64, opaque to the sample engine.
+//!
+//! Euclidean rhythms are not an instrument kind — they are a Track
+//! kind ([`Track::Euclidean`](crate::core::daw::track::Track::Euclidean)).
 
 use serde::{Deserialize, Serialize};
 
 use crate::core::instr_default::InstrDefault;
-use crate::core::instr_ekn::InstrEkn;
 use crate::core::instr_midi::InstrMidi;
 
 use alloc::string::String;
 
 //===========================================================================
 
-/// Instrument Type
-///
-/// clippy signals a large size difference between `Default` (~2 KiB, mostly
-/// `InstrDefault::sample_for_pitch: [Option<usize>; 120]`) and the other
-/// variants (~50-100 B). The standard fix is `Box<InstrDefault>`, but:
-///   - The XM-style `Default` variant is the dominant case in every XM/MOD/S3M
-///     module, so the memory win only materialises for modules that have many
-///     `Empty` instrument slots — an XM-file pathological case, not the norm.
-///   - Boxing adds one allocation per instrument at load time and breaks
-///     cache locality while iterating the instrument table.
-///   - It is a breaking change in the public API (every construction site
-///     and pattern-match against `InstrumentType::Default(d)` would have to
-///     switch to `Box::new(...)` / auto-deref).
-///
-/// Kept as-is intentionally.
+/// Instrument payload, discriminated by kind.
+//
+// `large_enum_variant` allowed: `Default` is ~2 KiB (mostly
+// `sample_for_pitch: [Option<usize>; 120]`) vs ~50–100 B for the others.
+// Boxing would help only when modules carry many `Empty` slots (rare),
+// cost one extra allocation per instrument at load, hurt iteration
+// cache locality, and break the public API at every construction /
+// match site.
 #[allow(clippy::large_enum_variant)]
 #[derive(Default, Serialize, Deserialize, Debug)]
 pub enum InstrumentType {
     /// No Instrument
     #[default]
     Empty,
-    /// Historical XM Instrument
+    /// Canonical sample-based instrument — envelopes, vibrato,
+    /// keyboard map, sample list. Used by XM / MOD / S3M / IT.
     Default(InstrDefault),
-    /// Euclidean Rhythm Instrument
-    Euclidean(InstrEkn),
     /// Midi Instrument
     Midi(InstrMidi),
     /// Yamaha OPL (gated behind `import_s3m`).

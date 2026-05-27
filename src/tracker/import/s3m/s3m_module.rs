@@ -610,9 +610,16 @@ impl S3mModule {
                 s3m.patterns.push(vec![vec![]]);
                 continue;
             }
-            let data = &ser_s3m_module[offset as usize..];
-            let len: u16 = data[0] as u16 | (data[1] as u16) << 8;
-            let data = &data[2..len as usize];
+            let start = offset as usize;
+            if start + 2 > ser_s3m_module.len() {
+                return Err(ImportError::UnexpectedEof);
+            }
+            let data = &ser_s3m_module[start..];
+            let len: usize = (data[0] as usize) | ((data[1] as usize) << 8);
+            if len < 2 || len > data.len() {
+                return Err(ImportError::OutOfRange("s3m pattern length"));
+            }
+            let data = &data[2..len];
             let mut d2 = data;
             let mut pattern: Vec<Vec<PatternSlot>> = vec![];
             while !d2.is_empty() {

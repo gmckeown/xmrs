@@ -138,14 +138,9 @@ impl SortedClips {
     /// on the `(song, target_channel)` lane. Returns the clip and
     /// its global index in `self`.
     pub fn active_at(&self, song: u16, target_channel: u8, tick: u32) -> Option<(usize, &Clip)> {
-        let key = (song, target_channel);
-        let lane_start = self
-            .inner
-            .partition_point(|c| (c.song, c.target_channel) < key);
-        let lane_end = self
-            .inner
-            .partition_point(|c| (c.song, c.target_channel) <= key);
-        let lane = &self.inner[lane_start..lane_end];
+        let range = self.lane_range(song, target_channel);
+        let lane_start = range.start;
+        let lane = &self.inner[range];
         let upper = lane.partition_point(|c| c.position_tick <= tick);
         if upper == 0 {
             None
@@ -240,8 +235,8 @@ impl core::ops::Index<usize> for SortedClips {
 }
 
 // `Serialize` writes the inner Vec as-is. `Deserialize` re-sorts so
-// a serde sink that drops the invariant (legacy data, hand-crafted
-// JSON) round-trips into a valid `SortedClips`.
+// any source that drops the invariant (hand-crafted JSON, an
+// external producer) round-trips into a valid `SortedClips`.
 impl Serialize for SortedClips {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         self.inner.serialize(s)

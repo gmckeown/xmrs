@@ -317,18 +317,14 @@ pub fn linear_period_to_frequency(p: Period) -> Frequency {
     // Compose sub-octave multiplier (Q16.16, in [1, 2)).
     let mul = SEMITONE_FROM_C_Q16_16[semi].mul_q16_16(SUBSEMITONE_Q16_16[sub]);
 
-    // freq = mul × C4_FREQ_HZ × 2^octave. Computed in `u64` to
-    // keep the multiply and the octave shift lossless across
+    // freq = mul × C4_FREQ_HZ × 2^octave. Computed in `u64` so
+    // the multiply and the octave shift stay lossless across
     // the whole tracker frequency range (~16 Hz at C-0 to
     // 134 kHz when `relative_pitch` lifts a sample 4 octaves
     // above C-4 — XM `binary_world.xm` does this routinely).
-    //
-    // PHASE 2 BUGFIX: before the `Frequency` storage moved to
-    // Q24.8, the unshifted product lived in `u32` Q16.16 and
-    // `shift_octave` saturated at 65 535 Hz on its way out.
-    // The auto-vibrato modulation tracked tiny pitch changes
-    // around that ceiling, all of which mapped to the same
-    // saturated value — vibrato simply disappeared on
+    // `Frequency`'s Q24.8 storage is sized to hold the full
+    // range; a narrower intermediate (e.g. u32 Q16.16) would
+    // saturate around 65 kHz and lose auto-vibrato detail on
     // high-`relative_pitch` instruments.
     //
     //   mul.raw   ∈ [65536, 131072)         (Q16.16 of [1.0, 2.0))
@@ -336,10 +332,16 @@ pub fn linear_period_to_frequency(p: Period) -> Frequency {
     //   << 4      ≤ 1.8e10                                     (u64 fine)
     //   >> 8      = Q24.8 of Hz                                (fits in u32)
     let scaled_q16_16 = (mul.raw() as u64) * (C4_FREQ_HZ as u64);
+    // `octave` ∈ [-80, 6] for a u16 `Period`; cap both shifts at
+    // 63 since a u64 shift of 64+ is UB. A shift of ≥ 64 right
+    // would zero the value anyway, and the positive saturation
+    // is caught by the `q24_8 > u32::MAX` clamp below.
     let shifted_q16_16 = if octave >= 0 {
-        scaled_q16_16 << octave
+        let shift = (octave as u32).min(63);
+        scaled_q16_16 << shift
     } else {
-        scaled_q16_16 >> (-octave)
+        let shift = ((-(octave as i32)) as u32).min(63);
+        scaled_q16_16 >> shift
     };
     // Q16.16 → Q24.8: drop 8 fractional bits.
     let q24_8 = shifted_q16_16 >> 8;

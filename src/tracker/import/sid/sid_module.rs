@@ -106,13 +106,13 @@ impl SidModule {
                     let seg_start_row = seg.start_row;
                     let materialised: Vec<Cell> =
                         seg.rows.into_iter().map(|tiu| tiu.prepare_cell()).collect();
-                    tracks.push(Track {
+                    let seg_len = materialised.len() as u32;
+                    tracks.push(Track::Notes {
                         name: format!("voice {} seg {}", voice_idx, track_idx),
                         instrument: seg.instrument,
                         rows: materialised,
                         muted: false,
                     });
-                    let seg_len = tracks.last().unwrap().rows.len() as u32;
                     let position_tick = seg_start_row * speed as u32;
                     clips.push(Clip {
                         track: track_idx,

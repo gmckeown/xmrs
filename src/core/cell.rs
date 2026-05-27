@@ -1,27 +1,17 @@
 //! `Cell` — one row of a [`crate::core::daw::track::Track`].
 //!
-//! Successor to the legacy `TrackUnit` struct which carried a
-//! `(note, instrument, velocity)` triple. DAW migration Phase 1
-//! collapses that triple into a single typed [`crate::core::cell::CellEvent`];
-//! Phase 2 moves the per-trigger velocity into the
-//! [`crate::core::cell::CellEvent::NoteOn`] /
-//! [`crate::core::cell::CellEvent::NoteOnGhost`] variants where it
-//! actually has meaning.
+//! A cell carries a typed [`CellEvent`] (the note/instrument-column
+//! state) and a vector of row-pinned [`TrackEffect`]s. The instrument
+//! itself is **not** stored per-cell: it lives at
+//! [`crate::core::daw::track::Track::instrument`] and is invariant for
+//! the lifetime of the track. The replayer reads it from a
+//! per-channel state field rather than from the cell.
 //!
-//! The cell stays row-indexed — one `Cell` per Track row — and the
-//! instrument is no longer stored per-cell: it lives at
-//! [`crate::core::daw::track::Track::instrument`], invariant for the
-//! lifetime of the Track. The replayer reads the active track's
-//! instrument from a fresh per-channel state field (`Channel::
-//! current_track_instrument`) rather than from the cell.
-//!
-//! Since DAW migration Phase 3c.3 the cell no longer carries a
-//! global-effects vector — song-level globals
-//! ([`crate::core::effect::SongLevelEffect`]) migrated to
-//! [`crate::core::daw::automation::AutomationLane`]s, navigation globals
-//! ([`crate::core::effect::NavigationEffect`]) to
-//! [`crate::core::daw::timeline::TimelineMap`], and the MIDI macro to
-//! `cell.effects` via [`crate::core::effect::TrackEffect::MidiMacro`].
+//! Song-level globals (tempo, speed, master volume, slides) live in
+//! [`crate::core::daw::automation::AutomationLane`]s, navigation
+//! (pattern jump, pattern break, pattern loop, pattern delay) lives in
+//! [`crate::core::daw::timeline::TimelineMap`], and MIDI macros are
+//! row-local [`TrackEffect::MidiMacro`] entries.
 
 use crate::core::cell_note::CellNote;
 use crate::core::effect::TrackEffect;
@@ -36,8 +26,8 @@ use alloc::vec::Vec;
 ///
 /// The variants encode every `(note column, instrument column)`
 /// combination an XM/IT/S3M/MOD cell can carry, plus the
-/// "ghost-vs-fresh" distinction that historically lived in the
-/// `cell.instrument: Option<usize>` field.
+/// ghost-vs-fresh distinction (whether the instrument column was
+/// non-empty on the trigger row).
 ///
 /// | Variant | Note source | Instr-col source |
 /// |---|---|---|
@@ -50,12 +40,10 @@ use alloc::vec::Vec;
 /// | [`Self::NoteCut`] | `^^^` | * |
 /// | [`Self::NoteFade`] | `~~~` | * |
 ///
-/// `NoteOff::retrig` is a **semantic distinction**, not a quirk —
-/// the channel logic in `xmrsplayer` consults this branch without a
-/// `PlaybackQuirks` gate (channel.rs:2311-2314 in the legacy code).
-/// `=== xx` with an instrument column reproduces the historical
-/// tracker idiom that re-triggers the instrument and then immediately
-/// fires `key_off`: a one-tick attack followed by release.
+/// `NoteOff::retrig` is a **semantic distinction**, not a quirk.
+/// `=== xx` with an instrument column re-triggers the instrument
+/// and then immediately fires `key_off`: a one-tick attack followed
+/// by release — universal to XM/IT/S3M.
 #[derive(Default, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CellEvent {
     /// Nothing on this cell — both columns empty.
@@ -77,28 +65,31 @@ pub enum CellEvent {
     ///
     /// `retrig = false` (no instrument column): plain `key_off(0)`.
     /// `retrig = true` (instrument column present): re-trigger the
-    /// instrument with `KEEP_PERIOD`, *then* `key_off(0)` — the
-    /// tracker idiom that produces a click attack followed by
-    /// release on the same row. Universal to XM/IT/S3M.
+    /// instrument with `KEEP_PERIOD`, *then* `key_off(0)` — a click
+    /// attack followed by release on the same row. Universal to
+    /// XM/IT/S3M.
     NoteOff { retrig: bool },
     /// Hard cut (`^^^`). Volume → 0 immediately. The actual cut work
     /// happens via the row's [`TrackEffect::NoteCut`] effect; the
-    /// note-column `^^^` is inert at dispatch in the historical
-    /// player (channel.rs:2360-2364).
+    /// note-column `^^^` is inert at dispatch.
     NoteCut,
-    /// Start fadeout without releasing the envelope (`~~~`). IT-
-    /// specific note-column event. Identical for any instrument-column
-    /// state — schism's note-fade branch never gates on `row_instr`.
+    /// Start fadeout without releasing the envelope (`~~~`). IT-style
+    /// note-column event; behaves identically regardless of
+    /// instrument-column state.
     NoteFade,
 }
 
 impl CellEvent {
-    /// Materialise a `CellEvent` from the legacy
-    /// `(note, instrument, velocity)` triple. Used by the importers,
-    /// which still surface those three fields independently in
-    /// [`crate::tracker::import::unit::TrackImportUnit`].
+    /// Build a `CellEvent` from the three pattern-editor columns:
+    /// note, instrument, velocity.
+    ///
+    /// This is the single mapping site between the column-oriented
+    /// representation (still used by importers and pattern-editor
+    /// UIs) and the typed variant. See
+    /// [`crate::tracker::import::unit::TrackImportUnit`] for the
+    /// importer-side column trio.
     #[inline]
-    pub fn from_legacy(note: CellNote, instrument: Option<usize>, velocity: Volume) -> Self {
+    pub fn from_columns(note: CellNote, instrument: Option<usize>, velocity: Volume) -> Self {
         match (note, instrument) {
             (CellNote::Empty, None) => Self::None,
             (CellNote::Empty, Some(_)) => Self::InstrReset,
@@ -133,8 +124,7 @@ impl CellEvent {
     }
 
     /// `true` when the originating cell had a non-empty instrument
-    /// column — Phase 1's stand-in for the legacy
-    /// `cell.instrument.is_some()` semantic flag.
+    /// column.
     #[inline]
     pub fn has_instrument_column(&self) -> bool {
         matches!(
@@ -157,8 +147,8 @@ impl CellEvent {
         matches!(self, Self::NoteOff { .. } | Self::NoteCut | Self::NoteFade)
     }
 
-    /// Project back onto the legacy [`CellNote`] enum. Useful for
-    /// debug printers and UI code that still surfaces the
+    /// Project onto a [`CellNote`] enum (note-column only). Useful
+    /// for debug printers and UI code that surfaces the
     /// soundtracker-style `--- / C-5 / === / ^^^ / ~~~` notation.
     /// Lossy: discards the retrig flag of [`Self::NoteOff`] and
     /// flattens [`Self::InstrReset`] back onto `CellNote::Empty`.
@@ -198,36 +188,35 @@ impl Debug for CellEvent {
 /// Track's lifetime). The replayer pushes the track's instrument
 /// alongside the cell through its per-row dispatch.
 ///
-/// Globals were removed from the runtime [`Cell`] in
-/// DAW migration Phase 3c.3: continuous globals
-/// ([`crate::core::effect::SongLevelEffect`] —
-/// Bpm/Speed/GlobalVolume + slides) became
-/// [`crate::core::daw::automation::AutomationLane`]s, navigation globals
-/// ([`crate::core::effect::NavigationEffect`]) were absorbed into
-/// [`crate::core::daw::timeline::TimelineMap`] at import time, and the
-/// MIDI macro relocated to `cell.effects` as
-/// [`TrackEffect::MidiMacro`].
-#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+/// Song-level globals (Bpm/Speed/GlobalVolume + slides) are not
+/// row-local: they live on [`crate::core::daw::automation::AutomationLane`]s.
+/// Navigation events (pattern jump / break / loop / delay) live on
+/// [`crate::core::daw::timeline::TimelineMap`]. The only "global"
+/// effect that stays on a cell is the MIDI macro, encoded as
+/// [`TrackEffect::MidiMacro`] in `effects`.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
 pub struct Cell {
     pub event: CellEvent,
     pub effects: Vec<TrackEffect>,
 }
 
 impl Cell {
-    /// Construct a cell from the legacy `(note, instrument, velocity,
-    /// effects)` shape. The importers still surface the three header
-    /// fields independently in
-    /// [`crate::tracker::import::unit::TrackImportUnit`]; this
-    /// helper is the single conversion site.
+    /// Build a cell from the four pattern-editor columns:
+    /// note, instrument, velocity, effects.
+    ///
+    /// The importers still surface the three event columns
+    /// independently in
+    /// [`crate::tracker::import::unit::TrackImportUnit`]; this helper
+    /// is the single conversion site to the typed cell.
     #[inline]
-    pub fn from_legacy(
+    pub fn from_columns(
         note: CellNote,
         instrument: Option<usize>,
         velocity: Volume,
         effects: Vec<TrackEffect>,
     ) -> Self {
         Self {
-            event: CellEvent::from_legacy(note, instrument, velocity),
+            event: CellEvent::from_columns(note, instrument, velocity),
             effects,
         }
     }
@@ -289,11 +278,11 @@ impl Cell {
     /// Returns true iff the slot carries a Kxx *effect* note-off.
     ///
     /// Unlike [`Self::has_note_off`], this does NOT match a note-column
-    /// `===` ([`CellEvent::NoteOff`]). It's intended for replayer paths
-    /// that need to apply FT2 Kxy-effect quirks without also misfiring
-    /// on note-column key-offs, which have different playback
-    /// semantics in FT2 (see `ft2_replayer.c:keyOff()` vs. the
-    /// `keyOffCmd` / K00 paths).
+    /// `===` ([`CellEvent::NoteOff`]). It is intended for replayer
+    /// paths that need to apply FT2 Kxy-effect quirks without also
+    /// misfiring on note-column key-offs, which have different
+    /// playback semantics in FT2 (see `ft2_replayer.c:keyOff()` vs.
+    /// the `keyOffCmd` / K00 paths).
     pub fn has_note_off_effect(&self) -> bool {
         self.effects
             .iter()
@@ -303,23 +292,16 @@ impl Cell {
     /// Returns true iff the slot carries a Kxx *effect* note-off whose
     /// trigger tick is 0 — i.e. specifically K00, not K01..K1F.
     ///
-    /// Used by the FT2 "K00 eats note" quirk: in FT2, only K00 is handled
-    /// at tickZero via the special branch in `getNewNote`, and this is
-    /// what causes the note column to be skipped. Non-zero Kxy effects go
-    /// through the normal note trigger path and must not short-circuit it.
+    /// Used by the FT2 "K00 eats note" quirk: in FT2, only K00 is
+    /// handled at tickZero via the special branch in `getNewNote`,
+    /// and this is what causes the note column to be skipped.
+    /// Non-zero Kxy effects go through the normal note trigger path
+    /// and must not short-circuit it.
     pub fn has_note_off_at_tick_zero(&self) -> bool {
         self.effects
             .iter()
             .any(|effect| matches!(effect, TrackEffect::NoteOff { tick: 0, past: _ }))
     }
-
-    // `has_tone_portamento` / `has_vibrato` / `has_vibrato_depth` /
-    // `has_volume_slide` were removed in DAW migration
-    // Phase 3c.3. The cell no longer carries the corresponding
-    // `TrackEffect` variants — they migrated to `AutomationLane`s.
-    // The runtime quirks that previously consulted these helpers now
-    // query the lane events at the current row's tick directly (see
-    // `Channel::row_has_*_lane()` in `xmrsplayer`).
 }
 
 #[cfg(test)]
@@ -331,52 +313,52 @@ mod tests {
     }
 
     #[test]
-    fn from_legacy_maps_every_arm() {
+    fn from_columns_maps_every_arm() {
         // Play + instr → NoteOn
         assert!(matches!(
-            CellEvent::from_legacy(CellNote::Play(pitch()), Some(3), Volume::FULL),
+            CellEvent::from_columns(CellNote::Play(pitch()), Some(3), Volume::FULL),
             CellEvent::NoteOn { .. }
         ));
         // Play, no instr → NoteOnGhost
         assert!(matches!(
-            CellEvent::from_legacy(CellNote::Play(pitch()), None, Volume::FULL),
+            CellEvent::from_columns(CellNote::Play(pitch()), None, Volume::FULL),
             CellEvent::NoteOnGhost { .. }
         ));
         // Empty + instr → InstrReset
         assert!(matches!(
-            CellEvent::from_legacy(CellNote::Empty, Some(0), Volume::FULL),
+            CellEvent::from_columns(CellNote::Empty, Some(0), Volume::FULL),
             CellEvent::InstrReset
         ));
         // Empty, no instr → None
         assert!(matches!(
-            CellEvent::from_legacy(CellNote::Empty, None, Volume::FULL),
+            CellEvent::from_columns(CellNote::Empty, None, Volume::FULL),
             CellEvent::None
         ));
         // KeyOff, no instr → NoteOff{retrig:false}
         assert_eq!(
-            CellEvent::from_legacy(CellNote::KeyOff, None, Volume::FULL),
+            CellEvent::from_columns(CellNote::KeyOff, None, Volume::FULL),
             CellEvent::NoteOff { retrig: false }
         );
         // KeyOff + instr → NoteOff{retrig:true}
         assert_eq!(
-            CellEvent::from_legacy(CellNote::KeyOff, Some(0), Volume::FULL),
+            CellEvent::from_columns(CellNote::KeyOff, Some(0), Volume::FULL),
             CellEvent::NoteOff { retrig: true }
         );
         // NoteCut / NoteFade collapse irrespective of instrument
         assert_eq!(
-            CellEvent::from_legacy(CellNote::NoteCut, None, Volume::FULL),
+            CellEvent::from_columns(CellNote::NoteCut, None, Volume::FULL),
             CellEvent::NoteCut
         );
         assert_eq!(
-            CellEvent::from_legacy(CellNote::NoteCut, Some(5), Volume::FULL),
+            CellEvent::from_columns(CellNote::NoteCut, Some(5), Volume::FULL),
             CellEvent::NoteCut
         );
         assert_eq!(
-            CellEvent::from_legacy(CellNote::NoteFade, None, Volume::FULL),
+            CellEvent::from_columns(CellNote::NoteFade, None, Volume::FULL),
             CellEvent::NoteFade
         );
         assert_eq!(
-            CellEvent::from_legacy(CellNote::NoteFade, Some(5), Volume::FULL),
+            CellEvent::from_columns(CellNote::NoteFade, Some(5), Volume::FULL),
             CellEvent::NoteFade
         );
     }
@@ -412,8 +394,8 @@ mod tests {
     }
 
     #[test]
-    fn has_instrument_column_matches_legacy() {
-        // Legacy: instr.is_some() AND not a pure ghost note.
+    fn has_instrument_column_truth_table() {
+        // True: instrument column non-empty AND not a pure ghost note.
         assert!(CellEvent::NoteOn {
             pitch: pitch(),
             velocity: Volume::FULL
@@ -435,8 +417,8 @@ mod tests {
 
     #[test]
     fn to_cell_note_round_trip() {
-        // The lossy projection must at least preserve the
-        // "shape" — Empty/Play/KeyOff/NoteCut/NoteFade.
+        // The lossy projection must preserve the shape:
+        // Empty / Play / KeyOff / NoteCut / NoteFade.
         assert_eq!(CellEvent::None.to_cell_note(), CellNote::Empty);
         assert_eq!(CellEvent::InstrReset.to_cell_note(), CellNote::Empty);
         assert_eq!(

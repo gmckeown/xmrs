@@ -15,8 +15,7 @@ use serde::{Deserialize, Serialize};
 /// walk that absorbs `PositionJump` / `PatternBreak` /
 /// `PatternLoop` / `PatternDelay` at import time. Lets the
 /// sequencer drive playback as a flat `idx` step instead of
-/// re-running flow-control effects per tick (DAW migration
-/// Phase 3c.2).
+/// re-running flow-control effects per tick.
 ///
 /// [`Module`]: crate::core::module::Module
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]

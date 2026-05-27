@@ -70,11 +70,12 @@ pub const fn vibrato_depth_from_nibble_16(depth_nibble: u8) -> PitchDelta {
 // NOTE-RETRIG VOLUME MODIFIER (FT2 Rxy / S3M Qxy)
 // =====================================================================
 
-/// FT2-canonical retrig volume multiplier (nibble 6 = `11/16`).
+/// Common retrig table; nibble 6's ratio is the only point on
+/// which FT2 (`11/16`) and S3M (`5/8`) disagree.
 #[inline]
-pub const fn retrig_mul_ft2(nibble: u8) -> RetrigMul {
+const fn retrig_mul_common(nibble: u8, nibble6_num: i16, nibble6_den: i16) -> RetrigMul {
     match nibble {
-        6 => RetrigMul::from_ratio(11, 16),
+        6 => RetrigMul::from_ratio(nibble6_num, nibble6_den),
         7 => RetrigMul::from_ratio(1, 2),
         0xE => RetrigMul::from_ratio(3, 2),
         0xF => RetrigMul::from_ratio(2, 1),
@@ -82,16 +83,16 @@ pub const fn retrig_mul_ft2(nibble: u8) -> RetrigMul {
     }
 }
 
+/// FT2-canonical retrig volume multiplier (nibble 6 = `11/16`).
+#[inline]
+pub const fn retrig_mul_ft2(nibble: u8) -> RetrigMul {
+    retrig_mul_common(nibble, 11, 16)
+}
+
 /// S3M-canonical retrig volume multiplier (nibble 6 = `5/8`).
 #[inline]
 pub const fn retrig_mul_s3m(nibble: u8) -> RetrigMul {
-    match nibble {
-        6 => RetrigMul::from_ratio(5, 8),
-        7 => RetrigMul::from_ratio(1, 2),
-        0xE => RetrigMul::from_ratio(3, 2),
-        0xF => RetrigMul::from_ratio(2, 1),
-        _ => RetrigMul::UNITY,
-    }
+    retrig_mul_common(nibble, 5, 8)
 }
 
 /// Retrig volume *additive* delta (nibbles `1..=5` and `9..=D`).

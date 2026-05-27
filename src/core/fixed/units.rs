@@ -32,6 +32,38 @@ use crate::core::fixed::fixed::{Q15, Q24_8, Q7_25, Q8_8};
 use serde::{Deserialize, Serialize};
 
 // =====================================================================
+// SHARED Q15 ↔ BYTE-64 CONVERSIONS
+//
+// Volume / ChannelVolume / EnvValue / Panning all share the same
+// tracker-byte-in-`0..=64` ↔ Q1.15 conversion: `byte / 64`, exact
+// because `1/64 = 1 << 9` in Q1.15. Round-to-nearest on the way back
+// via the `+256` half-step bias. Each type's `from_byte_64` /
+// `to_byte_64` is a one-liner over these helpers.
+// =====================================================================
+
+#[inline]
+const fn q15_from_byte_64(byte: u8) -> Q15 {
+    if byte >= 64 {
+        Q15::ONE
+    } else {
+        Q15::from_raw((byte as i16) << 9)
+    }
+}
+
+#[inline]
+const fn q15_to_byte_64(q: Q15) -> u8 {
+    let raw = q.raw() as i32;
+    let byte = (raw + 256) >> 9;
+    if byte < 0 {
+        0
+    } else if byte > 64 {
+        64
+    } else {
+        byte as u8
+    }
+}
+
+// =====================================================================
 // READABILITY MACROS
 //
 // Most Q-format newtypes wrap a `Q15` (or a `Q8_8`) which itself
@@ -340,33 +372,16 @@ impl Volume {
     /// Build from a tracker volume byte in `0..=64` (MOD / XM /
     /// S3M / IT). Maps `0 → SILENT` and `64 → FULL`. Equivalent
     /// to `byte / 64` in the float era.
-    ///
-    /// `1/64` is exactly `1 << 9` in Q1.15, so the conversion
-    /// is a single shift — no rounding error.
     #[inline]
     pub const fn from_byte_64(byte: u8) -> Self {
-        if byte >= 64 {
-            Self::FULL
-        } else {
-            Self(Q15::from_raw((byte as i16) << 9))
-        }
+        Self(q15_from_byte_64(byte))
     }
 
     /// Inverse of [`Self::from_byte_64`]. Round-trip-exact for
     /// every `byte ∈ 0..=64`.
     #[inline]
     pub const fn to_byte_64(self) -> u8 {
-        // Same rounding as `EnvValue::to_byte_64` — `+ 256`
-        // bias, `>> 9` divide.
-        let raw = self.0.raw() as i32;
-        let byte = (raw + 256) >> 9;
-        if byte < 0 {
-            0
-        } else if byte > 64 {
-            64
-        } else {
-            byte as u8
-        }
+        q15_to_byte_64(self.0)
     }
 
     /// Build from a signed numerator / denominator. Used by
@@ -439,25 +454,13 @@ impl ChannelVolume {
     /// difference exists at the type level, not the wire level.
     #[inline]
     pub const fn from_byte_64(byte: u8) -> Self {
-        if byte >= 64 {
-            Self::FULL
-        } else {
-            Self(Q15::from_raw((byte as i16) << 9))
-        }
+        Self(q15_from_byte_64(byte))
     }
 
     /// Inverse of [`Self::from_byte_64`].
     #[inline]
     pub const fn to_byte_64(self) -> u8 {
-        let raw = self.0.raw() as i32;
-        let byte = (raw + 256) >> 9;
-        if byte < 0 {
-            0
-        } else if byte > 64 {
-            64
-        } else {
-            byte as u8
-        }
+        q15_to_byte_64(self.0)
     }
 
     /// Add a signed Q1.15 delta to this channel volume,
@@ -505,15 +508,7 @@ impl EnvValue {
     /// IT volume / unsigned-pitch, MOD, S3M).
     #[inline]
     pub const fn from_byte_64(byte: u8) -> Self {
-        if byte >= 64 {
-            Self(Q15::ONE)
-        } else {
-            // 1/64 in Q1.15 is exactly `1 << 9 = 512`, so the
-            // conversion is a single shift — no divide, no
-            // rounding error. Same trick as
-            // `from_tracker::volume_from_byte_64`.
-            Self(Q15::from_raw((byte as i16) << 9))
-        }
+        Self(q15_from_byte_64(byte))
     }
 
     /// Build from an IT signed envelope byte in `-32..=32`,
@@ -550,21 +545,7 @@ impl EnvValue {
     /// Used by the XM exporter (`XmInstrDefault::from_envelope`).
     #[inline]
     pub const fn to_byte_64(self) -> u8 {
-        // Each tracker-byte step is `2^15 / 64 = 512` raw
-        // Q1.15 units. Adding `256` (half a step) before the
-        // shift gives correct rounding for non-negative
-        // values, which envelope values are. The clamp is a
-        // defensive cap — well-formed `EnvValue`s in `[0, 1]`
-        // already produce a byte ≤ 64.
-        let raw = self.0.raw() as i32;
-        let byte = (raw + 256) >> 9;
-        if byte < 0 {
-            0
-        } else if byte > 64 {
-            64
-        } else {
-            byte as u8
-        }
+        q15_to_byte_64(self.0)
     }
 
     /// Apply this envelope as a multiplier on a [`Volume`].
@@ -755,25 +736,13 @@ impl Panning {
     /// (`1/64` is `1 << 9` in Q1.15).
     #[inline]
     pub const fn from_byte_64(byte: u8) -> Self {
-        if byte >= 64 {
-            Self::RIGHT
-        } else {
-            Self(Q15::from_raw((byte as i16) << 9))
-        }
+        Self(q15_from_byte_64(byte))
     }
 
     /// Inverse of [`Self::from_byte_64`].
     #[inline]
     pub const fn to_byte_64(self) -> u8 {
-        let raw = self.0.raw() as i32;
-        let byte = (raw + 256) >> 9;
-        if byte < 0 {
-            0
-        } else if byte > 64 {
-            64
-        } else {
-            byte as u8
-        }
+        q15_to_byte_64(self.0)
     }
 
     /// Build from an XM panning byte in `0..=255` (where `128`
@@ -1291,6 +1260,9 @@ impl Frequency {
     /// tracker frequency).
     #[inline]
     pub const fn shift_octave(self, oct: i8) -> Self {
+        if self.0 == 0 {
+            return Self(0);
+        }
         if oct >= 0 {
             let shift = oct as u32;
             if shift >= 32 {

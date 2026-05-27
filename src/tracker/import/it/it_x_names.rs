@@ -44,10 +44,10 @@ impl ItXNames {
     }
 
     pub fn is_pnam(data: &[u8]) -> bool {
-        data[0] == b'P' && data[1] == b'N' && data[2] == b'A' && data[3] == b'M'
+        data.starts_with(b"PNAM")
     }
 
     pub fn is_cnam(data: &[u8]) -> bool {
-        data[0] == b'C' && data[1] == b'N' && data[2] == b'A' && data[3] == b'M'
+        data.starts_with(b"CNAM")
     }
 }
