@@ -858,11 +858,18 @@ impl ItSampleHeader {
     }
 
     pub fn to_vibrato(&self) -> Vibrato {
+        // IT auto-vibrato shapes (`IT_MUSIC.ASM` / Schism
+        // `rn_sample_vibrato`): 0 = sine (`+sin`, rises first),
+        // 1 = ramp down (`ramp_down_table`: linear `+1 → −1`, peak at
+        // phase 0, discontinuity at the cycle boundary), 2 = square
+        // (rises first), 3 = random (bipolar). The `AutoVib*` shapes
+        // are bipolar — IT applies them through linear frequency
+        // slides on both sides of the base pitch.
         let wf = match self.vibrato_waveform {
-            1 => Waveform::TranslatedRampDown,
-            2 => Waveform::TranslatedSquare,
+            1 => Waveform::AutoVibRampDown,
+            2 => Waveform::AutoVibSquare,
             3 => Waveform::Random,
-            _ => Waveform::TranslatedSine,
+            _ => Waveform::AutoVibSine,
         };
 
         // IT `vibrato_sweep` is a depth-increment RATE (how fast to

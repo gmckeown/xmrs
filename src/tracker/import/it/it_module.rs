@@ -672,6 +672,9 @@ impl ItModule {
             // Phase 3a schema seat — IT files don't carry a restart
             // byte, so this always stays `None` for IT.
             song_loop_to: None,
+            // Tracker formats wrap as a whole (song_loop_to); no
+            // per-lane loops.
+            channel_loops: alloc::vec::Vec::new(),
         };
 
         let mut im = ImportMemory::default();

@@ -16,10 +16,21 @@ Historical module files — imported into xmrs's in-memory `Module` model:
 | S3M    | Scream Tracker 3                        | `import_s3m`  |
 | IT     | Impulse Tracker (incl. OpenMPT extras)  | `import_it`   |
 | XI     | Fast Tracker II instrument file         | `import_xm`   |
+| DW     | David Whittaker custom Amiga player (`.dw`) | `import_dw` |
 | SID    | Commodore 64 / MOS6581 (*WIP*)          | `import_sid`  |
 
 The umbrella feature `import` enables all of them at once (and is on by
 default together with `std`).
+
+Unlike the tracker formats above, a `.dw` file is not a data container
+but a self-contained 68000 binary with the music data embedded inside
+David Whittaker's own Amiga replayer. There is no magic header: the
+importer's detection layer scans the first few KB of the payload for a
+characteristic opcode quadruple, walks the call graph from there, reads
+the replayer's init-time constants, and parses the data tables they
+point to — re-interpreting the original per-voice playback semantics
+into xmrs's `Module` model (per-voice loops, period-space vibrato,
+arpeggio pitch lanes, sub-song selection, …).
 
 ## The `Module` model
 
@@ -97,7 +108,8 @@ Module ─┬─ tracks        : Vec<Track>            (one per song + instrumen
         │                                         + Bpm / Speed / GlobalVolume song-levels,
         │                                         extracted at import or via the edit API)
         ├─ timeline_map  : TimelineMap           (linearised pattern_order)
-        └─ song_loop_to  : Option<u32>           (XM/MOD restart byte, as an absolute tick)
+        ├─ song_loop_to  : Option<u32>           (XM/MOD restart byte, as an absolute tick)
+        └─ channel_loops : Vec<ChannelLoop>      (per-lane independent loops; empty for trackers)
 ```
 
 - **`Track`** is an enum with two shapes. `Track::Notes` owns the
@@ -126,6 +138,16 @@ Module ─┬─ tracks        : Vec<Track>            (one per song + instrumen
   Vibrato/Tremolo/Panbrello, `Slide` for VolumeSlide/Portamento/
   ChannelVolumeSlide/PanningSlide/BpmSlide/GlobalVolumeSlide,
   `Glide` for TonePortamento.
+- **`ChannelLoop`** is a per-lane loop region `[start_tick, end_tick)`
+  on a `(song, channel)`: that lane wraps independently of the others.
+  `song_loop_to` wraps the whole song in lockstep — every tracker
+  format uses it and leaves `channel_loops` empty. Some replayers
+  don't: David Whittaker (and most custom C64/Amiga drivers) give each
+  voice its own loop, so they drift forever (e.g. `xenon2 (title).dw`'s
+  four voices loop at 9888/9888/9912/10014 frames). That's exactly how
+  a DAW exposes distinct per-track clip-loop lengths (Ableton/Bitwig
+  polymeter). When a lane has no `ChannelLoop`, playback is the
+  byte-for-byte global-wrap path.
 
 The import pipeline (run by every `import_*` feature) is:
 
@@ -175,7 +197,7 @@ use xmrs::prelude::*;
 
 let bytes = std::fs::read("song.xm")?;
 
-// Auto-detect: tries XM → S3M → IT → MOD.
+// Auto-detect: tries XM → S3M → IT → MOD → DW.
 let module = Module::load(&bytes)?;
 
 // Or target a specific format:
@@ -185,9 +207,12 @@ println!("{} — {} tracks, {} clips", module.name, module.tracks.len(), module.
 ```
 
 Format-specific constructors are also available: `Module::load_mod`,
-`load_xm`, `load_s3m`, `load_it`. SID is imported via its own entry
-point, `xmrs::import::sid::sid_module::SidModule::load`, and is not part
-of the auto-detect path.
+`load_xm`, `load_s3m`, `load_it`, `load_dw`. DW is tried last by the
+auto-detect path: its detection is purely structural (no magic header),
+so running it after MOD avoids ever stealing a valid MOD parse. SID is
+imported via its own entry point,
+`xmrs::import::sid::sid_module::SidModule::load`, and is not part of the
+auto-detect path.
 
 ## Serialization
 
@@ -207,6 +232,9 @@ cargo run --example xmi
 
 # Exercise the bundled SID parsers (Rob Hubbard tunes):
 cargo run --example sid
+
+# Inspect a David Whittaker .dw file (detection + parsed tables):
+cargo run --features="std import_dw" --example inspect_dw -- path/to/song.dw
 ```
 
 ## Cargo features
@@ -222,6 +250,7 @@ Defaults: `["std", "import"]`.
 | `import_xm`       | Fast Tracker II XM (and XI instruments).                            |
 | `import_s3m`      | Scream Tracker 3 S3M.                                               |
 | `import_it`       | Impulse Tracker IT.                                                 |
+| `import_dw`       | David Whittaker custom Amiga player (`.dw`).                        |
 | `import_sid`      | Commodore 64 SID (bundled Rob Hubbard tunes).                       |
 | `demo`            | Pulls in `clap`, `std` and `import` for the CLI examples.           |
 | `rand8` / `rand16` / `rand64` | Extra xorshift widths (`rand32` is always on).          |

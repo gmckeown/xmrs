@@ -266,13 +266,17 @@ impl XmInstrDefault {
                 }
 
                 xmid.vibrato_type = match id.voice.vibrato.waveform {
-                    Waveform::TranslatedSquare => 1,
-                    Waveform::TranslatedRampUp => 2,
-                    Waveform::TranslatedRampDown => 3,
+                    // FT2 auto-vibrato types: 1 = square, 2 = ramp up
+                    // (pitch ramps down → mid-cycle discontinuity,
+                    // `BipolarRampDown`), 3 = ramp down (`BipolarRampUp`),
+                    // 0 = sine.
+                    Waveform::AutoVibSquare => 1,
+                    Waveform::BipolarRampDown => 2,
+                    Waveform::BipolarRampUp => 3,
                     _ => 0,
                 };
                 xmid.vibrato_sweep = id.voice.vibrato.sweep.to_ratio_byte(255);
-                xmid.vibrato_depth = id.voice.vibrato.depth.to_ratio_byte(15 * 2);
+                xmid.vibrato_depth = id.voice.vibrato.depth.to_ratio_byte(64);
                 xmid.vibrato_rate = id.voice.vibrato.speed.to_ratio_byte(63 * 4);
 
                 xmid.volume_fadeout = id.voice.volume_fadeout.to_ratio_u16(4095 * 4 * 2);
@@ -598,14 +602,26 @@ impl XmInstrument {
                 // vibrato
                 {
                     let v = &mut id.voice.vibrato;
+                    // FT2 (`ft2_replayer.c`) auto-vibrato shapes, in the
+                    // pitch domain: type 1 square (rises first), type 2
+                    // "ramp up" → pitch ramps down (mid-cycle
+                    // discontinuity, `BipolarRampDown`), type 3 "ramp
+                    // down" → pitch ramps up (`BipolarRampUp`), type 0
+                    // sine (`+sin`, rises first).
                     v.waveform = match xmi.vibrato_type & 3 {
-                        1 => Waveform::TranslatedSquare,
-                        2 => Waveform::TranslatedRampUp,
-                        3 => Waveform::TranslatedRampDown,
-                        _ => Waveform::TranslatedSine,
+                        1 => Waveform::AutoVibSquare,
+                        2 => Waveform::BipolarRampDown,
+                        3 => Waveform::BipolarRampUp,
+                        _ => Waveform::AutoVibSine,
                     };
                     v.speed = Q8_8::from_ratio(xmi.vibrato_rate as i16, 63 * 4);
-                    v.depth = PitchDelta::from_ratio(xmi.vibrato_depth as i16, 15 * 2);
+                    // Peak pitch deviation = `depth_byte / 64` semitones:
+                    // FT2's peak `autoVibVal` is `depth_byte` period units
+                    // and one semitone is 64 period units in linear mode.
+                    // (Was `/30`, calibrated for the old half-range
+                    // `[0,1]` rendering; the bipolar shape makes `depth`
+                    // the true peak.)
+                    v.depth = PitchDelta::from_ratio(xmi.vibrato_depth as i16, 64);
                     v.sweep = Q8_8::from_ratio(xmi.vibrato_sweep as i16, 255);
                 }
 

@@ -380,30 +380,30 @@ impl ItEffect {
                     // Set vibrato waveform (S3x)
                     0x3 => {
                         let waveform = match param & 0b0000_0011 {
-                            1 => Waveform::RampDown,
-                            2 => Waveform::Square,
+                            1 => Waveform::BipolarRampDown,
+                            2 => Waveform::BipolarSquare,
                             3 => Waveform::Random,
-                            _ => Waveform::Sine,
+                            _ => Waveform::BipolarSine,
                         };
                         Some(vec![TrackImportEffect::VibratoWaveform(waveform, true)])
                     }
                     // Set tremolo waveform (S4x)
                     0x4 => {
                         let waveform = match param & 0b0000_0011 {
-                            1 => Waveform::RampDown,
-                            2 => Waveform::Square,
+                            1 => Waveform::BipolarRampDown,
+                            2 => Waveform::BipolarSquare,
                             3 => Waveform::Random,
-                            _ => Waveform::Sine,
+                            _ => Waveform::BipolarSine,
                         };
                         Some(vec![TrackImportEffect::TremoloWaveform(waveform, true)])
                     }
                     // Set panbrello waveform (S5x)
                     0x5 => {
                         let waveform = match param & 0b0000_0011 {
-                            1 => Waveform::RampDown,
-                            2 => Waveform::Square,
+                            1 => Waveform::BipolarRampDown,
+                            2 => Waveform::BipolarSquare,
                             3 => Waveform::Random,
-                            _ => Waveform::Sine,
+                            _ => Waveform::BipolarSine,
                         };
                         Some(vec![TrackImportEffect::PanbrelloWaveform(waveform, true)])
                     }

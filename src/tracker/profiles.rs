@@ -42,6 +42,11 @@ pub fn it214() -> PlaybackQuirks {
         pan_reset_policy: PanResetPolicy::OnInstrumentChange,
         it_vibrato_ticks_at_row_zero: true,
         sample_volume_is_static_gain: true,
+        // IT's `fx_pattern_loop` re-anchors to `row + 1` when the
+        // counter expires and suppresses a same-row pattern-break
+        // while any loop is still iterating (schism `effects.c`).
+        pattern_loop_resumes: true,
+        active_loop_suppresses_break: true,
         ..PlaybackQuirks::default()
     }
 }
@@ -74,6 +79,10 @@ pub fn st3() -> PlaybackQuirks {
 pub fn pt() -> PlaybackQuirks {
     PlaybackQuirks {
         speed_zero_ends_song: true,
+        // PT clears the shared break position in its loop branch, so a
+        // same-row loop-jump + break lands at row 0, not the break
+        // target (`pt2_replayer.c:1429`).
+        pattern_loop_break_resets_row: true,
         ..PlaybackQuirks::default()
     }
 }

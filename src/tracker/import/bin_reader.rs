@@ -128,6 +128,20 @@ impl<'a> BinReader<'a> {
         Ok(u16::from_be_bytes(a))
     }
 
+    /// Big-endian unsigned 32-bit. Used by David Whittaker `.dw`
+    /// modules (samples-table cursor and similar 68000-side fields).
+    pub fn read_u32_be(&mut self) -> Result<u32, ImportError> {
+        let a: [u8; 4] = self.read_array()?;
+        Ok(u32::from_be_bytes(a))
+    }
+
+    /// Big-endian signed 32-bit. Used by David Whittaker `.dw`
+    /// modules for sample `loop_start` (`-1` marks one-shot samples).
+    pub fn read_i32_be(&mut self) -> Result<i32, ImportError> {
+        let a: [u8; 4] = self.read_array()?;
+        Ok(i32::from_be_bytes(a))
+    }
+
     /// Read exactly `N` bytes into a fixed-size array. Common for
     /// tracker name fields stored as `[u8; 20]` / `[u8; 22]`.
     pub fn read_array<const N: usize>(&mut self) -> Result<[u8; N], ImportError> {

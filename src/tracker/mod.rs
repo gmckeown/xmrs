@@ -18,6 +18,7 @@ pub mod period;
     feature = "import_s3m",
     feature = "import_it",
     feature = "import_sid",
+    feature = "import_dw",
 ))]
 pub mod format;
 
@@ -27,6 +28,7 @@ pub mod format;
     feature = "import_s3m",
     feature = "import_it",
     feature = "import_sid",
+    feature = "import_dw",
 ))]
 pub mod profiles;
 

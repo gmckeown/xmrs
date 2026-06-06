@@ -10,6 +10,7 @@
 pub mod automation;
 pub mod clip;
 pub mod euclidean;
+pub mod loop_region;
 pub mod sorted_clips;
 pub mod timeline;
 pub mod track;

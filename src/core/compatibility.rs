@@ -39,6 +39,29 @@ pub struct PlaybackQuirks {
     /// stored as [`Period`] (Q-typed `u16` raw).
     pub period_clamp: Option<(Period, Period)>,
 
+    /// A `TrackPitch` *Slide* lane advances on every tick of a row,
+    /// including tick 0, instead of only the `speed-1` non-row ticks.
+    /// Tracker formats (XM/MOD/S3M/IT) trigger the row on tick 0 and
+    /// run continuous slides on ticks `1..speed`, so the lane must
+    /// skip tick 0 there. The David Whittaker replayer instead runs
+    /// its slide in `DoFrameStuff` on *every* frame of the held note
+    /// (1 frame = 1 player tick), so skipping tick 0 would undercount
+    /// the ramp by `(speed-1)/speed` per row. DW on; all trackers off.
+    pub pitch_slide_ticks_at_row_zero: bool,
+
+    /// A `TrackPitch` *Lfo* (vibrato) lane keeps advancing its phase
+    /// on every tick once armed, instead of only on rows that
+    /// re-issue an `LfoEvent::Set`. Tracker formats (XM/MOD/S3M/IT)
+    /// re-arm vibrato per row — the effect column drives `tick_q`, so
+    /// the LFO only ticks while the row carries the effect. The David
+    /// Whittaker replayer instead runs its vibrato in `DoFrameStuff`
+    /// on *every* frame of the held note (1 frame = 1 player tick)
+    /// until an explicit stop, so without this the wobble collapses
+    /// to near-zero: the `Set` fires once at the note, then the phase
+    /// never moves and the period stays flat. Symmetric to
+    /// [`Self::pitch_slide_ticks_at_row_zero`]. DW on; all trackers off.
+    pub pitch_vibrato_ticks_continuously: bool,
+
     /// When a pitch slide tries to make the period go below 1,
     /// allow it to reach 0 ("infinitely high note") instead of
     /// clamping at 1. S3M convention (the minimum period is
@@ -99,9 +122,32 @@ pub struct PlaybackQuirks {
     /// iterations) updates its origin to `current_row + 1`, so
     /// a subsequent loop in the same pattern resumes *after*
     /// the previous loop's end instead of re-using the original
-    /// origin. S3M on. digcmd.c:s_patloop — `song.patloopstart
-    /// = song.np_row + 1` at exit.
+    /// origin. S3M on, IT on. digcmd.c:s_patloop — `song.patloopstart
+    /// = song.np_row + 1` at exit; schism `effects.c:fx_pattern_loop`
+    /// — `chan->patloop_row = csf->row + 1` when the counter expires.
     pub pattern_loop_resumes: bool,
+
+    /// While a pattern loop is still iterating on **any** channel,
+    /// a `PatternBreak` (`Cxx` / `Dxx`) on the same row is **ignored**
+    /// — the loop keeps the playhead inside the pattern and the break
+    /// only takes effect once every loop has finished. Impulse Tracker
+    /// behaviour: schism `effects.c:fx_special` sets `patloop = 1` when
+    /// any channel has an active `cd_patloop`, then the `FX_PATTERNBREAK`
+    /// arm is guarded by `if (patloop) break;` (`effects.c:2421`).
+    /// FT2/PT instead let the break win (their pattern-loop and
+    /// pattern-break flags are independent). IT on; XM/MOD/S3M off.
+    pub active_loop_suppresses_break: bool,
+
+    /// When a pattern loop **jumps** and a `PatternBreak` lands on the
+    /// same row, the break still wins the order advance but the next
+    /// pattern starts at **row 0** instead of the break's target row.
+    /// ProTracker: its row-end handler consumes the loop's `pBreakFlag`
+    /// first — `row = pBreakPosition; pBreakPosition = 0`
+    /// (`pt2_replayer.c:1429`) — *clearing* the shared break position, so
+    /// the subsequent `posJumpAssert` advance reads 0. FT2 does **not**
+    /// clear between the two steps (`ft2_replayer.c:2311`/`:2317`), so
+    /// there the break's target row survives. MOD/PT on; XM/S3M/IT off.
+    pub pattern_loop_break_resets_row: bool,
 
     // --- Tremor ---
     /// The tremor effect (I / T) uses a persistent state machine

@@ -225,6 +225,10 @@ impl InstrHelper {
         } else {
             let mut xi = Self::sid_to_xi(&irs.sid.voice[0]);
             if irs.fx[0].vibrato {
+                // Explicit shape: a C64 vibrato is a centred (bipolar)
+                // pitch wobble, so use the instrument auto-vibrato sine
+                // rather than relying on `Waveform::default()`.
+                xi.voice.vibrato.waveform = crate::core::waveform::Waveform::AutoVibSine;
                 xi.voice.vibrato.depth = PitchDelta::from_ratio(irs.fx[0].vibrato_depth as i16, 15);
                 xi.voice.vibrato.speed = Q8_8::from_ratio(1, irs.fx[0].vibrato_div as i16);
             }

@@ -230,17 +230,28 @@ pub fn extract_tracks_and_clips(
                             .tick
                             .saturating_add((seg.start_row - entry_row) * speed_fallback)
                     });
-                clips.push(Clip {
-                    track: seg.track_idx,
-                    song,
-                    target_channel: ch_key as u8,
-                    position_tick,
-                    speed_at_start: entry.speed_at_row,
-                    track_row_offset: 0,
-                    source_start_row: seg.start_row,
-                    end_tick,
-                });
-            } else if seg_end_row > entry_row {
+                // Drop degenerate clips (`end_tick <= position_tick`). They
+                // arise when a loop revisits rows so that the segment's
+                // start row resolves to a later tick than its `loop_iter==0`
+                // end row (`find_entry_at_order` / `clip_end_tick_from_timeline`
+                // are both first-pass-only). Such a clip covers no runtime
+                // ticks anyway (`active_at` needs `pos <= tick < end`), so
+                // dropping it changes no audio but keeps the clip layer
+                // consistent (`verify_layers_consistent`). The loop-aware
+                // coverage is supplied by `emit_loop_repeat_clips` below.
+                if end_tick > position_tick {
+                    clips.push(Clip {
+                        track: seg.track_idx,
+                        song,
+                        target_channel: ch_key as u8,
+                        position_tick,
+                        speed_at_start: entry.speed_at_row,
+                        track_row_offset: 0,
+                        source_start_row: seg.start_row,
+                        end_tick,
+                    });
+                }
+            } else if seg_end_row > entry_row && end_tick > entry.tick {
                 clips.push(Clip {
                     track: seg.track_idx,
                     song,
@@ -255,7 +266,124 @@ pub fn extract_tracks_and_clips(
         }
     }
 
+    // Pattern-loop repeats. The walker emits a second (and further)
+    // copy of a loop body as `loop_iter >= 1` entries at higher ticks,
+    // but the clips above are built only from the `loop_iter == 0`
+    // pass and stop at its `end_tick`. On a segmented loop body that is
+    // not merely a width problem: `SortedClips::active_at` returns the
+    // clip with the greatest `position_tick <= tick`, which on the
+    // repeat is the *last* first-pass segment — so the repeated rows
+    // resolve to the wrong segment (then get dropped by the
+    // `local_row < source_start_row` guard) and play silent. Emit a
+    // dedicated clip per (loop-repeat run × overlapping segment) placed
+    // at the repeat's own ticks so each repeated row resolves to the
+    // segment that actually owns it. Loop-free modules have no
+    // `loop_iter >= 1` entries, so this adds nothing and leaves them
+    // byte-identical.
+    emit_loop_repeat_clips(timeline_map, &segments_map, &mut clips);
+
     (tracks, clips)
+}
+
+/// Emit clips covering pattern-loop repeats (`loop_iter >= 1` runs).
+/// Walks the timeline in playback order, grouping maximal contiguous
+/// runs that share `(song, order_idx, loop_iter)`; for every run with
+/// `loop_iter != 0` it re-places each overlapping segment's track at
+/// the run's own ticks. The first-pass (`loop_iter == 0`) emission is
+/// left untouched.
+fn emit_loop_repeat_clips(
+    timeline_map: &TimelineMap,
+    segments_map: &BTreeMap<SegmentKey, ExtractedSegment>,
+    clips: &mut Vec<Clip>,
+) {
+    let entries = &timeline_map.entries;
+    let mut i = 0;
+    while i < entries.len() {
+        let e0 = entries[i];
+        let mut j = i + 1;
+        while j < entries.len()
+            && entries[j].song == e0.song
+            && entries[j].order_idx == e0.order_idx
+            && entries[j].loop_iter == e0.loop_iter
+        {
+            j += 1;
+        }
+        let run = &entries[i..j];
+        i = j;
+
+        if e0.loop_iter == 0 {
+            continue; // first pass already handled above
+        }
+
+        // row -> first tick / speed within this run, plus run bounds
+        // and the tick one row past the run's last visited row (the
+        // half-open end bound for a segment that reaches the run end).
+        let mut first_tick: BTreeMap<u32, u32> = BTreeMap::new();
+        let mut speed_at: BTreeMap<u32, u8> = BTreeMap::new();
+        let mut rmin = u32::MAX;
+        let mut rmax = 0u32;
+        let mut run_end_tick = 0u32;
+        for en in run {
+            first_tick.entry(en.row_idx).or_insert(en.tick);
+            speed_at.entry(en.row_idx).or_insert(en.speed_at_row);
+            rmin = rmin.min(en.row_idx);
+            rmax = rmax.max(en.row_idx);
+            run_end_tick = run_end_tick.max(en.tick.saturating_add(en.speed_at_row as u32));
+        }
+
+        for (key, seg) in segments_map.iter() {
+            if key.song != e0.song || key.pattern_idx != e0.pattern_idx {
+                continue;
+            }
+            let seg_end_row = seg.start_row + seg.length;
+            // Intersect the segment's source rows with the run's rows.
+            let first_row = seg.start_row.max(rmin);
+            let last_row_incl = seg_end_row.saturating_sub(1).min(rmax);
+            if first_row > last_row_incl {
+                continue;
+            }
+            let Some(&position_tick) = first_tick.get(&first_row) else {
+                continue; // first playable row not visited in this run
+            };
+            // `end_tick` = tick of the row just past the segment if that
+            // row is still inside the run, else the run's end tick.
+            // Stays within the run → preserves the half-open anti-leak
+            // guarantee into the next pass/order.
+            let end_tick = first_tick.get(&seg_end_row).copied().unwrap_or(run_end_tick);
+            let speed_at_start = speed_at.get(&first_row).copied().unwrap_or(e0.speed_at_row);
+            let target_channel = key.channel as u8;
+            // Only fill a genuine gap. When a single first-pass clip
+            // already spans the repeat region (the loop body is one
+            // unsegmented run whose clip reaches order-end, e.g. a loop
+            // followed by trailing rows), that clip already resolves the
+            // repeated rows via their timeline `row_idx` — adding a
+            // clip here would (a) duplicate it and (b) violate the
+            // no-overlapping-clips-per-lane invariant
+            // (`verify_layers_consistent`). Skip when this candidate
+            // would overlap any clip already on the lane. The
+            // segmented case (where `active_at` would otherwise pick the
+            // wrong segment) leaves a real gap, so the clip is kept.
+            let overlaps = clips.iter().any(|c| {
+                c.song == e0.song
+                    && c.target_channel == target_channel
+                    && position_tick < c.end_tick
+                    && c.position_tick < end_tick
+            });
+            if overlaps {
+                continue;
+            }
+            clips.push(Clip {
+                track: seg.track_idx,
+                song: e0.song,
+                target_channel,
+                position_tick,
+                speed_at_start,
+                track_row_offset: first_row - seg.start_row,
+                source_start_row: seg.start_row,
+                end_tick,
+            });
+        }
+    }
 }
 
 fn clip_end_tick_from_timeline(

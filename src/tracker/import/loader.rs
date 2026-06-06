@@ -1,15 +1,17 @@
 //! `Module::load_*` impls — auto-detect a tracker file's format
 //! from its header and dispatch to the matching format-specific
-//! loader (`load_mod`, `load_xm`, `load_s3m`, `load_it`). SID files
-//! are loaded via `SidModule::load` directly and don't go through
-//! the autodetect path.
+//! loader (`load_mod`, `load_xm`, `load_s3m`, `load_it`, `load_dw`).
+//! SID files are loaded via `SidModule::load` directly and don't go
+//! through the autodetect path. DW *is* auto-detected even without
+//! a magic header — its probe quadruple is unique enough.
 
 use crate::prelude::*;
 use crate::tracker::import::bin_reader::ImportError;
 
-// The module-level gate in `crate::tracker::import::mod` only compiles this
-// file when at least one of MOD/XM/S3M/IT is enabled, so `load` below
-// always has at least one live branch and `source` is always used.
+// The module-level gate in `crate::tracker::import::mod` only compiles
+// this file when at least one of MOD/XM/S3M/IT/DW is enabled, so
+// `load` below always has at least one live branch and `source` is
+// always used.
 
 impl Module {
     /// Try to import an Amiga ProTracker MOD file.
@@ -44,11 +46,26 @@ impl Module {
         Ok(ItModule::load(source)?.to_module())
     }
 
+    /// Try to import a David Whittaker custom Amiga `.dw` file.
+    /// The detection layer runs a probe-quadruple scan (`LEA /
+    /// LEA / MOVEQ / DBF`) over the first ~4 KB of the payload
+    /// and walks the BSR call graph from there; no magic header
+    /// is required.
+    #[cfg(feature = "import_dw")]
+    pub fn load_dw(source: &[u8]) -> Result<Self, ImportError> {
+        use super::dw::dw_module::DwModule;
+
+        Ok(DwModule::load(source)?.to_module())
+    }
+
     /// Try to auto-detect and import any supported historical module
-    /// file (MOD / XM / S3M / IT). Formats are tried in the order
-    /// XM → S3M → IT → MOD; the Amiga format is tried last because it
-    /// has the weakest header signature for detection. Only formats
-    /// whose `import_*` feature is enabled are attempted.
+    /// file (MOD / XM / S3M / IT / DW). Formats are tried in the
+    /// order XM → S3M → IT → MOD → DW. The Amiga MOD format is
+    /// tried late because its detection accepts almost anything;
+    /// DW comes after MOD because its detection is structural
+    /// (no magic header at all) — running it last avoids ever
+    /// stealing a valid MOD parse. Only formats whose `import_*`
+    /// feature is enabled are attempted.
     ///
     /// SID is not auto-detected here — it has its own dedicated entry
     /// point via `crate::tracker::import::sid::sid_module::SidModule::load`.
@@ -68,13 +85,23 @@ impl Module {
             return Ok(m);
         };
 
-        // The amiga format is the last one because it is the least well specified for format detection
+        // The amiga format is tried late because it accepts almost
+        // anything as a 15-sample Soundtracker variant.
         #[cfg(feature = "import_mod")]
         if let Ok(m) = Self::load_mod(source) {
             return Ok(m);
         };
 
-        // When no MOD/XM/S3M/IT feature is enabled the whole
+        // DW has no header magic at all — its detector scans for
+        // an opcode quadruple in the first few KB. Running it
+        // last keeps it from intercepting a MOD that happens to
+        // begin with the right bytes.
+        #[cfg(feature = "import_dw")]
+        if let Ok(m) = Self::load_dw(source) {
+            return Ok(m);
+        };
+
+        // When no MOD/XM/S3M/IT/DW feature is enabled the whole
         // `import_loader` module is gated out in `import::mod`, so
         // we never reach this arm with `source` being the only live
         // binding — the compiler always sees at least one of the

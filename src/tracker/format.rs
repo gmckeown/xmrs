@@ -29,6 +29,8 @@ pub enum ModuleFormat {
     It,
     /// MOS6581 SID (Commodore 64).
     Sid,
+    /// David Whittaker custom Amiga format (`.dw`).
+    Dw,
 }
 
 impl ModuleFormat {
@@ -54,5 +56,11 @@ impl ModuleFormat {
     #[inline]
     pub fn is_mod(&self) -> bool {
         matches!(self, ModuleFormat::Mod)
+    }
+
+    /// `true` when this tag is `Dw`.
+    #[inline]
+    pub fn is_dw(&self) -> bool {
+        matches!(self, ModuleFormat::Dw)
     }
 }

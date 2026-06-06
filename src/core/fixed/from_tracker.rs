@@ -17,6 +17,7 @@
 
 use crate::core::fixed::fixed::{Q15, Q8_8};
 use crate::core::fixed::units::{PitchDelta, RetrigMul};
+use crate::tracker::period::FrequencyType;
 
 // =====================================================================
 // VIBRATO / TREMOLO / PANBRELLO speed and depth
@@ -59,11 +60,55 @@ pub const fn it_panbrello_depth_from_nibble_4(depth_nibble: u8) -> Q15 {
     Q15::from_ratio((depth_nibble & 0x0F) as i32, 4)
 }
 
-/// XM vibrato depth nibble (`0..=15`) → [`PitchDelta`].
-/// XM `4xy` treats `y` as `1/16` semitone units.
+/// XM vibrato depth nibble (`0..=15`) → [`PitchDelta`], `1/16`
+/// semitone units. Retained for the IT importer (`it_effect.rs`),
+/// which is linear-only and keeps its historical depth scale; the XM /
+/// MOD path uses the frequency-mode-aware [`xm_vibrato_depth`] below.
 #[inline]
 pub const fn vibrato_depth_from_nibble_16(depth_nibble: u8) -> PitchDelta {
     PitchDelta::from_ratio((depth_nibble & 0x0F) as i16, 16)
+}
+
+/// XM `4xy` / `Vxy` vibrato depth nibble (`0..=15`) → lane depth,
+/// **frequency-mode aware** to match FT2/ProTracker `doVibrato`
+/// (`outPeriod = realPeriod ± (vibratoTab[pos] * depth) >> shift`):
+///
+/// * **Linear** — `nibble/8` semitone (`PitchDelta`). On a pitch-affine
+///   linear period this is the same constant-period nudge FT2 applies
+///   (`(255*nibble)>>5 ≈ 8*nibble` linear-period units ≈ `nibble/8` st).
+///   This is **2× the historical `nibble/16`**, which was half FT2 depth.
+///   ProTracker is always Amiga, so linear is always FT2 — `protracker`
+///   has no effect on this branch.
+/// * **Amiga** — the peak period amplitude stashed in the `PitchDelta`
+///   raw as **Paula-period units**; the player adds it straight to the
+///   period (see `StateInstrDefault::update_frequency`), because on the
+///   Amiga period (`∝ 2^-pitch`) a constant period nudge is NOT a
+///   constant pitch nudge. The replayer-specific shift:
+///     * **ProTracker** (`.mod`, `protracker == true`) — `lsr.w #7` →
+///       `(255*nibble)>>7` (`pt2_replayer.c:755`).
+///     * **FT2** (Amiga `.xm`, `protracker == false`) — `>> 5` →
+///       `(255*nibble)>>5` (`ft2_replayer.c:1858`), exactly **4× deeper**
+///       than ProTracker for the same nibble (identical 0..255 sine
+///       table). This is not a compatibility accident: FT2 applies its
+///       own deeper formula to everything it loads, MODs included, so a
+///       faithful `.mod` replay must use ProTracker's `>>7`.
+///
+/// MOD is always Amiga + ProTracker; XM picks the Amiga/Linear branch
+/// from its header flag and is always FT2 (`protracker == false`).
+#[inline]
+pub fn xm_vibrato_depth(
+    depth_nibble: u8,
+    freq_type: FrequencyType,
+    protracker: bool,
+) -> PitchDelta {
+    let n = (depth_nibble & 0x0F) as i16;
+    match freq_type {
+        FrequencyType::LinearFrequencies => PitchDelta::from_ratio(n, 8),
+        FrequencyType::AmigaFrequencies => {
+            let shift = if protracker { 7 } else { 5 };
+            PitchDelta::from_q8_8_i16((255 * n) >> shift)
+        }
+    }
 }
 
 // =====================================================================
@@ -139,6 +184,73 @@ mod tests {
         assert_eq!(it_panbrello_depth_from_nibble_4(0), Q15::ZERO);
         assert_eq!(it_panbrello_depth_from_nibble_4(4), Q15::ONE);
         assert_eq!(it_panbrello_depth_from_nibble_4(15), Q15::ONE);
+    }
+
+    #[test]
+    fn xm_vibrato_depth_amiga_matches_ft2_peak() {
+        // FT2/Protracker `doVibrato` peak period amplitude is
+        // `(vibratoTab[16] * depth) >> 5` with `vibratoTab[16] = 255`
+        // (the sine table's max), i.e. `(255 * nibble) >> 5` Paula-period
+        // units. Our Amiga depth must reproduce that exactly so the
+        // player's `period ± depth*wave` matches the real replayer.
+        for n in 0u8..16 {
+            let expect = ((255i32 * n as i32) >> 5) as i16;
+            assert_eq!(
+                xm_vibrato_depth(n, FrequencyType::AmigaFrequencies, false).as_q8_8_i16(),
+                expect,
+                "amiga vibrato depth nibble {n}"
+            );
+        }
+        // Largest nibble (15) → ±119 period units, the FT2 maximum.
+        assert_eq!(
+            xm_vibrato_depth(15, FrequencyType::AmigaFrequencies, false).as_q8_8_i16(),
+            119
+        );
+    }
+
+    #[test]
+    fn xm_vibrato_depth_protracker_is_quarter_of_ft2() {
+        // ProTracker `vibrato2` does `(vibratoTable[pos] * depth) >> 7`
+        // (`pt2_replayer.c:755`) — exactly 4× shallower than FT2's `>> 5`,
+        // since both use the same 0..255 sine table. A `.mod` must replay
+        // with this depth, not FT2's, or the vibrato is 4× too strong.
+        for n in 0u8..16 {
+            let expect = ((255i32 * n as i32) >> 7) as i16;
+            assert_eq!(
+                xm_vibrato_depth(n, FrequencyType::AmigaFrequencies, true).as_q8_8_i16(),
+                expect,
+                "protracker vibrato depth nibble {n}"
+            );
+        }
+        // Largest nibble (15) → ±29 period units, the ProTracker maximum.
+        assert_eq!(
+            xm_vibrato_depth(15, FrequencyType::AmigaFrequencies, true).as_q8_8_i16(),
+            29
+        );
+        // Linear is FT2-only; `protracker` must not change it.
+        for n in 0u8..16 {
+            assert_eq!(
+                xm_vibrato_depth(n, FrequencyType::LinearFrequencies, true).as_q8_8_i16(),
+                xm_vibrato_depth(n, FrequencyType::LinearFrequencies, false).as_q8_8_i16(),
+            );
+        }
+    }
+
+    #[test]
+    fn xm_vibrato_depth_linear_is_double_old_scale() {
+        // Linear depth is `nibble/8` semitone — twice the historical
+        // `nibble/16`, which was half of FT2's `(255*nibble)>>5 ≈
+        // nibble/8 st` linear depth.
+        for n in 0u8..16 {
+            assert_eq!(
+                xm_vibrato_depth(n, FrequencyType::LinearFrequencies, false).as_q8_8_i16(),
+                PitchDelta::from_ratio(n as i16, 8).as_q8_8_i16(),
+            );
+            assert_eq!(
+                xm_vibrato_depth(n, FrequencyType::LinearFrequencies, false).as_q8_8_i16(),
+                2 * vibrato_depth_from_nibble_16(n).as_q8_8_i16(),
+            );
+        }
     }
 
     #[test]

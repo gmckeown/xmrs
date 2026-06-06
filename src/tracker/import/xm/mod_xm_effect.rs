@@ -7,7 +7,7 @@
 
 use crate::core::fixed::fixed::{Q15, Q8_8};
 use crate::core::fixed::from_tracker::{
-    lfo_depth_from_nibble_16, lfo_speed_from_nibble_64, vibrato_depth_from_nibble_16,
+    lfo_depth_from_nibble_16, lfo_speed_from_nibble_64, xm_vibrato_depth,
 };
 use crate::core::fixed::units::{Finetune, Panning, PitchDelta, Volume};
 use crate::prelude::*;
@@ -36,6 +36,7 @@ impl ModXmEffect {
 
     fn mod_xm_walk_effect(
         freq_type: FrequencyType,
+        protracker: bool,
         current: &PatternSlot,
     ) -> Option<Vec<TrackImportEffect>> {
         match current.effect_type {
@@ -86,11 +87,13 @@ impl ModXmEffect {
                 Some(vec![TrackImportEffect::TonePortamento(speed)])
             }
             0x04 => {
-                // XM 4xy: x = speed nibble (1/64 cycles/tick),
-                // y = depth nibble (1/16 semitones).
+                // XM 4xy: x = speed nibble (1/64 cycles/tick), y = depth
+                // nibble. Depth unit is frequency-mode aware (FT2/PT
+                // `doVibrato` adds to the period directly) — see
+                // `xm_vibrato_depth`.
                 let param = current.effect_parameter;
                 let speed = lfo_speed_from_nibble_64((param & 0xF0) >> 4);
-                let depth = vibrato_depth_from_nibble_16(param & 0x0F);
+                let depth = xm_vibrato_depth(param & 0x0F, freq_type, protracker);
                 Some(vec![TrackImportEffect::Vibrato(speed, depth)])
             }
             0x05 => {
@@ -174,9 +177,9 @@ impl ModXmEffect {
                     )]),
                     0x4 => {
                         let waveform = match param & 0b0000_0011 {
-                            1 => Waveform::RampDown,
-                            2 => Waveform::Square,
-                            _ => Waveform::Sine,
+                            1 => Waveform::BipolarRampDown,
+                            2 => Waveform::BipolarSquare,
+                            _ => Waveform::BipolarSine,
                         };
                         let retrig = (param & 0b0000_0100) == 0;
                         Some(vec![TrackImportEffect::VibratoWaveform(waveform, retrig)])
@@ -190,9 +193,9 @@ impl ModXmEffect {
                     )]),
                     0x7 => {
                         let waveform = match param & 0b0000_0011 {
-                            1 => Waveform::RampDown,
-                            2 => Waveform::Square,
-                            _ => Waveform::Sine,
+                            1 => Waveform::BipolarRampDown,
+                            2 => Waveform::BipolarSquare,
+                            _ => Waveform::BipolarSine,
                         };
                         let retrig = (param & 0b0000_0100) == 0;
                         Some(vec![TrackImportEffect::TremoloWaveform(waveform, retrig)])
@@ -309,6 +312,7 @@ impl ModXmEffect {
 
     fn mod_xm_walk_volume(
         freq_type: FrequencyType,
+        protracker: bool,
         current: &PatternSlot,
     ) -> Option<TrackImportEffect> {
         match current.volume >> 4 {
@@ -364,9 +368,9 @@ impl ModXmEffect {
             0xB => {
                 let d = current.volume & 0x0F;
                 if d != 0 {
-                    Some(TrackImportEffect::VibratoDepthFxVol(
-                        vibrato_depth_from_nibble_16(d),
-                    ))
+                    Some(TrackImportEffect::VibratoDepthFxVol(xm_vibrato_depth(
+                        d, freq_type, protracker,
+                    )))
                 } else {
                     None
                 }
@@ -480,9 +484,13 @@ impl ModXmEffect {
         }
     }
 
-    pub fn mod_xm_unpack(freq_type: FrequencyType, current: &PatternSlot) -> TrackImportUnit {
-        let te = Self::mod_xm_walk_effect(freq_type, current);
-        let ve = Self::mod_xm_walk_volume(freq_type, current);
+    pub fn mod_xm_unpack(
+        freq_type: FrequencyType,
+        protracker: bool,
+        current: &PatternSlot,
+    ) -> TrackImportUnit {
+        let te = Self::mod_xm_walk_effect(freq_type, protracker, current);
+        let ve = Self::mod_xm_walk_volume(freq_type, protracker, current);
         let cc = Self::mod_xm_walk_global_effect(current);
 
         let mut tiu = TrackImportUnit::default();
@@ -503,20 +511,26 @@ impl ModXmEffect {
 
     pub fn mod_xm_unpack_row(
         freq_type: FrequencyType,
+        protracker: bool,
         row: &[PatternSlot],
     ) -> Vec<TrackImportUnit> {
         row.iter()
-            .map(|pattern_slot| ModXmEffect::mod_xm_unpack(freq_type, pattern_slot))
+            .map(|pattern_slot| ModXmEffect::mod_xm_unpack(freq_type, protracker, pattern_slot))
             .collect()
     }
 
+    /// `protracker` selects ProTracker (`.mod`) replay semantics over
+    /// FT2's for the format-divergent effects (currently vibrato depth:
+    /// ProTracker's `>>7` vs FT2's `>>5` — see `xm_vibrato_depth`). MOD
+    /// passes `true`; XM always passes `false`.
     pub fn mod_xm_unpack_pattern(
         freq_type: FrequencyType,
+        protracker: bool,
         pattern: &[Vec<PatternSlot>],
     ) -> Vec<Vec<TrackImportUnit>> {
         pattern
             .iter()
-            .map(|row| Self::mod_xm_unpack_row(freq_type, row))
+            .map(|row| Self::mod_xm_unpack_row(freq_type, protracker, row))
             .collect()
     }
 }

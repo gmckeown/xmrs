@@ -223,6 +223,9 @@ impl XmModule {
             // Phase 3a schema seat; Phase 3b will fill this from the
             // XM restart byte.
             song_loop_to: None,
+            // Tracker formats wrap as a whole (song_loop_to); no
+            // per-lane loops.
+            channel_loops: alloc::vec::Vec::new(),
         };
 
         let raw_patterns: Vec<Vec<Vec<PatternSlot>>> =

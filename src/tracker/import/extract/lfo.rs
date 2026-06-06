@@ -23,7 +23,7 @@ impl Default for LfoState {
     fn default() -> Self {
         Self {
             active: false,
-            waveform: Waveform::Sine,
+            waveform: Waveform::BipolarSine,
             retrig: true,
         }
     }
@@ -329,7 +329,10 @@ mod tests {
     #[test]
     fn extract_vibrato_waveform_change() {
         let per_row = vec![
-            vec![TrackImportEffect::VibratoWaveform(Waveform::Square, false)],
+            vec![TrackImportEffect::VibratoWaveform(
+                Waveform::BipolarSquare,
+                false,
+            )],
             vec![vib(3, 6)],
         ];
         let rows = rows_at_speed(&per_row, 6);
@@ -339,7 +342,7 @@ mod tests {
             LfoEvent::WaveformOnly {
                 waveform, retrig, ..
             } => {
-                assert_eq!(waveform, Waveform::Square);
+                assert_eq!(waveform, Waveform::BipolarSquare);
                 assert_eq!(retrig, false);
             }
             _ => panic!("expected WaveformOnly at row 0, got {:?}", events[0]),
@@ -348,7 +351,7 @@ mod tests {
             LfoEvent::Set {
                 waveform, retrig, ..
             } => {
-                assert_eq!(waveform, Waveform::Square);
+                assert_eq!(waveform, Waveform::BipolarSquare);
                 assert_eq!(retrig, false);
             }
             _ => panic!("expected Set at row 1, got {:?}", events[1]),
@@ -359,7 +362,10 @@ mod tests {
     fn extract_vibrato_waveform_after_set() {
         let per_row = vec![
             vec![vib(3, 6)],
-            vec![TrackImportEffect::VibratoWaveform(Waveform::RampDown, true)],
+            vec![TrackImportEffect::VibratoWaveform(
+                Waveform::BipolarRampDown,
+                true,
+            )],
         ];
         let rows = rows_at_speed(&per_row, 6);
         let events = extract_vibrato_events(&rows, &modern_quirks());
@@ -369,7 +375,7 @@ mod tests {
             LfoEvent::WaveformOnly {
                 waveform, retrig, ..
             } => {
-                assert_eq!(waveform, Waveform::RampDown);
+                assert_eq!(waveform, Waveform::BipolarRampDown);
                 assert!(retrig);
             }
             _ => panic!("expected WaveformOnly at row 1"),

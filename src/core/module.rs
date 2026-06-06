@@ -127,6 +127,7 @@ pub struct Module {
         feature = "import_s3m",
         feature = "import_it",
         feature = "import_sid",
+        feature = "import_dw",
     ))]
     pub origin: Option<crate::tracker::format::ModuleFormat>,
     pub frequency_type: FrequencyType,
@@ -258,6 +259,21 @@ pub struct Module {
     /// wrap-to-first-entry.
     #[serde(default)]
     pub song_loop_to: Option<u32>,
+
+    /// Per-lane independent loops, for replayers whose voices each
+    /// loop their own sequence at their own length (David Whittaker
+    /// and most custom C64 / Amiga drivers — see
+    /// [`crate::core::daw::loop_region::ChannelLoop`]).
+    ///
+    /// Keyed implicitly by each entry's `(song, channel)`. **Empty for
+    /// every tracker format** (MOD / XM / IT / S3M): those wrap as a
+    /// whole via [`Self::song_loop_to`], and an empty `channel_loops`
+    /// leaves [`Self::row_at`] on the byte-for-byte global-wrap path.
+    /// An importer only populates this when a sub-song's voices have
+    /// *unequal* loop lengths; voices that share one period stay on the
+    /// global-wrap path.
+    #[serde(default)]
+    pub channel_loops: Vec<crate::core::daw::loop_region::ChannelLoop>,
 }
 
 /// A module's MIDI macro table. IT-specific in practice but the
@@ -295,6 +311,7 @@ impl Default for Module {
                 feature = "import_s3m",
                 feature = "import_it",
                 feature = "import_sid",
+                feature = "import_dw",
             ))]
             origin: None,
             frequency_type: FrequencyType::LinearFrequencies,
@@ -314,6 +331,7 @@ impl Default for Module {
             automation: vec![],
             timeline_map: TimelineMap::default(),
             song_loop_to: None,
+            channel_loops: vec![],
         }
     }
 }
@@ -451,6 +469,22 @@ impl Module {
         None
     }
 
+    /// The [`crate::core::daw::loop_region::ChannelLoop`] for lane
+    /// `(song, channel)`, if any. `None` for every lane of a tracker
+    /// module (their `channel_loops` is empty) — the common case, so
+    /// the linear scan is over an empty `Vec`. Returns a copy so call
+    /// sites can use it while `&self.clips` is also borrowed.
+    pub fn channel_loop(
+        &self,
+        song: u16,
+        channel: u8,
+    ) -> Option<crate::core::daw::loop_region::ChannelLoop> {
+        self.channel_loops
+            .iter()
+            .find(|l| l.song == song && l.channel == channel)
+            .copied()
+    }
+
     /// Materialise one row of cells for playback, resolved through
     /// the DAW timeline. Returns a fresh
     /// `Vec<(Cell, Option<usize>)>` of length `num_channels`. The
@@ -497,37 +531,88 @@ impl Module {
         pat_idx: usize,
         row_idx: usize,
     ) -> alloc::vec::Vec<(Cell, Option<usize>)> {
+        // The global-wrap playhead is just this row's timeline tick.
+        let playhead = match self.timeline_map.find_entry(song, pat_idx, row_idx) {
+            Some(e) => e.tick,
+            None => {
+                return (0..self.get_num_channels())
+                    .map(|_| (Cell::default(), None))
+                    .collect()
+            }
+        };
+        self.row_at_with_playhead(song, pat_idx, row_idx, playhead)
+    }
+
+    /// [`Self::row_at`] with an explicit `playhead_tick` as the
+    /// per-lane fold base, instead of deriving it from this row's
+    /// timeline tick. The player passes a **monotonic** playhead (one
+    /// that keeps increasing across timeline replays) so that under
+    /// per-lane free-run each voice keeps drifting instead of snapping
+    /// back when the timeline loops. When `playhead_tick` equals the
+    /// row's timeline tick — every tracker song, and the primary pass
+    /// of a looping song — this is identical to [`Self::row_at`].
+    pub fn row_at_with_playhead(
+        &self,
+        song: usize,
+        _pat_idx: usize,
+        row_idx: usize,
+        playhead_tick: u32,
+    ) -> alloc::vec::Vec<(Cell, Option<usize>)> {
         let num_channels = self.get_num_channels();
         let mut out: alloc::vec::Vec<(Cell, Option<usize>)> =
             (0..num_channels).map(|_| (Cell::default(), None)).collect();
 
-        let abs_tick = match self.timeline_map.find_entry(song, pat_idx, row_idx) {
-            Some(e) => e.tick,
-            None => return out,
-        };
-
+        // Fold base for per-lane loops; monotonic across timeline
+        // replays under free-run, else this row's tick.
+        let abs_tick = playhead_tick;
         let song_u16 = song as u16;
-        let row_u32 = row_idx as u32;
+        let global_row = row_idx as u32;
         for (ch_idx, slot) in out.iter_mut().enumerate() {
-            let Some((_, clip)) = self.clips.active_at(song_u16, ch_idx as u8, abs_tick) else {
+            // Per-lane loop fold. A lane with a `ChannelLoop` repeats
+            // its `[start_tick, end_tick)` body independently of the
+            // others (Whittaker-style drifting voices): fold the
+            // playhead tick into that body, then map the folded tick
+            // back to the row it lands on. With no `ChannelLoop` for
+            // this lane — every tracker format — `local_tick ==
+            // abs_tick` and `local_row == global_row`, so this is the
+            // byte-for-byte global-wrap path. The reverse lookup only
+            // fires once the lane has wrapped (`abs_tick >= end_tick`);
+            // the first pass keeps `global_row` directly.
+            let (local_tick, local_row) = match self.channel_loop(song_u16, ch_idx as u8) {
+                Some(l) => {
+                    let folded = l.fold_tick(abs_tick);
+                    if folded == abs_tick {
+                        (abs_tick, global_row)
+                    } else {
+                        match self.timeline_map.entry_at_tick(song, folded) {
+                            Some(e) => (folded, e.row_idx),
+                            // Folded tick has no row (shouldn't happen
+                            // for a row-aligned region) → lane silent.
+                            None => continue,
+                        }
+                    }
+                }
+                None => (abs_tick, global_row),
+            };
+            let Some((_, clip)) = self.clips.active_at(song_u16, ch_idx as u8, local_tick) else {
                 continue;
             };
             // `active_at` returns the clip with the greatest
-            // `position_tick ≤ abs_tick` on this lane; it can
+            // `position_tick ≤ local_tick` on this lane; it can
             // legitimately have ended already, so the half-open
             // `[position_tick, end_tick)` containment must be
             // checked here. Without it, the cells of the clip that
             // *just ended* leak into the next pattern's first row.
-            if abs_tick >= clip.end_tick {
+            if local_tick >= clip.end_tick {
                 continue;
             }
             // Source-row-based index: independent of per-row speed,
             // so a `SongLevelEffect::Speed` mid-clip can't alias two
             // source rows onto the same track index.
-            if row_u32 < clip.source_start_row {
+            if local_row < clip.source_start_row {
                 continue;
             }
-            let row_in_track = row_u32 - clip.source_start_row;
+            let row_in_track = local_row - clip.source_start_row;
             if row_in_track < clip.track_row_offset {
                 continue;
             }
@@ -692,6 +777,15 @@ impl Module {
             last_tick = e.tick;
         }
 
+        // 5. Per-lane loops well-formed: a `ChannelLoop` must have a
+        //    positive body (`start_tick < end_tick`), otherwise
+        //    `fold_tick` can't make progress.
+        for (i, l) in self.channel_loops.iter().enumerate() {
+            if l.start_tick >= l.end_tick {
+                return Err(LayerInconsistency::ChannelLoopEmpty { loop_idx: i });
+            }
+        }
+
         Ok(())
     }
 }
@@ -748,6 +842,12 @@ pub enum LayerInconsistency {
         /// Position of the offending lane in `Module.automation`.
         lane_idx: usize,
     },
+    /// A [`crate::core::daw::loop_region::ChannelLoop`] has an empty
+    /// or inverted body (`start_tick >= end_tick`).
+    ChannelLoopEmpty {
+        /// Position of the offending loop in `Module.channel_loops`.
+        loop_idx: usize,
+    },
     /// A `Cell.event` carries a `NoteOn` whose instrument doesn't
     /// match its owning Track's instrument index.
     TrackInstrumentMismatch {
@@ -756,4 +856,109 @@ pub enum LayerInconsistency {
         /// Position of the offending row inside that Track.
         row: usize,
     },
+}
+
+#[cfg(test)]
+mod channel_loop_tests {
+    use super::*;
+    use crate::core::cell::{Cell, CellEvent};
+    use crate::core::daw::clip::Clip;
+    use crate::core::daw::loop_region::ChannelLoop;
+    use crate::core::daw::sorted_clips::SortedClips;
+    use crate::core::daw::timeline::{TimelineEntry, TimelineMap};
+    use crate::core::daw::track::Track;
+    use crate::core::fixed::units::Volume;
+    use crate::core::pitch::Pitch;
+
+    /// `row_at` folds a looping lane's playhead into its loop body:
+    /// rows past the loop replay the body, leaving non-looping lanes
+    /// (the tracker default, empty `channel_loops`) untouched.
+    #[test]
+    fn row_at_folds_looping_lane() {
+        // One channel, one track of 4 distinct-pitch rows on a speed-3
+        // grid (tick = row * 3). A 2-row loop body [0, 6).
+        let pitch = |r: u32| Pitch::try_from((60 + r) as u8).unwrap();
+        let mut rows = alloc::vec::Vec::new();
+        for r in 0..4u32 {
+            let mut c = Cell::default();
+            c.event = CellEvent::NoteOn {
+                pitch: pitch(r),
+                velocity: Volume::FULL,
+            };
+            rows.push(c);
+        }
+        let mut m = Module::default();
+        m.tracks.push(Track::Notes {
+            name: "t".into(),
+            instrument: 0,
+            rows,
+            muted: false,
+        });
+        m.clips = SortedClips::from_unsorted(alloc::vec![Clip {
+            track: 0,
+            song: 0,
+            target_channel: 0,
+            position_tick: 0,
+            speed_at_start: 3,
+            track_row_offset: 0,
+            source_start_row: 0,
+            end_tick: 12,
+        }]);
+        let mut entries = alloc::vec::Vec::new();
+        for r in 0..4u32 {
+            entries.push(TimelineEntry {
+                song: 0,
+                order_idx: 0,
+                pattern_idx: 0,
+                row_idx: r,
+                loop_iter: 0,
+                tick: r * 3,
+                speed_at_row: 3,
+                bpm_at_row: 125,
+            });
+        }
+        m.timeline_map = TimelineMap { entries };
+
+        let played = |m: &Module, row: u32| -> Option<Pitch> {
+            match m.row_at(0, 0, row as usize)[0].0.event {
+                CellEvent::NoteOn { pitch, .. } => Some(pitch),
+                _ => None,
+            }
+        };
+
+        // No loop yet → each row plays its own pitch.
+        for r in 0..4u32 {
+            assert_eq!(played(&m, r), Some(pitch(r)), "unlooped row {r}");
+        }
+
+        // Arm a 2-row loop body [0, 6) on lane (song 0, channel 0).
+        m.channel_loops.push(ChannelLoop {
+            song: 0,
+            channel: 0,
+            start_tick: 0,
+            end_tick: 6,
+        });
+
+        // First pass unchanged; rows 2/3 fold back to the body.
+        assert_eq!(played(&m, 0), Some(pitch(0)));
+        assert_eq!(played(&m, 1), Some(pitch(1)));
+        assert_eq!(played(&m, 2), Some(pitch(0)), "row 2 (tick 6) folds to row 0");
+        assert_eq!(played(&m, 3), Some(pitch(1)), "row 3 (tick 9) folds to row 1");
+    }
+
+    /// An empty/inverted loop body is rejected by the layer check.
+    #[test]
+    fn empty_channel_loop_is_invalid() {
+        let mut m = Module::default();
+        m.channel_loops.push(ChannelLoop {
+            song: 0,
+            channel: 0,
+            start_tick: 8,
+            end_tick: 8,
+        });
+        assert!(matches!(
+            m.verify_layers_consistent(),
+            Err(LayerInconsistency::ChannelLoopEmpty { loop_idx: 0 })
+        ));
+    }
 }

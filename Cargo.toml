@@ -1,6 +1,6 @@
 [package]
 name = "xmrs"
-version = "0.13.1"
+version = "0.13.2"
 edition = "2021"
 description = "A library to edit SoundTracker data with pleasure "
 license = "MIT"
@@ -61,6 +61,7 @@ import = [
     "import_s3m",
     "import_it",
     "import_sid",
+    "import_dw",
 ]
 # ProTracker-style Amiga MOD. Shares effect-parsing code with XM
 # (via `import::xm::mod_xm_effect`), which is pulled in as needed.
@@ -73,6 +74,13 @@ import_s3m = []
 import_it  = []
 # Commodore 64 SID (MOS6581).
 import_sid = []
+# David Whittaker custom Amiga player format (`.dw`). The file is a
+# self-contained 68000 binary with embedded music data; detection
+# extracts a small set of init-time constants from the replayer code
+# (pattern-match on 2-byte opcode prefixes), then parses the data
+# tables they point to. Has no magic header, so `Module::load` tries
+# it last (after MOD) to avoid stealing a valid MOD parse.
+import_dw  = []
 
 # ---- xorshift RNG widths (rand32 is always enabled) ----
 rand8 = []
@@ -106,6 +114,10 @@ required-features = ["std", "import_xm"]
 [[example]]
 name = "sid"
 required-features = ["std", "import_sid"]
+
+[[example]]
+name = "inspect_dw"
+required-features = ["std", "import_dw"]
 
 [profile.release]
 strip = true

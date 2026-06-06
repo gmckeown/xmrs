@@ -25,6 +25,7 @@
     feature = "import_s3m",
     feature = "import_it",
     feature = "import_sid",
+    feature = "import_dw",
 ))]
 pub mod bin_reader;
 
@@ -82,14 +83,19 @@ pub mod build;
 pub mod extract;
 
 /// impl of `Module::load_mod` / `load_xm` / `load_s3m` / `load_it` /
-/// `load`. Each method is individually gated inside. SID is not
-/// auto-detected via `Module::load` (it is imported via
+/// `load_dw` / `load`. Each method is individually gated inside.
+/// SID is not auto-detected via `Module::load` (it is imported via
 /// `SidModule::load` directly), so SID alone doesn't pull this in.
+/// DW *is* auto-detected even though it has no magic header: its
+/// probe quadruple (`LEA / LEA / MOVEQ / DBF`) is unique enough
+/// that scanning a few hundred bytes can tell a `.dw` apart from
+/// random data.
 #[cfg(any(
     feature = "import_mod",
     feature = "import_xm",
     feature = "import_s3m",
     feature = "import_it",
+    feature = "import_dw",
 ))]
 mod loader;
 
@@ -119,3 +125,13 @@ pub mod it;
 /// Load historical SID files (Commodore 64 / MOS6581).
 #[cfg(feature = "import_sid")]
 pub mod sid;
+
+/// Load David Whittaker custom Amiga player files (`.dw`).
+///
+/// Not autodetected via `Module::load` (no reliable magic header
+/// — the file is a 68000 executable that opens with a jump
+/// table). Use [`dw::dw_module::DwModule::load`] directly, then
+/// `.to_module()` for the editor representation. Same convention
+/// as `import_sid`.
+#[cfg(feature = "import_dw")]
+pub mod dw;

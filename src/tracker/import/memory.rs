@@ -786,7 +786,10 @@ impl ImportMemory {
             .map(|pattern| match mem {
                 #[cfg(any(feature = "import_mod", feature = "import_xm"))]
                 MemoryType::Mod | MemoryType::Xm => {
-                    ModXmEffect::mod_xm_unpack_pattern(freq_type, pattern)
+                    // ProTracker (`.mod`) vibrato is 4× shallower than
+                    // FT2's; the depth conversion needs to know which.
+                    let protracker = matches!(mem, MemoryType::Mod);
+                    ModXmEffect::mod_xm_unpack_pattern(freq_type, protracker, pattern)
                 }
                 #[cfg(feature = "import_s3m")]
                 MemoryType::S3m => {

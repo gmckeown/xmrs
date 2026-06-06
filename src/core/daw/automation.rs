@@ -28,6 +28,7 @@
 //! without any cell-side fallback.
 
 use crate::core::fixed::fixed::{Q15, Q8_8};
+use crate::core::fixed::units::PitchDelta;
 use crate::core::pitch::Pitch;
 use crate::core::waveform::Waveform;
 use alloc::vec::Vec;
@@ -77,6 +78,20 @@ pub enum AutomationValue {
     Bpm(u16),
     /// For Speed (typical range 1..=31).
     Speed(u8),
+    /// A signed **pitch offset in semitones** ([`PitchDelta`], Q8.8),
+    /// for [`AutomationTarget::TrackPitch`] `Points` lanes. Unlike the
+    /// relative modulations that also target `TrackPitch` — `Lfo`
+    /// (vibrato), `Slide`/`Glide` (portamento) — this is an *absolute,
+    /// held* pitch shift: the value latched by the latest point applies
+    /// to every following tick (step semantics via
+    /// [`AutomationLane::value_at`]), and the player folds it into the
+    /// note's pitch each tick. It expresses a time-varying transpose
+    /// (e.g. a tracker's global/channel transpose changing mid-note, or
+    /// an arpeggio authored as an explicit pitch curve) that a per-note
+    /// instrument pitch-envelope can't, because the curve lives on the
+    /// channel/Track timeline, not the note. See
+    /// `StateInstrDefault::update_frequency`.
+    Pitch(PitchDelta),
 }
 
 impl AutomationValue {
@@ -105,6 +120,9 @@ impl AutomationValue {
             ) | (
                 AutomationValue::Normalized(_),
                 AutomationTarget::TrackChannelVolume(_)
+            ) | (
+                AutomationValue::Pitch(_),
+                AutomationTarget::TrackPitch(_)
             ) | (AutomationValue::Bpm(_), AutomationTarget::Bpm)
                 | (AutomationValue::Speed(_), AutomationTarget::Speed)
         )
@@ -257,7 +275,7 @@ impl Default for LfoState {
             armed: false,
             speed: Q8_8::ZERO,
             depth: Q15::ZERO,
-            waveform: Waveform::Sine,
+            waveform: Waveform::BipolarSine,
             retrig: true,
         }
     }
@@ -652,7 +670,7 @@ mod tests {
                         tick: 0,
                         speed: Q8_8::from_int(3),
                         depth: Q15::from_ratio(1, 4),
-                        waveform: Waveform::Sine,
+                        waveform: Waveform::BipolarSine,
                         retrig: true,
                     },
                     LfoEvent::Clear { tick: 24 },
@@ -672,6 +690,33 @@ mod tests {
         assert!(v.is_compatible_with(AutomationTarget::TrackChannelVolume(3)));
     }
 
+    #[test]
+    fn pitch_value_is_track_pitch_only_and_holds() {
+        use crate::core::fixed::units::PitchDelta;
+        let v = AutomationValue::Pitch(PitchDelta::from_semitones(12));
+        // `Pitch` is for `TrackPitch` only.
+        assert!(v.is_compatible_with(AutomationTarget::TrackPitch(0)));
+        assert!(!v.is_compatible_with(AutomationTarget::Bpm));
+        assert!(!v.is_compatible_with(AutomationTarget::GlobalVolume));
+        assert!(!v.is_compatible_with(AutomationTarget::TrackVolume(0)));
+        // A `Points` lane carries it with step/hold semantics.
+        let mut lane = AutomationLane::new(AutomationTarget::TrackPitch(0));
+        lane.insert_point(AutomationPoint { tick: 0, value: v });
+        lane.insert_point(AutomationPoint {
+            tick: 64,
+            value: AutomationValue::Pitch(PitchDelta::from_semitones(-5)),
+        });
+        assert_eq!(lane.value_at(10), Some(v)); // held from tick 0
+        assert_eq!(
+            lane.value_at(64),
+            Some(AutomationValue::Pitch(PitchDelta::from_semitones(-5)))
+        );
+        assert_eq!(
+            lane.value_at(1000),
+            Some(AutomationValue::Pitch(PitchDelta::from_semitones(-5)))
+        );
+    }
+
     // ----- Lane state replay -----------------------------------------------
 
     fn lfo_lane(events: Vec<LfoEvent>) -> AutomationLane {
@@ -684,7 +729,7 @@ mod tests {
             tick: 100,
             speed: Q8_8::from_int(3),
             depth: Q15::from_ratio(1, 4),
-            waveform: Waveform::Square,
+            waveform: Waveform::BipolarSquare,
             retrig: false,
         }]);
         let s = lane.lfo_state_at(0).expect("lfo lane");
@@ -692,7 +737,7 @@ mod tests {
         // Default values: speed=0, depth=0, waveform=Sine, retrig=true.
         assert_eq!(s.speed, Q8_8::ZERO);
         assert_eq!(s.depth, Q15::ZERO);
-        assert_eq!(s.waveform, Waveform::Sine);
+        assert_eq!(s.waveform, Waveform::BipolarSine);
         assert!(s.retrig);
     }
 
@@ -702,14 +747,14 @@ mod tests {
             tick: 100,
             speed: Q8_8::from_int(3),
             depth: Q15::from_ratio(1, 4),
-            waveform: Waveform::Square,
+            waveform: Waveform::BipolarSquare,
             retrig: false,
         }]);
         let s = lane.lfo_state_at(100).unwrap();
         assert!(s.armed);
         assert_eq!(s.speed, Q8_8::from_int(3));
         assert_eq!(s.depth, Q15::from_ratio(1, 4));
-        assert_eq!(s.waveform, Waveform::Square);
+        assert_eq!(s.waveform, Waveform::BipolarSquare);
         assert!(!s.retrig);
         // Past the Set, before any further event — state holds.
         let s2 = lane.lfo_state_at(1000).unwrap();
@@ -724,7 +769,7 @@ mod tests {
                 tick: 0,
                 speed: Q8_8::from_int(3),
                 depth: Q15::from_ratio(1, 4),
-                waveform: Waveform::Sine,
+                waveform: Waveform::BipolarSine,
                 retrig: true,
             },
             LfoEvent::Clear { tick: 12 },
@@ -746,7 +791,7 @@ mod tests {
                 tick: 0,
                 speed: Q8_8::from_int(3),
                 depth: Q15::from_ratio(1, 4),
-                waveform: Waveform::Sine,
+                waveform: Waveform::BipolarSine,
                 retrig: true,
             },
             LfoEvent::DepthOnly {
@@ -767,7 +812,7 @@ mod tests {
                 tick: 0,
                 speed: Q8_8::from_int(3),
                 depth: Q15::from_ratio(1, 4),
-                waveform: Waveform::Sine,
+                waveform: Waveform::BipolarSine,
                 retrig: true,
             },
             LfoEvent::SpeedOnly {

@@ -60,6 +60,32 @@ pub type Pattern = Vec<Row>;
 /// the cell's effects without performing an instrument load.
 pub const EFFECT_ONLY_INSTRUMENT: usize = usize::MAX;
 
+/// Pad `module.instrument` with empty slots so every Track's instrument
+/// index is in range. Some real modules reference instrument slots beyond
+/// the declared count (e.g. `lamb_-_among_the_stars.xm` cites instrument
+/// 30 with 2 declared; `strobe-paralysicical13.xm` cites 17 with 17). FT2
+/// keeps all 128 XM instrument slots allocated — an empty slot triggers
+/// the note but has no sample, so it plays silence — whereas importers
+/// trim to the declared count. Without this the out-of-range index trips
+/// `verify_layers_consistent` (`TrackInstrumentMismatch`) and would index
+/// out of bounds at playback. Default (empty) slots reproduce FT2's
+/// "reference an empty instrument → no sound". Format-agnostic.
+fn pad_instruments_to_track_refs(module: &mut Module) {
+    let max_ref = module
+        .tracks
+        .iter()
+        .map(|t| t.instrument())
+        .filter(|&i| i != EFFECT_ONLY_INSTRUMENT)
+        .max();
+    if let Some(max_ref) = max_ref {
+        if max_ref >= module.instrument.len() {
+            module
+                .instrument
+                .resize_with(max_ref + 1, crate::core::instrument::Instrument::default);
+        }
+    }
+}
+
 /// Set [`Module::song_loop_to`] from the `restart_byte` (typically
 /// the XM `restart_position` or MOD restart byte) by looking up the
 /// absolute tick of `(restart_byte, row=0, loop_iter=0)` in the
@@ -149,6 +175,7 @@ pub fn build_timeline_layer(
     module.clips = crate::core::daw::sorted_clips::SortedClips::from_unsorted(clips);
     dedupe_tracks_by_content(module);
     crate::core::daw::euclidean::auto_convert_strict_euclidean_tracks(module);
+    pad_instruments_to_track_refs(module);
 
     // DAW migration Phase 3c.3 — derive AutomationLanes from
     // the importer-side `TrackImportUnit`s, fully decoupled from
@@ -290,5 +317,35 @@ mod restart_tests {
             has_bpm_points,
             "expected a Points lane on Bpm after extraction"
         );
+    }
+
+    /// A cell that cites an instrument index past the declared count
+    /// (real in e.g. `lamb_-_among_the_stars.xm`) pads the instrument
+    /// vector with empty slots so the Track reference is in range and
+    /// the layer stays consistent (FT2 empty-slot semantics).
+    #[test]
+    fn out_of_range_instrument_reference_pads_instrument_vec() {
+        use crate::core::cell_note::CellNote;
+        use crate::core::module::Module;
+        use crate::core::pitch::Pitch;
+        use crate::tracker::import::unit::TrackImportUnit;
+
+        let mut module = Module::default();
+        module
+            .instrument
+            .push(crate::core::instrument::Instrument::default()); // only index 0 exists
+
+        let mut cell = TrackImportUnit::default();
+        cell.note = CellNote::Play(Pitch::C5);
+        cell.instrument = Some(5); // out of range
+
+        let pat: Pattern = alloc::vec![alloc::vec![cell]];
+        build_timeline_layer(&mut module, &[alloc::vec![0]], &[pat]);
+
+        assert!(
+            module.instrument.len() >= 6,
+            "instrument vec padded to cover the out-of-range index 5"
+        );
+        assert!(module.verify_layers_consistent().is_ok());
     }
 }

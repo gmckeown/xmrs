@@ -74,6 +74,18 @@ impl TimelineMap {
         })
     }
 
+    /// First-iteration entry whose absolute `tick` equals `tick` on
+    /// `song`. The reverse of reading `entry.tick`: maps a tick back to
+    /// its `(pattern_idx, row_idx)` row. Used by per-lane looping
+    /// ([`crate::core::daw::loop_region::ChannelLoop`]) to find the row
+    /// a folded loop-local tick lands on. Loop regions are row-aligned,
+    /// so a folded tick always matches a row-start tick exactly.
+    pub fn entry_at_tick(&self, song: usize, tick: u32) -> Option<&TimelineEntry> {
+        self.entries
+            .iter()
+            .find(|e| e.song as usize == song && e.tick == tick && e.loop_iter == 0)
+    }
+
     /// First-iteration entry at `(song, order_idx)`. Used to resolve
     /// "what pattern plays at this order position?"
     pub fn find_order_entry(&self, song: usize, order_idx: usize) -> Option<&TimelineEntry> {

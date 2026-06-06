@@ -483,17 +483,17 @@ impl S3mEffect {
                     )]),
                     0x3 => {
                         let wf = match val & 3 {
-                            1 => Waveform::RampDown,
-                            2 => Waveform::Square,
-                            _ => Waveform::Sine,
+                            1 => Waveform::BipolarRampDown,
+                            2 => Waveform::BipolarSquare,
+                            _ => Waveform::BipolarSine,
                         };
                         Some(vec![TrackImportEffect::VibratoWaveform(wf, (val & 4) == 0)])
                     }
                     0x4 => {
                         let wf = match val & 3 {
-                            1 => Waveform::RampDown,
-                            2 => Waveform::Square,
-                            _ => Waveform::Sine,
+                            1 => Waveform::BipolarRampDown,
+                            2 => Waveform::BipolarSquare,
+                            _ => Waveform::BipolarSine,
                         };
                         Some(vec![TrackImportEffect::TremoloWaveform(wf, (val & 4) == 0)])
                     }
