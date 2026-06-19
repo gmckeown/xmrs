@@ -248,6 +248,56 @@ pub const fn pow2_frac_q16_16(x_num: u32) -> u32 {
     (sum >> 48) as u32
 }
 
+/// Compile-time `sin(π · num/den)` in **Q30** (`i64`), for `num/den ∈
+/// [0, 1]` (angle `0..π`, so the result is ≥ 0). High-precision companion
+/// to the `sine_q15_step` companion: an eight-term Taylor series with the argument
+/// reflected into `[0, π/2]` (`sin(π − x) = sin x`). At Q30 the residual
+/// error is ≲ 1e-8 (truncation is ≲ 6e-12; the rest is fixed-point
+/// rounding) — far tighter than the `< 0.5 %` `SINE_Q15` table.
+///
+/// `i64` / Q30 is deliberately the *minimum* width that holds the series:
+/// the largest intermediate is `(π/2)³ · 2^60 ≈ 2^62`, which still fits a
+/// signed 64-bit with a 2× margin (an `i32` would force a precision-losing
+/// Q12 and risk the ±1 LSB the callers' tables round to). Used to populate
+/// ROM tables that need a faithful sine at build time (e.g. the player's
+/// OPL log-sine ROM).
+pub const fn sin_pi_ratio_q30(num: u32, den: u32) -> i64 {
+    if den == 0 {
+        return 0;
+    }
+    // Reflect num/den > 1/2 into the first quadrant so the Taylor
+    // argument never exceeds π/2.
+    let d = den as i64;
+    let mut n = num as i64;
+    if n > d {
+        n = d; // clamp out-of-range inputs to sin(π) = 0
+    }
+    if 2 * n > d {
+        n = d - n;
+    }
+
+    // π in Q30 = round(π · 2^30).
+    const PI_Q30: i64 = 3_373_259_426;
+    let theta: i64 = (PI_Q30 * n) / d; // Q30, ∈ [0, π/2]
+    let x2: i64 = (theta * theta) >> 30; // Q30
+    let mut term: i64 = theta; // x¹, Q30
+    let mut sum: i64 = 0;
+    let mut m: i64 = 1;
+    let mut k = 0u32;
+    while k < 8 {
+        if k & 1 == 0 {
+            sum += term;
+        } else {
+            sum -= term;
+        }
+        // term ·= x² / ((m+1)(m+2)) → next odd power over its factorial.
+        term = ((term * x2) >> 30) / ((m + 1) * (m + 2));
+        m += 2;
+        k += 1;
+    }
+    sum
+}
+
 /// Multiplier for each whole semitone in one octave: `2^(s/12)`
 /// for `s = 0..11`, in Q16.16. Index 0 is `1.0`, index 11 is
 /// `≈ 1.8877`.
@@ -1070,5 +1120,30 @@ mod tests {
         let f = amiga_period_to_frequency(Period::from_raw(508));
         let hz_int = (f.raw_q24_8() >> 8) as i64;
         assert!((hz_int - 6982).abs() < 2, "got {}", hz_int);
+    }
+
+    #[test]
+    fn sin_pi_ratio_q30_matches_reference() {
+        let one_q30: i64 = 1i64 << 30;
+        // Residual error is ≲ 1e-8 absolute ≈ 11 raw Q30 units; this bound
+        // (≈ 2.4e-7) is comfortably above it yet still minuscule.
+        const TOL: i64 = 1 << 8;
+
+        // Endpoints and the quarter/half-wave anchors.
+        assert_eq!(sin_pi_ratio_q30(0, 1024), 0);
+        assert_eq!(sin_pi_ratio_q30(1024, 1024), 0); // sin(π) = 0
+        assert!((sin_pi_ratio_q30(512, 1024) - one_q30).abs() <= TOL); // sin(π/2)=1
+
+        // Reflection symmetry: sin(π·r) = sin(π·(1−r)).
+        assert_eq!(
+            sin_pi_ratio_q30(123, 1024),
+            sin_pi_ratio_q30(1024 - 123, 1024)
+        );
+
+        // Known values: sin(π/6)=0.5, sin(π/4)≈0.70710678, sin(π/3)≈0.8660254.
+        let expect_q = |x: f64| (x * (one_q30 as f64)) as i64;
+        assert!((sin_pi_ratio_q30(1, 6) - one_q30 / 2).abs() <= TOL);
+        assert!((sin_pi_ratio_q30(1, 4) - expect_q(core::f64::consts::FRAC_1_SQRT_2)).abs() <= TOL);
+        assert!((sin_pi_ratio_q30(1, 3) - expect_q(0.866_025_403_784_4)).abs() <= TOL);
     }
 }

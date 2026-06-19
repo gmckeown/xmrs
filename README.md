@@ -1,7 +1,11 @@
 # XMrs — SoundTracker file format library
 
 A `no_std`-friendly Rust library to read, edit and serialize SoundTracker
-data — with pleasure.
+data — with pleasure. It imports the tracker classics (MOD, XM, S3M, IT)
+alongside the more exotic DW (David Whittaker, Amiga) and SID (Commodore 64)
+formats into one in-memory `Module` model, and carries chip-synthesis
+instruments — SID through the cycle-accurate *sidera* core and clean-room
+OPL2/AdLib FM.
 
 Because *"Representation is the Essence of Programming"*.
 
@@ -17,7 +21,7 @@ Historical module files — imported into xmrs's in-memory `Module` model:
 | IT     | Impulse Tracker (incl. OpenMPT extras)  | `import_it`   |
 | XI     | Fast Tracker II instrument file         | `import_xm`   |
 | DW     | David Whittaker custom Amiga player (`.dw`) | `import_dw` |
-| SID    | Commodore 64 / MOS6581 (*WIP*)          | `import_sid`  |
+| SID    | Commodore 64 / MOS6581 — cycle-accurate via *sidera*, bundled Rob Hubbard tunes | `import_sid`  |
 
 The umbrella feature `import` enables all of them at once (and is on by
 default together with `std`).
@@ -48,8 +52,10 @@ Module ─┬─ Instrument ─┬─ InstrDefault ─┬─ VoiceSetup     (env
         │              ├─ InstrSid       (MOS6581 SID voice)
         │              └─ InstrRobSid ── InstrSid  (Rob Hubbard-style)
         └─ Track ─┬─ Notes { rows: Vec<Cell> } ──┬─ CellEvent       (None, NoteOn{pitch,velocity}, NoteOnGhost{…}, InstrReset, NoteOff{retrig}, NoteCut, NoteFade)
-                  │                              └─ Vec<TrackEffect>  (discrete / per-trigger effects only — see below)
-                  └─ Euclidean { events, steps, rotation, prototype: Cell, humanize_* }  (Bjorklund generator)
+                  │                              ├─ Vec<TrackEffect>  (discrete / per-trigger effects only — see below)
+                  │                              └─ NoteExpression    (per-note pitch-bend / volume / pan — MPE; neutral for every tracker import)
+                  ├─ Euclidean { events, steps, rotation, prototype: Cell, humanize_* }  (Bjorklund generator)
+                  └─ Audio { source: AudioSource, source_rate }  (recorded-audio clip — inline or pooled, see below)
 ```
 
 The continuous-modulation families (Vibrato* / Tremolo* /
@@ -73,21 +79,26 @@ once triggered), [`InstrumentBehavior`] (what happens when the same
 instrument retriggers), [`Keyboard`] (per-input-note sample / pitch
 remap, used by IT drum kits).
 
-Per-module playback semantics are bundled into a single
-[`CompatibilityProfile`] field on `Module`:
+Per-module playback semantics live in two orthogonal fields on
+`Module`:
 
-- **`format`** — source-format tag (`Xm`, `S3m`, `It`, `Mod`,
-  `Unknown`). Informational only — no playback decision reads it.
-- **`quirks`** — the orthogonal switches each historical tracker
-  flips: FT2 pitch-slide overflow, S3M period clamp, arpeggio LUT,
-  pattern-loop resume, tremor state, IT vibrato tick-zero, pan
-  reset policy, and so on.
+- **`quirks`** ([`PlaybackQuirks`]) — the switches each historical
+  tracker flips: FT2 pitch-slide overflow, S3M period clamp,
+  arpeggio LUT, pattern-loop resume, tremor state, IT vibrato
+  tick-zero, pan reset policy, and so on. This is the only field
+  playback reads.
+- **`origin`** (`Option<`[`ModuleFormat`]`>`) — source-format tag
+  (`Mod`, `S3m`, `Xm`, `It`, `Sid`, `Dw`; `None` for
+  editor-authored modules). Informational only — no playback
+  decision reads it.
 
-Named constructors materialise the canonical configurations:
-`CompatibilityProfile::ft2()`, `it214()`, `it215()`, `st3()`,
-`pt()`, `modern()` (the editor-friendly default — all quirks off).
-Importers pick the right constructor for the source file and
-overlay any header-driven flags on top.
+Preset quirk bundles are free functions in
+[`xmrs::tracker::profiles`]: `profiles::ft2()`, `it214()`,
+`it215()`, `st3()`, `pt()` — each returns a `PlaybackQuirks`. An
+editor-authored module with no historical bug emulation uses
+[`PlaybackQuirks::default()`] (all quirks off). Importers pick the
+right preset for the source file and overlay any header-driven
+flags on top.
 
 `Module` also carries a [`Vec<ChannelDefault>`] for per-channel
 initial state (panning, channel volume, mute, surround). S3M's
@@ -102,24 +113,33 @@ importers (or on demand via
 [`xmrs::daw::build_timeline::build_timeline_layer`]):
 
 ```text
-Module ─┬─ tracks        : Vec<Track>            (one per song + instrument)
-        ├─ clips         : SortedClips           (placements on the timeline)
-        ├─ automation    : Vec<AutomationLane>   (lanes for every continuous modulation
+Module ─┬─ tracks         : Vec<Track>           (one per song + instrument)
+        ├─ clips          : SortedClips          (placements on the timeline)
+        ├─ automation     : Vec<AutomationLane>  (lanes for every continuous modulation
         │                                         + Bpm / Speed / GlobalVolume song-levels,
         │                                         extracted at import or via the edit API)
-        ├─ timeline_map  : TimelineMap           (linearised pattern_order)
-        ├─ song_loop_to  : Option<u32>           (XM/MOD restart byte, as an absolute tick)
-        └─ channel_loops : Vec<ChannelLoop>      (per-lane independent loops; empty for trackers)
+        ├─ timeline_map   : TimelineMap          (linearised pattern_order)
+        ├─ song_loop_to   : Option<u32>          (XM/MOD restart byte, as an absolute tick)
+        ├─ channel_loops  : Vec<ChannelLoop>     (per-lane independent loops; empty for trackers)
+        ├─ channel_inserts: Vec<DeviceChain>     (per-channel insert effects)   ┐ signal graph —
+        ├─ buses          : Vec<Bus>             (aux / return buses)           │ all empty for
+        ├─ channel_sends  : Vec<Vec<Send>>       (per-channel sends → buses)    │ every tracker
+        ├─ master_chain   : DeviceChain          (master-bus inserts)           │ import (⇒ inert
+        └─ assets         : Vec<Sample>          (shared audio asset pool)      ┘ ⇒ bit-identical)
 ```
 
-- **`Track`** is an enum with two shapes. `Track::Notes` owns the
+- **`Track`** is an enum with three shapes. `Track::Notes` owns the
   per-row `Vec<Cell>` (the classic tracker representation, produced
   by every importer and by manual editing). `Track::Euclidean` is a
   Bjorklund generator — `(events, steps, rotation)` plus a single
   prototype `Cell` — and synthesises one cell per row at playback
   time (see [*Euclidean rhythm tracks*](#euclidean-rhythm-tracks)).
-  Both variants carry a fixed `instrument` index, invariant for the
-  Track's lifetime; a change of instrument starts a new Track. One
+  `Track::Audio` is a recorded-audio clip (no note grid): a `Sample`
+  played from its placement and resampled from `source_rate` to the
+  output rate — the DAW generalization (see
+  [*Signal graph, recorded audio & asset pool*](#signal-graph-recorded-audio--asset-pool)).
+  The note variants carry a fixed `instrument` index, invariant for
+  the Track's lifetime; a change of instrument starts a new Track. One
   special `instrument` value is reserved: `EFFECT_ONLY_INSTRUMENT`
   marks segments that carry only effects (no note/instrument) and
   modify a voice inherited from a previous pattern.
@@ -189,6 +209,54 @@ original, but the on-disk Track holds parameters instead of N
 explicit rows. Two optional fields (`humanize_advance_max_ticks` /
 `humanize_probability`) carry pulse-level humanisation that the
 player applies only when the user opts in.
+
+## Signal graph, recorded audio & asset pool
+
+On top of the timeline layer, `Module` carries a small **DAW
+generalization**: a native signal graph, recorded-audio tracks, an
+asset pool, and per-voice / per-note modulation. The governing rule is
+**additive and bit-identical**: every importer leaves all of these
+empty / neutral, so a loaded tracker module renders byte-for-byte
+identically to a build without them. They only come alive when an
+editor authors them.
+
+- **Devices & routing.** `Device` is a native, fixed-point mixer
+  insert. Beyond `Gain` and a one-pole `LowPass`, the full DirectX-DMO
+  effect set has integer equivalents — `ParamEq`, `Distortion`,
+  `Compressor`, `Echo`, `ModDelay` (chorus / flanger), `Reverb`
+  (Freeverb / WavesReverb, with freeze and independent wet/dry),
+  `I3DL2Reverb` and `Gargle` — all stateful (`process` takes
+  `&mut self`) and `no_std` integer-only. A `DeviceChain` is an ordered,
+  bypassable list of them; `Module::channel_inserts` puts a chain on each
+  mixer channel, `buses` / `channel_sends` wire post-insert sends into
+  aux/return `Bus`es, and `master_chain` processes the final summed mix.
+- **Plugins → native devices.** `mix_plugins` holds the opaque,
+  host-only IT/MPTM plugin chunks the engine cannot run directly. At
+  import the IT loader *projects* them onto the native devices above —
+  decoding the DMO parameter blobs (and two known VSTs) into a
+  `DeviceChain` — so a plugin-bearing `.it` plays with its effects by
+  default, while plugin-free modules stay bit-identical. This is distinct
+  from IT's resonant filter, which is rendered by a dedicated per-voice
+  biquad, not by this chain.
+- **Automatable parameters.** `AutomationTarget::DeviceParam
+  { track, device, param }` lets an automation lane drive an insert
+  parameter (e.g. a filter cutoff) over time, alongside the existing
+  pitch / volume / pan / channel-volume targets.
+- **Recorded audio.** `Track::Audio` plays a `Sample` from its clip
+  placement, linear-resampled from `source_rate`. Its waveform is an
+  `AudioSource`: `Inline(Sample)` (owned) or `Pooled(index)` — a
+  reference into the module-level **asset pool** `Module::assets`, so
+  one recording placed many times is stored once. Resolve a track
+  against the pool with `Module::track_audio`; intern a shared asset
+  with `Module::push_asset`. This generalises the per-instrument
+  `Arc<[..]>` PCM sharing into an index-referenced registry.
+- **Per-voice & per-note modulation.** An `AutomationLane` carries a
+  `ModScope`: `Track` (the tracker default — modulation reaches only
+  the live voice, detached NNA ghosts keep their frozen state) or
+  `Voice` (modulation reaches every voice of the track, the
+  per-voice / MPE path). Each `Cell` also carries a `NoteExpression`
+  (per-note pitch-bend / volume / pan), neutral for every tracker
+  import.
 
 ## Loading a file
 

@@ -15,8 +15,8 @@ oracle available short of real Amiga hardware.
 | File | What |
 |---|---|
 | `DwPaulaOracle.java` | The Ghidra emulation script (canonical source; lives in `~/ghidra_scripts/`). |
-| `corpus/*.csv` | **The single golden store** — 113 goldens, one per real `.dw` in `~/Music/dw` (whole-corpus A2 capture, 2000 ticks; some StopSong-truncated). Keyed by the real stem (`xenon2 (title).csv`, `bad company.csv`, …). Used by both `audit.py` (corpus-wide) and `diff_baseline.py --markdown` (the C1–C8 + ½-vol cluster scoreboard). |
-| `capture_all.sh` | Headless-Ghidra batch that (re)builds `corpus/` (see below). |
+| `$DW_ORACLE_CORPUS/*.csv` | **The single golden store, kept OUTSIDE the crate** (12 MB of regenerable RE artifact — default `~/Documents/dw-oracle-corpus`, override via `$DW_ORACLE_CORPUS`). 113 goldens, one per real `.dw` in `~/Music/dw` (whole-corpus A2 capture, 2000 ticks; some StopSong-truncated). Keyed by the real stem (`xenon2 (title).csv`, `bad company.csv`, …). Used by both `audit.py` (corpus-wide) and `diff_baseline.py --markdown` (the C1–C8 + ½-vol cluster scoreboard). **Not** read by any cargo test. |
+| `capture_all.sh` | Headless-Ghidra batch that (re)builds the golden store (see below). |
 | `known_args.tsv` | Per-module entry-point overrides (`stem⇥init⇥play⇥a3⇥f0`) for the batch. |
 | `audit.py` / `diff_baseline.py` | Corpus-wide rank + per-pair / `--markdown` diff. |
 | `KNOWN_GAPS.md` | Modules the batch can't capture (chip's challenge entry, SFX/non-song banks). |
@@ -30,11 +30,8 @@ mid-track speed cmd 0x8a, PLAN #4), `sentinel` (111 ticks `f0=0x52c`, play body
 near-exact); and the heavy-arp canonical `buffalo bills rodeo games` (111 arp
 cmds, MAE 2–4) which validates the per-frame arpeggio Points lane at scale.
 
-> History: there used to be a second copy of the cluster goldens at the oracle/
-> root (1500-tick, underscore-named `xenon2_title.csv` etc.). Those were folded
-> into `corpus/` (2000-tick supersets) on 2026-06-05 — corpus/ is now the only
-> golden store. Player traces live in `/tmp/ptr/<stem>.csv` (ephemeral; rebuild
-> via the `dw_oracle_trace` loop in `audit.py`'s header).
+Player traces live in `/tmp/ptr/<stem>.csv` (ephemeral; rebuild via the
+`dw_oracle_trace` loop in `audit.py`'s header).
 
 ## What it does
 
@@ -180,18 +177,19 @@ the player. The player-side trace is
 `ChannelSnapshot`); the diff is `diff_baseline.py`; results live in
 `../BASELINE.md`.
 
-**Whole-corpus capture (since 2026-06-05):** `capture_all.sh` runs the oracle
+**Whole-corpus capture:** `capture_all.sh` runs the oracle
 headless (`analyzeHeadless`) over every `~/Music/dw/*.dw`, trying candidate entry
 points (`known_args.tsv` overrides for the 14 verified modules; otherwise the
 heuristics from `examples/dw_oracle_args` — Paula-`lea` body / `0x0,0xe` wrapper /
 `DwLayout` offsets) and keeping the first whose trace is sane. Output →
-`corpus/*.csv` (111/120 captured; the 9 fails are SFX/non-song banks + 3 real
+`$DW_ORACLE_CORPUS/*.csv` (default `~/Documents/dw-oracle-corpus`; 111/120 captured;
+the 9 fails are SFX/non-song banks + 3 real
 modules needing manual entry points). `audit.py` diffs every corpus golden vs its
 player trace (`/tmp/ptr/*.csv`) and ranks by strike/gate/period. ⚠ never prefix a
 shell line with `pkill -f analyzeHeadless` — `-f` self-matches the command line and
 kills the parent shell (exit 144).
 
-**CSV schema (since 2026-06-05):** `tick,dma,` then **4 fields** per channel
+**CSV schema:** `tick,dma,` then **4 fields** per channel
 `cNg,cNper,cNvol,cNs,` then `f0`. The added `cNs` is the per-tick **struck**
 flag — `1` when that channel re-attacked this tick (oracle: a DMACON 0→1 edge =
 Paula sample reload; player: a `trigger_pitch` sample-reset). `diff_baseline.py`
@@ -208,12 +206,12 @@ Regenerate everything:
 
 ```sh
 # 1. player traces — one per corpus golden, into /tmp/ptr/<stem>.csv
-#    (same CSV schema, stem-keyed, 2000 ticks — matches corpus/ + audit.py)
+#    (same CSV schema, stem-keyed, 2000 ticks — matches the store + audit.py)
 cd xmrsplayer
 BIN=target/release/examples/dw_oracle_trace
 cargo build --release --no-default-features --features std,import_dw --example dw_oracle_trace
 mkdir -p /tmp/ptr
-for g in ../xmrs/src/tracker/import/dw/oracle/corpus/*.csv; do
+for g in "${DW_ORACLE_CORPUS:-$HOME/Documents/dw-oracle-corpus}"/*.csv; do
   s=$(basename "$g" .csv); "$BIN" "$HOME/Music/dw/$s.dw" 2000 "/tmp/ptr/$s.csv"
 done
 

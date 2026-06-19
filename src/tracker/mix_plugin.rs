@@ -13,38 +13,49 @@
 
 use serde::{Deserialize, Serialize};
 
+use alloc::string::String;
 use alloc::vec::Vec;
 
-/// Identification + routing fields for a single plugin slot,
-/// mirroring OpenMPT's `SNDMIXPLUGININFO`. Identifiers are kept as
-/// raw `u32`s because the four-character codes used by the format
-/// are not always valid UTF-8 (and aren't always meaningful as
-/// FOURCCs — some are numeric IDs).
+/// Identification + routing fields for a single plugin slot, mirroring
+/// the relevant parts of OpenMPT's 128-byte `SNDMIXPLUGININFO`.
+/// Identifiers are kept as raw `u32`s because the four-character codes
+/// used by the format are not always valid UTF-8 (and aren't always
+/// meaningful as FOURCCs — some are numeric IDs).
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct MixPluginInfo {
-    /// Primary plugin ID (typically a packed four-character code
-    /// such as `'VstP'` for a generic VST host slot, or a built-in
-    /// identifier for OpenMPT's bundled effects).
+    /// Primary plugin ID (a packed four-character code such as `'VstP'`
+    /// for a VST 2.x slot or `'DXMO'` for a DirectX Media Object).
     pub id1: u32,
-    /// Secondary plugin ID, used by the host to disambiguate
-    /// between plugins that share the same `id1`.
+    /// Secondary plugin ID, disambiguating plugins that share `id1`
+    /// (a vendor FOURCC for VST, a GUID fragment for DMO).
     pub id2: u32,
-    /// Source bus for plugin input. Routing semantics follow
-    /// OpenMPT — see its docs for the exact field encoding.
-    pub input_routing: u32,
-    /// Destination bus for plugin output.
+    /// Routing flags (`SNDMIXPLUGININFO::routingFlags`): bit `0x01`
+    /// `irApplyToMaster`, `0x02` `irBypass`, `0x04` `irDryMix`, …
+    pub routing_flags: u8,
+    /// Mix mode (`SNDMIXPLUGININFO::mixMode`).
+    pub mix_mode: u8,
+    /// Plugin gain, tenths (real gain = `gain / 10`).
+    pub gain: u8,
+    /// Output routing (`dwOutputRouting`): `0` = master, `0x80 + x` =
+    /// chained into plugin `x`.
     pub output_routing: u32,
+    /// User-chosen display name (`szName`, ANSI in the file).
+    pub name: String,
+    /// Original library / DLL name (`szLibraryName`, UTF-8 in the file).
+    pub library_name: String,
 }
 
-/// One plugin slot. The `data` blob is the plugin's serialised
-/// state (typically a VST chunk produced by `effGetChunk`); xmrs
-/// treats it as opaque bytes.
+/// One plugin slot. The `data` blob is the plugin's serialised parameter
+/// state (`pluginData`): for a native DMO it is a `u32` type tag (`0`)
+/// followed by the normalised `f32` parameters; for a VST it is the
+/// opaque `effGetChunk` dump. xmrs does not host plugins, but the
+/// importer can convert known DMOs into native devices (see
+/// [`crate::tracker::import::it::it_plugin_convert`]).
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct MixPlugin {
     pub info: MixPluginInfo,
-    /// Plugin-specific binary state. `None` when the slot exists
-    /// in the file but carries no chunk (i.e., a default-state
-    /// plugin or an empty slot kept for indexing).
+    /// Plugin-specific parameter blob. `None` when the slot exists in the
+    /// file but carries no data.
     pub data: Option<Vec<u8>>,
 }
 

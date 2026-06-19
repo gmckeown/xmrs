@@ -1,9 +1,12 @@
 //! [`Module`] — top-level container for a SoundTracker song.
 //!
 //! Holds metadata, the instrument bank, the DAW layer (tracks,
-//! clips, automation lanes, timeline_map), playback quirks, and
+//! clips, automation lanes, timeline_map), the native signal graph
+//! (per-channel insert chains, aux/return buses + sends, master
+//! chain) and shared audio asset pool, playback quirks, and
 //! IT-specific extras (`midi_macros`, `mix_plugins`, `mix_volume`,
-//! `pitch_wheel_depth`).
+//! `pitch_wheel_depth`). The signal-graph and asset fields are empty
+//! for every tracker import (⇒ inert ⇒ bit-identical render).
 //!
 //! A `Module` is constructed three ways:
 //! - via importers (`Module::load`, `load_xm`, `load_it`, …) which
@@ -274,6 +277,49 @@ pub struct Module {
     /// global-wrap path.
     #[serde(default)]
     pub channel_loops: Vec<crate::core::daw::loop_region::ChannelLoop>,
+
+    /// RFC §3B — per-mixer-channel insert device chains (the native
+    /// signal-graph plumbing). Indexed by mixer-channel number; a
+    /// missing or empty entry is a pass-through. **Empty for every
+    /// tracker import** — the importers never author inserts, so the
+    /// mixer skips the chain and the render stays bit-identical.
+    /// Distinct from [`Self::mix_plugins`], which holds opaque,
+    /// host-only VST chunks the player cannot execute.
+    #[serde(default)]
+    pub channel_inserts: Vec<crate::core::daw::device::DeviceChain>,
+
+    /// RFC §3B — return/aux buses (each a named insert chain). Channels
+    /// feed them via [`Self::channel_sends`]; each bus's processed
+    /// output is summed back into the master mix. **Empty for every
+    /// tracker import.**
+    #[serde(default)]
+    pub buses: Vec<crate::core::daw::device::Bus>,
+
+    /// RFC §3B — per-mixer-channel sends into [`Self::buses`]. Indexed
+    /// by mixer-channel number; each entry is that channel's list of
+    /// `(bus, level)` sends. **Empty for every tracker import.**
+    #[serde(default)]
+    pub channel_sends: Vec<Vec<crate::core::daw::device::Send>>,
+
+    /// RFC §3B — the **master bus** insert chain, applied to the final
+    /// summed mix (channels + bus returns) before the output gain.
+    /// Empty ⇒ pass-through ⇒ bit-identical to the pre-3B mixer.
+    #[serde(default)]
+    pub master_chain: crate::core::daw::device::DeviceChain,
+
+    /// RFC §4 — the shared **audio asset pool**. A
+    /// [`Track::Audio`] whose
+    /// `source` is
+    /// [`AudioSource::Pooled(i)`](crate::core::daw::track::AudioSource::Pooled)
+    /// reads `assets[i]`, so one recording placed many times on the
+    /// timeline is stored once. This generalises §1A's per-instrument
+    /// `Arc` PCM sharing into a module-level, index-referenced registry.
+    /// **Empty for every tracker import** — importers only ever produce
+    /// inline samples, so nothing references the pool and the render is
+    /// bit-identical. Resolve a track against it with
+    /// [`Self::track_audio`].
+    #[serde(default)]
+    pub assets: Vec<crate::core::sample::Sample>,
 }
 
 /// A module's MIDI macro table. IT-specific in practice but the
@@ -332,6 +378,11 @@ impl Default for Module {
             timeline_map: TimelineMap::default(),
             song_loop_to: None,
             channel_loops: vec![],
+            channel_inserts: vec![],
+            buses: vec![],
+            channel_sends: vec![],
+            master_chain: crate::core::daw::device::DeviceChain::default(),
+            assets: vec![],
         }
     }
 }
@@ -383,8 +434,11 @@ impl Module {
     pub fn lane_for(
         &self,
         target: crate::core::daw::automation::AutomationTarget,
+        song: u16,
     ) -> Option<&AutomationLane> {
-        self.automation.iter().find(|l| l.target == target)
+        self.automation
+            .iter()
+            .find(|l| l.target == target && l.song == song)
     }
 
     /// All [`AutomationLane`]s whose `target == target`. There can
@@ -394,8 +448,11 @@ impl Module {
     pub fn lanes_for<'a>(
         &'a self,
         target: crate::core::daw::automation::AutomationTarget,
+        song: u16,
     ) -> impl Iterator<Item = &'a AutomationLane> + 'a {
-        self.automation.iter().filter(move |l| l.target == target)
+        self.automation
+            .iter()
+            .filter(move |l| l.target == target && l.song == song)
     }
 
     /// Number of channels visible to the player: the smallest
@@ -412,6 +469,45 @@ impl Module {
             .map(|c| c.target_channel as usize + 1)
             .max()
             .unwrap_or(0)
+    }
+
+    /// RFC §4 — register a recorded waveform in the shared
+    /// [`Self::assets`] pool and return its index, so a
+    /// [`Track::Audio`] can
+    /// reference it via
+    /// [`AudioSource::Pooled`](crate::core::daw::track::AudioSource::Pooled).
+    /// Appends unconditionally; the same index handed to several clips
+    /// is how one recording is stored once and played many times.
+    pub fn push_asset(&mut self, sample: crate::core::sample::Sample) -> usize {
+        let idx = self.assets.len();
+        self.assets.push(sample);
+        idx
+    }
+
+    /// RFC §4 — resolve a track's recorded audio against the asset pool.
+    /// Returns `(sample, source_rate)` for a
+    /// [`Track::Audio`] whose
+    /// `source` is inline or a *live* pool reference; `None` if the
+    /// track isn't Audio or its
+    /// [`Pooled`](crate::core::daw::track::AudioSource::Pooled) index is
+    /// dangling. This is the pool-aware counterpart to the inline-only
+    /// [`Track::audio_sample`](crate::core::daw::track::Track::audio_sample);
+    /// the player resolves every clip through here.
+    pub fn track_audio(&self, track_idx: usize) -> Option<(&crate::core::sample::Sample, u32)> {
+        use crate::core::daw::track::{AudioSource, Track};
+        let (source, rate) = match self.tracks.get(track_idx)? {
+            Track::Audio {
+                source,
+                source_rate,
+                ..
+            } => (source, *source_rate),
+            _ => return None,
+        };
+        let sample = match source {
+            AudioSource::Inline(s) => s,
+            AudioSource::Pooled(i) => self.assets.get(*i)?,
+        };
+        Some((sample, rate))
     }
 
     // ---- Derived accessors over the DAW layer ----
@@ -658,6 +754,8 @@ impl Module {
                         slot.1 = track_instr;
                     }
                 }
+                // Audio tracks carry no cells — leave the default slot.
+                Track::Audio { .. } => {}
             }
         }
         out
@@ -880,12 +978,13 @@ mod channel_loop_tests {
         let pitch = |r: u32| Pitch::try_from((60 + r) as u8).unwrap();
         let mut rows = alloc::vec::Vec::new();
         for r in 0..4u32 {
-            let mut c = Cell::default();
-            c.event = CellEvent::NoteOn {
-                pitch: pitch(r),
-                velocity: Volume::FULL,
-            };
-            rows.push(c);
+            rows.push(Cell {
+                event: CellEvent::NoteOn {
+                    pitch: pitch(r),
+                    velocity: Volume::FULL,
+                },
+                ..Cell::default()
+            });
         }
         let mut m = Module::default();
         m.tracks.push(Track::Notes {
@@ -942,8 +1041,16 @@ mod channel_loop_tests {
         // First pass unchanged; rows 2/3 fold back to the body.
         assert_eq!(played(&m, 0), Some(pitch(0)));
         assert_eq!(played(&m, 1), Some(pitch(1)));
-        assert_eq!(played(&m, 2), Some(pitch(0)), "row 2 (tick 6) folds to row 0");
-        assert_eq!(played(&m, 3), Some(pitch(1)), "row 3 (tick 9) folds to row 1");
+        assert_eq!(
+            played(&m, 2),
+            Some(pitch(0)),
+            "row 2 (tick 6) folds to row 0"
+        );
+        assert_eq!(
+            played(&m, 3),
+            Some(pitch(1)),
+            "row 3 (tick 9) folds to row 1"
+        );
     }
 
     /// An empty/inverted loop body is rejected by the layer check.

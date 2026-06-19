@@ -59,6 +59,11 @@ pub mod core;
 /// Each sub-module is gated behind one or more `import_*` features.
 pub mod tracker;
 
+/// Signal / event generators (runtime synthesis & rhythm engines) — see
+/// the module docs. Sits beside `core` and `tracker`: not format I/O, not
+/// the bare model, but the things that *generate* at playback.
+pub mod generators;
+
 /// Edit command API (atomic, undoable mutations of `Module`)
 pub mod edit;
 
@@ -107,7 +112,7 @@ mod tests {
     #[test]
     fn load_sid_commando_has_consistent_layer() {
         let sid = crate::tracker::import::sid::sid_module::SidModule::get_sid_commando();
-        let modules = sid.to_modules(false);
+        let modules = sid.to_modules();
         assert!(
             !modules.is_empty(),
             "SID should produce at least one Module"
@@ -157,7 +162,7 @@ mod tests {
     #[test]
     fn autodetect_dw_xenon2() {
         use crate::tracker::format::ModuleFormat;
-        let path = "/home/user/Music/dw/xenon2 (title).dw";
+        let path = "/home/user/Downloads/xenon2 (title).dw";
         let Ok(data) = std::fs::read(path) else {
             eprintln!("skipped: {} not found", path);
             return;
@@ -292,6 +297,180 @@ mod tests {
         }
     }
 
+    /// Shared Tier-1 robustness driver for every header-based tracker
+    /// importer (IT / XM / MOD / S3M). Loads **every** file with the
+    /// given `ext` under `~/Music` (recursively) through `loader` and
+    /// asserts each one either decodes to a consistent DAW layer or is
+    /// cleanly rejected. This is the cheap, oracle-free floor that says
+    /// *"the loader never chokes on a real file"* — the analogue of
+    /// `load_all_dw_modules_from_music_dir`. Fidelity (does it *play*
+    /// like the reference) is a separate tier; see each format's
+    /// `PLAN.md` / `BASELINE.md`.
+    ///
+    /// What counts as a **failure** (and panics the gate):
+    /// * a **panic** inside the loader (a crash on real input), or
+    /// * a successful load whose **DAW layer is inconsistent**
+    ///   (`verify_layers_consistent` — the invariant that surfaced the
+    ///   per-sub-song-automation and clip-overlap bugs).
+    ///
+    /// A clean `Err` is **not** a failure. A real corpus mixes in files
+    /// that wear the wrong extension (an `.xm` that is really an IT, a
+    /// byte-damaged `.it`), and declining those is correct. We can
+    /// assert that principled-ly without a hand-maintained allow-list:
+    /// `Module::load` autodetect tries *this same loader first*, so it
+    /// can never re-accept as format `ext` a file `loader` just
+    /// rejected — if autodetect then succeeds the file is a foreign
+    /// module (mislabeled), and if it fails the file is damaged/garbage.
+    /// Either outcome makes the rejection correct, so a genuine
+    /// "rejected a valid `ext`" bug cannot reach this arm. We still
+    /// guard against a *mass* loader regression with a loose ceiling on
+    /// the rejected fraction.
+    ///
+    /// Skipped silently when `~/Music` is absent (CI / fresh checkout).
+    #[cfg(any(
+        feature = "import_xm",
+        feature = "import_mod",
+        feature = "import_s3m",
+        feature = "import_it"
+    ))]
+    fn run_format_load_gate(
+        ext: &str,
+        loader: impl Fn(
+            &[u8],
+        ) -> Result<
+            crate::core::module::Module,
+            crate::tracker::import::bin_reader::ImportError,
+        >,
+    ) {
+        fn collect(
+            dir: &std::path::Path,
+            ext: &str,
+            out: &mut alloc::vec::Vec<std::path::PathBuf>,
+        ) {
+            let Ok(rd) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    collect(&p, ext, out);
+                } else if p
+                    .extension()
+                    .and_then(|x| x.to_str())
+                    .is_some_and(|x| x.eq_ignore_ascii_case(ext))
+                {
+                    out.push(p);
+                }
+            }
+        }
+
+        let root = "/home/user/Music";
+        let mut paths = alloc::vec::Vec::new();
+        collect(std::path::Path::new(root), ext, &mut paths);
+        if paths.is_empty() {
+            eprintln!("skipped: no .{} under {}", ext, root);
+            return;
+        }
+        paths.sort();
+
+        let mut total = 0usize;
+        let mut ok_count = 0usize;
+        let mut rejected: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
+        let mut failures: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
+        for path in &paths {
+            total += 1;
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("<?>");
+
+            let data = match std::fs::read(path) {
+                Ok(d) => d,
+                Err(e) => {
+                    failures.push(alloc::format!("{}: read failed: {}", name, e));
+                    continue;
+                }
+            };
+
+            // Catch panics so one bad file reports rather than aborting
+            // the whole gate.
+            let loaded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| loader(&data)));
+            match loaded {
+                Ok(Ok(module)) => {
+                    if let Err(e) = module.verify_layers_consistent() {
+                        failures.push(alloc::format!("{}: DAW layer inconsistent: {:?}", name, e));
+                        continue;
+                    }
+                    ok_count += 1;
+                }
+                Ok(Err(e)) => {
+                    // Foreign-or-damaged: a correct rejection (see the
+                    // doc-comment argument). Recorded, not failed.
+                    rejected.push(alloc::format!("{} ({:?})", name, e));
+                }
+                Err(_) => {
+                    failures.push(alloc::format!("{}: PANIC during load/to_module", name));
+                }
+            }
+        }
+        eprintln!(
+            "run_format_load_gate[{}]: {} files, {} ok, {} rejected (foreign/damaged), {} failures",
+            ext,
+            total,
+            ok_count,
+            rejected.len(),
+            failures.len()
+        );
+        for r in &rejected {
+            eprintln!("  -- rejected: {}", r);
+        }
+        if !failures.is_empty() {
+            for f in &failures {
+                eprintln!("  FAIL {}", f);
+            }
+            panic!(
+                "{} .{} module(s) failed to load cleanly",
+                failures.len(),
+                ext
+            );
+        }
+        // Mass-regression tripwire: a handful of mislabeled/damaged files
+        // is normal, but if a quarter of the corpus is suddenly rejected
+        // the loader has regressed, not the corpus.
+        assert!(
+            rejected.len() * 4 <= total,
+            "run_format_load_gate[{}]: {}/{} files rejected — looks like a loader regression, not just mislabeled inputs",
+            ext,
+            rejected.len(),
+            total
+        );
+    }
+
+    /// Tier-1 robustness gate for the Impulse Tracker `.it` importer.
+    #[cfg(feature = "import_it")]
+    #[test]
+    fn load_all_it_modules_from_music_dir() {
+        run_format_load_gate("it", crate::core::module::Module::load_it);
+    }
+
+    /// Tier-1 robustness gate for the FastTracker II `.xm` importer.
+    #[cfg(feature = "import_xm")]
+    #[test]
+    fn load_all_xm_modules_from_music_dir() {
+        run_format_load_gate("xm", crate::core::module::Module::load_xm);
+    }
+
+    /// Tier-1 robustness gate for the Amiga ProTracker `.mod` importer.
+    #[cfg(feature = "import_mod")]
+    #[test]
+    fn load_all_mod_modules_from_music_dir() {
+        run_format_load_gate("mod", crate::core::module::Module::load_mod);
+    }
+
+    /// Tier-1 robustness gate for the ScreamTracker 3 `.s3m` importer.
+    #[cfg(feature = "import_s3m")]
+    #[test]
+    fn load_all_s3m_modules_from_music_dir() {
+        run_format_load_gate("s3m", crate::core::module::Module::load_s3m);
+    }
+
     /// Integration test for the David Whittaker `.dw` importer.
     ///
     /// Looks for a real-world module on the developer's machine
@@ -305,7 +484,7 @@ mod tests {
     #[test]
     fn load_dw_xenon2_from_home() {
         use crate::tracker::import::dw::dw_module::DwModule;
-        let path = "/home/user/Music/dw/xenon2 (title).dw";
+        let path = "/home/user/Downloads/xenon2 (title).dw";
         let Ok(data) = std::fs::read(path) else {
             eprintln!("skipped: {} not found", path);
             return;
@@ -531,11 +710,8 @@ mod tests {
                 hist[ch][bucket] += 1;
             }
         }
-        for ch in 0..4 {
-            eprintln!(
-                "    ch{} note distribution (10% buckets): {:?}",
-                ch, hist[ch]
-            );
+        for (ch, h) in hist.iter().enumerate().take(4) {
+            eprintln!("    ch{} note distribution (10% buckets): {:?}", ch, h);
         }
         eprintln!(
             "    final channel state: ch0 pos={}/{} cursor={} sp_cnt={} | ch1 pos={}/{} | ch2 pos={}/{} | ch3 pos={}/{}",

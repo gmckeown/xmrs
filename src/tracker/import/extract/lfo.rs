@@ -343,7 +343,7 @@ mod tests {
                 waveform, retrig, ..
             } => {
                 assert_eq!(waveform, Waveform::BipolarSquare);
-                assert_eq!(retrig, false);
+                assert!(!retrig);
             }
             _ => panic!("expected WaveformOnly at row 0, got {:?}", events[0]),
         }
@@ -352,7 +352,7 @@ mod tests {
                 waveform, retrig, ..
             } => {
                 assert_eq!(waveform, Waveform::BipolarSquare);
-                assert_eq!(retrig, false);
+                assert!(!retrig);
             }
             _ => panic!("expected Set at row 1, got {:?}", events[1]),
         }

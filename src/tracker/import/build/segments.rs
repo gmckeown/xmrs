@@ -282,7 +282,76 @@ pub fn extract_tracks_and_clips(
     // byte-identical.
     emit_loop_repeat_clips(timeline_map, &segments_map, &mut clips);
 
+    // Final tiling guarantee. On a few segmented pattern-loop bodies the
+    // first-pass `end_tick` (derived from the timeline's next occurrence
+    // of the segment-end row) can reach *past* the start of the next
+    // segment's clip on the same lane — e.g. a loop whose tail row
+    // re-enters an earlier segment, so two source segments claim an
+    // overlapping tick window. `SortedClips::active_at` already prefers
+    // the clip with the greatest `position_tick`, so the overshoot is
+    // never heard, but it violates the no-overlap-per-lane invariant
+    // (`verify_layers_consistent`). Truncate each clip's `end_tick` down
+    // to the next clip's `position_tick` on the same `(song, channel)`
+    // lane: audio-neutral (the truncated tail was already shadowed) and
+    // a no-op for already-tiled lanes, so loop-free modules stay
+    // byte-identical.
+    clamp_clip_overlaps_per_lane(&mut clips);
+
     (tracks, clips)
+}
+
+/// Make every `(song, target_channel)` lane satisfy the
+/// no-overlap invariant, audio-neutrally. Two distinct overlap shapes
+/// occur on segmented pattern-loop bodies:
+///
+/// * **Overshoot** — a clip's first-pass `end_tick` reaches past the
+///   next clip's `position_tick`. `active_at` ignores `end_tick`
+///   entirely (it returns the last clip whose `position_tick <= tick`),
+///   so shrinking `end_tick` down to the next clip's start changes
+///   nothing that plays — it just restores the tiling.
+///
+/// * **Exact tie** — two clips share the same lane `position_tick`
+///   (e.g. two source segments both re-placed at the same loop-repeat
+///   tick). `active_at` always returns the *later*-emitted one of an
+///   equal-position pair (`partition_point` + last-of-`<=`), so the
+///   earlier clip is dead — never returned for any tick. We drop it.
+///   `SortedClips::sort_in_place` and the index sort below are both
+///   stable, so "earlier in this order" == "earlier original index" ==
+///   the clip `active_at` shadows, making the drop provably silent.
+///
+/// A loop-free, already-tiled module has neither shape, so this is a
+/// no-op there and leaves such modules byte-identical.
+fn clamp_clip_overlaps_per_lane(clips: &mut Vec<Clip>) {
+    let mut order: Vec<usize> = (0..clips.len()).collect();
+    order.sort_by_key(|&i| {
+        (
+            clips[i].song,
+            clips[i].target_channel,
+            clips[i].position_tick,
+        )
+    });
+    let mut drop = alloc::vec![false; clips.len()];
+    for w in order.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        if clips[a].song != clips[b].song || clips[a].target_channel != clips[b].target_channel {
+            continue;
+        }
+        if clips[b].position_tick == clips[a].position_tick {
+            // Tie: `a` is the earlier (lower-index) clip of the pair and
+            // is never returned by `active_at`; drop it.
+            drop[a] = true;
+        } else if clips[b].position_tick < clips[a].end_tick {
+            clips[a].end_tick = clips[b].position_tick;
+        }
+    }
+    if drop.iter().any(|&d| d) {
+        let mut i = 0;
+        clips.retain(|_| {
+            let keep = !drop[i];
+            i += 1;
+            keep
+        });
+    }
 }
 
 /// Emit clips covering pattern-loop repeats (`loop_iter >= 1` runs).
@@ -349,7 +418,10 @@ fn emit_loop_repeat_clips(
             // row is still inside the run, else the run's end tick.
             // Stays within the run → preserves the half-open anti-leak
             // guarantee into the next pass/order.
-            let end_tick = first_tick.get(&seg_end_row).copied().unwrap_or(run_end_tick);
+            let end_tick = first_tick
+                .get(&seg_end_row)
+                .copied()
+                .unwrap_or(run_end_tick);
             let speed_at_start = speed_at.get(&first_row).copied().unwrap_or(e0.speed_at_row);
             let target_channel = key.channel as u8;
             // Only fill a genuine gap. When a single first-pass clip

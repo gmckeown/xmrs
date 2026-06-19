@@ -1,12 +1,12 @@
-//! Reusable sequence assigned to a single instrument.
+//! Reusable sequence placed on the timeline by one or more clips.
 //!
 //! Several [`crate::core::daw::clip::Clip`]s can point at the same `Track`
 //! (shared link: editing the track affects every occurrence).
-//! Tracks are split per instrument at import so that the `instrument`
-//! field is invariant for the track's lifetime — a change of instrument
-//! starts a new Track.
+//! The note variants are split per instrument at import so that the
+//! `instrument` field is invariant for the track's lifetime — a change
+//! of instrument starts a new Track.
 //!
-//! A Track has one of two shapes:
+//! A Track has one of three shapes:
 //!
 //! - [`Track::Notes`] — a vector of [`Cell`]s, one per row. The
 //!   classic tracker representation; covers manual editing and every
@@ -15,11 +15,42 @@
 //!   `(events, steps, rotation)` plus a single prototype cell. The
 //!   row resolver synthesises one cell per playback row from the
 //!   Bjorklund pattern.
+//! - [`Track::Audio`] — a recorded-audio clip (no note grid): a
+//!   [`Sample`] played from its placement and resampled to the output
+//!   rate. Its waveform is an [`AudioSource`] — owned inline, or a
+//!   reference into the module-level asset pool (RFC §4). The
+//!   DAW-generalization track kind; no tracker importer produces it.
 
 use crate::core::cell::Cell;
 use crate::core::fixed::fixed::Q15;
+use crate::core::sample::Sample;
 use alloc::{string::String, vec::Vec};
 use serde::{Deserialize, Serialize};
+
+/// RFC §4 — where a [`Track::Audio`] gets its recorded waveform.
+///
+/// This is the indirection that turns the per-instrument `Arc` sharing
+/// of §1A into a real **asset pool**: a track can either own its
+/// waveform inline or *reference* a shared entry in
+/// [`Module.assets`](crate::core::module::Module::assets) by index, so
+/// one recording placed many times on the timeline is stored once.
+///
+/// Resolution against the pool lives on `Module`
+/// ([`track_audio`](crate::core::module::Module::track_audio)) because
+/// only the module owns the pool; the track-level
+/// [`Track::audio_sample`] convenience resolves the [`Self::Inline`]
+/// case only.
+///
+/// `Inline` is the default shape every existing builder produces, so
+/// nothing references the pool until an editor interns an asset — the
+/// tracker corpus keeps an empty pool and a bit-identical render.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum AudioSource {
+    /// Waveform owned inline by the track.
+    Inline(Sample),
+    /// Reference into the shared `Module.assets` pool by index.
+    Pooled(usize),
+}
 
 /// One reusable cell sequence in the DAW layer.
 ///
@@ -86,6 +117,28 @@ pub enum Track {
         /// independently per pulse by the player.
         humanize_probability: Q15,
     },
+    /// RFC §3C — a **recorded-audio** track: a single PCM clip
+    /// (Arc-backed via §1A) played at its natural rate from its
+    /// placement on the timeline, rather than triggering instrument
+    /// notes. Additive — no tracker importer ever produces it, and the
+    /// note/cell playback path is untouched, so existing renders are
+    /// bit-identical. The actual audio-clip streaming/resampling in the
+    /// player is a separate subsystem (see the RFC §3C status note);
+    /// this is the data model.
+    Audio {
+        name: String,
+        muted: bool,
+        /// The recorded waveform — owned inline, or referenced from the
+        /// shared [`Module.assets`](crate::core::module::Module::assets)
+        /// pool (RFC §4). Reuses [`Sample`]'s Arc-backed PCM (§1A) and
+        /// optional loop window in either case.
+        source: AudioSource,
+        /// PCM sample rate in Hz. The player resamples from this to its
+        /// output rate. `0` means "already at the output rate" (no
+        /// resampling). `#[serde(default)]` keeps older modules readable.
+        #[serde(default)]
+        source_rate: u32,
+    },
 }
 
 impl Default for Track {
@@ -104,7 +157,9 @@ impl Track {
     #[inline]
     pub fn name(&self) -> &str {
         match self {
-            Track::Notes { name, .. } | Track::Euclidean { name, .. } => name,
+            Track::Notes { name, .. }
+            | Track::Euclidean { name, .. }
+            | Track::Audio { name, .. } => name,
         }
     }
 
@@ -112,7 +167,9 @@ impl Track {
     #[inline]
     pub fn name_mut(&mut self) -> &mut String {
         match self {
-            Track::Notes { name, .. } | Track::Euclidean { name, .. } => name,
+            Track::Notes { name, .. }
+            | Track::Euclidean { name, .. }
+            | Track::Audio { name, .. } => name,
         }
     }
 
@@ -121,6 +178,9 @@ impl Track {
     pub fn instrument(&self) -> usize {
         match self {
             Track::Notes { instrument, .. } | Track::Euclidean { instrument, .. } => *instrument,
+            // Audio tracks bind no instrument (they play raw PCM); the
+            // value is never used because they trigger no note cells.
+            Track::Audio { .. } => 0,
         }
     }
 
@@ -132,6 +192,7 @@ impl Track {
             Track::Notes { instrument, .. } | Track::Euclidean { instrument, .. } => {
                 *instrument = idx;
             }
+            Track::Audio { .. } => {}
         }
     }
 
@@ -139,7 +200,9 @@ impl Track {
     #[inline]
     pub fn muted(&self) -> bool {
         match self {
-            Track::Notes { muted, .. } | Track::Euclidean { muted, .. } => *muted,
+            Track::Notes { muted, .. }
+            | Track::Euclidean { muted, .. }
+            | Track::Audio { muted, .. } => *muted,
         }
     }
 
@@ -147,7 +210,9 @@ impl Track {
     #[inline]
     pub fn set_muted(&mut self, m: bool) {
         match self {
-            Track::Notes { muted, .. } | Track::Euclidean { muted, .. } => {
+            Track::Notes { muted, .. }
+            | Track::Euclidean { muted, .. }
+            | Track::Audio { muted, .. } => {
                 *muted = m;
             }
         }
@@ -166,7 +231,7 @@ impl Track {
     pub fn rows(&self) -> Option<&[Cell]> {
         match self {
             Track::Notes { rows, .. } => Some(rows),
-            Track::Euclidean { .. } => None,
+            Track::Euclidean { .. } | Track::Audio { .. } => None,
         }
     }
 
@@ -179,7 +244,7 @@ impl Track {
     pub fn rows_mut(&mut self) -> Option<&mut Vec<Cell>> {
         match self {
             Track::Notes { rows, .. } => Some(rows),
-            Track::Euclidean { .. } => None,
+            Track::Euclidean { .. } | Track::Audio { .. } => None,
         }
     }
 
@@ -227,6 +292,8 @@ impl Track {
                     Cell::default()
                 }
             }
+            // Audio tracks carry no cells.
+            Track::Audio { .. } => Cell::default(),
         }
     }
 
@@ -237,6 +304,97 @@ impl Track {
         match self {
             Track::Notes { rows, .. } => rows.len(),
             Track::Euclidean { steps, .. } => *steps as usize,
+            // Audio length is a duration on the timeline (clip.end_tick),
+            // not a row count.
+            Track::Audio { .. } => 0,
         }
+    }
+
+    /// `true` if this is a [`Self::Audio`] (recorded-PCM) track.
+    #[inline]
+    pub fn is_audio(&self) -> bool {
+        matches!(self, Track::Audio { .. })
+    }
+
+    /// The waveform source of a [`Self::Audio`] track (inline or a pool
+    /// reference); `None` for note/generator variants.
+    #[inline]
+    pub fn audio_source(&self) -> Option<&AudioSource> {
+        match self {
+            Track::Audio { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+
+    /// The **inline** recorded waveform of a [`Self::Audio`] track.
+    /// `None` for note/generator variants **and** for a track whose
+    /// `source` is [`AudioSource::Pooled`] — pooled audio can only be
+    /// resolved against the module's asset pool, so use
+    /// [`Module::track_audio`](crate::core::module::Module::track_audio)
+    /// for the pool-aware lookup.
+    #[inline]
+    pub fn audio_sample(&self) -> Option<&Sample> {
+        match self {
+            Track::Audio {
+                source: AudioSource::Inline(sample),
+                ..
+            } => Some(sample),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::cell::CellEvent;
+    use crate::core::fixed::units::{ChannelVolume, Finetune, Panning, Volume};
+    use crate::core::sample::{LoopType, Sample, SampleDataType};
+
+    fn audio_track() -> Track {
+        let sample = Sample {
+            name: "rec".into(),
+            relative_pitch: 0,
+            finetune: Finetune::default(),
+            volume: ChannelVolume::FULL,
+            default_note_volume: Volume::FULL,
+            panning: Panning::CENTER,
+            loop_flag: LoopType::No,
+            loop_start: 0,
+            loop_length: 0,
+            sustain_loop_flag: LoopType::No,
+            sustain_loop_start: 0,
+            sustain_loop_length: 0,
+            data: Some(SampleDataType::Mono8([0i8; 8].into())),
+        };
+        Track::Audio {
+            name: "rec".into(),
+            muted: false,
+            source: AudioSource::Inline(sample),
+            source_rate: 0,
+        }
+    }
+
+    #[test]
+    fn audio_track_api_is_additive_and_inert_on_cells() {
+        let mut t = audio_track();
+        assert!(t.is_audio());
+        assert!(!t.is_euclidean());
+        assert_eq!(t.name(), "rec");
+        assert!(!t.muted());
+        t.set_muted(true);
+        assert!(t.muted());
+        // No instrument binding, no cells, no row-based length.
+        assert_eq!(t.instrument(), 0);
+        t.set_instrument(3); // no-op
+        assert_eq!(t.instrument(), 0);
+        assert!(t.rows().is_none());
+        assert!(t.rows_mut().is_none());
+        assert_eq!(t.natural_length(), 0);
+        assert_eq!(t.cell_at(0).event, CellEvent::None);
+        assert_eq!(t.cell_at(99).event, CellEvent::None);
+        // The recorded waveform is reachable.
+        let s = t.audio_sample().expect("audio sample");
+        assert_eq!(s.len(), 8);
     }
 }

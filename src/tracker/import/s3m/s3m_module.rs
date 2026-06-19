@@ -218,16 +218,16 @@ impl S3mPcmInstr {
         let dst = if self.is_16bits() {
             let src = Self::convert_u8_to_u16_vec(&data[offset..offset + len * 2])?;
             if self.is_stereo() {
-                SampleDataType::Stereo16(self.convert_16bit_sample(src.as_slice()))
+                SampleDataType::Stereo16(self.convert_16bit_sample(src.as_slice()).into())
             } else {
-                SampleDataType::Mono16(self.convert_16bit_sample(src.as_slice()))
+                SampleDataType::Mono16(self.convert_16bit_sample(src.as_slice()).into())
             }
         } else {
             let src = &data[offset..offset + len];
             if self.is_stereo() {
-                SampleDataType::Stereo8(self.convert_8bit_sample(src))
+                SampleDataType::Stereo8(self.convert_8bit_sample(src).into())
             } else {
-                SampleDataType::Mono8(self.convert_8bit_sample(src))
+                SampleDataType::Mono8(self.convert_8bit_sample(src).into())
             }
         };
 
@@ -387,7 +387,13 @@ impl S3mOplInstr {
         let ph = PeriodHelper::new(FrequencyType::AmigaFrequencies, false);
         let mut i_opl = InstrOpl::default();
         i_opl.element.modulator = MdiOpl {
-            ksl: ((self.mod2 & 0b0100_0000) >> 6) | (self.mod2 >> 7),
+            // KSL is the full 2-bit field (OPL reg 0x40 bits 7-6), indexing
+            // the documented {off, 3, 1.5, 6} dB/oct key-scale ladder directly
+            // (`v>>6` selects the ladder entry, no bit-swap). The old `(bit6)|(bit7)`
+            // collapsed regs 1/2/3 all to 1, so KSL=2 lost ~2 dB and KSL=3
+            // ~4 dB of slope — silently over-driving FM modulators that use
+            // strong key-scaling (e.g. `in_the_face_of_danger.s3m` #3).
+            ksl: self.mod2 >> 6,
             multiple: self.mod0 & 0b0000_1111,
             feedback: self.mod10 >> 1,
             attack: self.mod4 >> 4,
@@ -402,7 +408,7 @@ impl S3mOplInstr {
             con: (self.mod10 & 0b0000_0001) != 0,
         };
         i_opl.element.carrier = MdiOpl {
-            ksl: ((self.car3 & 0b0100_0000) >> 6) | (self.car3 >> 7),
+            ksl: self.car3 >> 6, // full 2-bit KSL field (see modulator above)
             multiple: self.car1 & 0b0000_1111,
             feedback: self.mod10 >> 1, // no way for carrier
             attack: self.car5 >> 4,
@@ -538,7 +544,14 @@ impl S3mModule {
         s3m.header = S3mHeader::read(&mut r)?;
         let data = &ser_s3m_module[s..];
 
-        if s3m.header.sig1 != 0x1A || s3m.header.song_type != 0x10 || s3m.header.sig2 != "SCRM" {
+        // The authoritative signature is the `"SCRM"` magic at offset
+        // 0x2C plus the type byte (0x10 = ScreamTracker 3 module) at
+        // 0x1D. The byte at 0x1C (`sig1`) is only the DOS `type`-command
+        // EOF marker (0x1A) — purely cosmetic, and some real files
+        // (e.g. `strshine.s3m`) carry 0x00 there. Reference loaders
+        // (libopenmpt) key off `"SCRM"`, not the EOF byte, so we don't
+        // reject on `sig1`.
+        if s3m.header.song_type != 0x10 || s3m.header.sig2 != "SCRM" {
             return Result::Err(ImportError::InvalidMagic("Not an S3M module?"));
         }
 
@@ -616,13 +629,34 @@ impl S3mModule {
             }
             let data = &ser_s3m_module[start..];
             let len: usize = (data[0] as usize) | ((data[1] as usize) << 8);
-            if len < 2 || len > data.len() {
-                return Err(ImportError::OutOfRange("s3m pattern length"));
-            }
-            let data = &data[2..len];
+            // The 2-byte length field is the size of the packed body that
+            // *follows* it — it does NOT count the 2 length bytes (Schism
+            // `fmt/s3m.c`: `end = paraptr + len + 2`). The body is therefore
+            // `data[2..2 + len]`. The previous `data[2..len]` treated `len`
+            // as total-including-header, lopping the last 2 body bytes off
+            // every pattern: harmless when the tail was padding / trailing
+            // EOLs, but on a tightly-packed pattern (e.g. `classical
+            // favorites II` pattern 35) it truncated the final slot's effect
+            // parameter — an `A30` (set speed 48) read back as `A00`,
+            // dropping the speed change and de-syncing the whole song.
+            // The declared end may legitimately run past EOF on files whose
+            // last pattern is tail-truncated (e.g. ModArchive's `adlib.s3m`,
+            // 2 bytes short). Schism does NOT reject these: its decode loop
+            // bounds on `row < 64 && slurp_tell(fp) < end` *and* breaks with
+            // a "file truncated" warning the moment `slurp_getc` returns EOF
+            // (`fmt/s3m.c`), so it reads up to the lesser of `end` and EOF.
+            // We mirror that by clamping the body to the available bytes; the
+            // row decoder (`decode_pattern_slot`) already tolerates an event
+            // cut mid-record via its `k < packed_data.len()` guards.
+            let body_end = 2usize.saturating_add(len).min(data.len());
+            let data = &data[2..body_end];
             let mut d2 = data;
             let mut pattern: Vec<Vec<PatternSlot>> = vec![];
-            while !d2.is_empty() {
+            // Cap at 64 rows like Schism (`while (row < 64 && ...)`): the
+            // packed body is exactly 64 EOL-terminated rows, but bounding the
+            // decode keeps a malformed / over-long body from synthesising
+            // phantom rows past the S3M-fixed 64.
+            while !d2.is_empty() && pattern.len() < 64 {
                 let (pss, next) = Self::process_pattern_row(d2)?;
                 pattern.push(pss);
                 d2 = next;

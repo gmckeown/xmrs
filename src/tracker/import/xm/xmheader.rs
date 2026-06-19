@@ -122,7 +122,12 @@ impl XmHeader {
             number_of_channels,
             number_of_patterns,
             number_of_instruments,
-            flags: XmFlagType::try_from(flags_raw)
+            // Only bit 0 of the flags word is defined (0 = Amiga,
+            // 1 = linear frequency table); the upper 15 bits are
+            // reserved and some XM files in the wild leave junk there
+            // (e.g. 0x4000, 0x2020). FT2 and OpenMPT both read just
+            // `flags & 1`, so we mask rather than reject on the raw word.
+            flags: XmFlagType::try_from(flags_raw & 1)
                 .map_err(|_| ImportError::Other("XmHeader: invalid flags value"))?,
             default_tempo,
             default_bpm,

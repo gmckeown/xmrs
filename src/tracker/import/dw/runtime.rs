@@ -2,8 +2,8 @@
 
 //! David Whittaker replayer simulator.
 //!
-//! Walks the state machine described in spec §9 (the per-frame
-//! tick loop) and §10 (effect runtime semantics) without
+//! Walks the replayer state machine (the per-frame tick loop and
+//! the effect runtime semantics) without
 //! producing audio: instead the simulator emits a [`TickEvent`]
 //! stream that downstream layers turn into xmrs [`Cell`]s on a
 //! DAW timeline.
@@ -107,8 +107,8 @@ pub enum TickEvent {
     /// on the channel's `TrackPitch` lane.
     SlideStart { channel: u8, speed: i8, counter: u8 },
     /// Internal: the simulator emits this implicitly when a
-    /// note arrives that overwrites the slide state (per spec
-    /// §10.11, a new note resets `slide_enabled = false`). Lets
+    /// note arrives that overwrites the slide state (a new note
+    /// resets `slide_enabled = false`). Lets
     /// the DAW converter close the slide cleanly.
     SlideStop { channel: u8 },
     /// Per-frame pitch arpeggio offset (in semitones) on the
@@ -119,7 +119,8 @@ pub enum TickEvent {
     /// frame and adds the offset to the note's period-table *index*
     /// (semitone space, Ghidra `play_tick` held-note branch); the
     /// DAW converter turns the stream into a `TrackPitch`
-    /// `LaneKind::Points` curve of [`AutomationValue::Pitch`] points
+    /// `LaneKind::Points` curve of
+    /// [`AutomationValue::Pitch`](crate::core::daw::automation::AutomationValue::Pitch) points
     /// — the faithful, per-frame-continuous form the classic
     /// three-step `TrackEffect::Arpeggio` can't express.
     Arpeggio { channel: u8, semitones: i8 },
@@ -146,7 +147,7 @@ impl TickEvent {
 }
 
 /// Module-wide playback state — speed, delay, global transpose,
-/// fade. Mirrors `GlobalPlayingInfo` from spec §7 with the
+/// fade. Mirrors the replayer's `GlobalPlayingInfo` with the
 /// fields actually consulted by this simulator's first slice.
 #[derive(Debug, Clone)]
 pub struct GlobalState {
@@ -174,7 +175,7 @@ pub struct GlobalState {
     pub global_volume_fade_counter: u8,
 }
 
-/// State carried per channel between ticks (spec §8).
+/// State carried per channel between ticks.
 #[derive(Debug, Clone)]
 pub struct ChannelState {
     /// 0-based channel index (0..4). Used in the event log.
@@ -238,7 +239,7 @@ pub struct ChannelState {
     /// never get a `Clear` and the lane would stay armed forever.
     pub slide_active: bool,
     /// Position of the per-frame arpeggio pointer within the active
-    /// [`current_arpeggio`]'s offset list. The replayer advances it
+    /// `current_arpeggio`'s offset list. The replayer advances it
     /// one step every held frame and wraps at the terminator
     /// (Ghidra `play_tick` held-note branch, ptr `chan+0x648`); it
     /// is **not** reset by a new note, only when a fresh arpeggio is
@@ -414,7 +415,7 @@ impl<'a> Simulator<'a> {
         }
         self.frame = self.frame.saturating_add(1);
 
-        // Phase 1 — global delay ratchet (spec §9 phase 1). Ghidra
+        // Phase 1 — global delay ratchet. Ghidra
         // `play_tick` head is an 8-bit accumulator (`DAT_5ea +=
         // DAT_5e8`) that SKIPS the whole frame on overflow — a uniform
         // `delay/256` thinning of frames (xenon2 delay 20 → ~8.5%
@@ -429,7 +430,7 @@ impl<'a> Simulator<'a> {
         // net effect is a uniform tempo cut, which `to_module` folds
         // into BPM (`125 × (256 − delay) / 256`).
 
-        // Phase 2 — global volume fade (spec §9). `GlobalVolumeFade`
+        // Phase 2 — global volume fade. `GlobalVolumeFade`
         // (cmd 11) arms `global_volume_fade_speed`; here the master
         // volume steps down by 1 every `fade_speed` frames until it
         // reaches 0. Now that `global_volume` actually scales each
@@ -444,7 +445,7 @@ impl<'a> Simulator<'a> {
             }
         }
 
-        // Phase 4 — per-channel work (spec §9). Phase 3 (square
+        // Phase 4 — per-channel work. Phase 3 (square
         // waveform morph) is acknowledged in the state but its
         // processing is deferred.
         for i in 0..DW_NUM_CHANNELS {
@@ -698,7 +699,7 @@ impl<'a> Simulator<'a> {
                         if !self.advance_position(ch, out) {
                             return;
                         }
-                        // Whittaker semantics (§9.1): `EndOfTrack`
+                        // Whittaker semantics: `EndOfTrack`
                         // does not consume the tick — keep reading
                         // from the freshly loaded track.
                     }
@@ -803,7 +804,7 @@ impl<'a> Simulator<'a> {
                     None
                 };
                 // Sample/pitch encoding depends on the replayer
-                // family (spec §5.1):
+                // family:
                 //
                 // - **New player**: the byte is a direct period-
                 //   table index; the active sample is whatever the
@@ -817,15 +818,14 @@ impl<'a> Simulator<'a> {
                 //   *direct* full-range period index and the sample is
                 //   armed by a separate `SetSample` (0xC0 bracket) — the
                 //   new-player decode. `period_via_finetune` flags them.
-                let (sample_index, pitch_byte) = if matches!(
-                    self.module.variant,
-                    super::detect::DwVariant::Old
-                ) && !self.module.period_via_finetune
-                {
-                    (Some((n / 12) as u16), n % 12)
-                } else {
-                    (self.channels[ch].current_sample, n)
-                };
+                let (sample_index, pitch_byte) =
+                    if matches!(self.module.variant, super::detect::DwVariant::Old)
+                        && !self.module.period_via_finetune
+                    {
+                        (Some((n / 12) as u16), n % 12)
+                    } else {
+                        (self.channels[ch].current_sample, n)
+                    };
                 // Apply both transposes at note time. Ghidra
                 // trace at `Play+0x2C0..0x2C4`:
                 //   ADD.B (global_transpose, PC), D0b
@@ -897,7 +897,11 @@ impl<'a> Simulator<'a> {
                 // per-module volume-envelope threshold so a module
                 // that uses a non-canonical cascade (e.g. `0xB0/0xA0`
                 // only) indexes correctly.
-                let threshold = self.module.dispatcher.volume_envelope_threshold().unwrap_or(0xA0);
+                let threshold = self
+                    .module
+                    .dispatcher
+                    .volume_envelope_threshold()
+                    .unwrap_or(0xA0);
                 let idx = raw.saturating_sub(threshold) as u16;
                 if self.module.volume_bracket_is_pitch {
                     // 2-bracket modules (tetris): this bracket is a
@@ -916,12 +920,16 @@ impl<'a> Simulator<'a> {
             }
             DwTrackEvent::SetPitchArpeggio(raw) => {
                 // The `0x90..` dispatcher bracket arms a per-tick
-                // pitch arpeggio (spec §10.12). Resolve the 0-based
+                // pitch arpeggio. Resolve the 0-based
                 // arpeggio index from the per-module pitch-arpeggio
                 // threshold and stash it on the channel; the next
                 // `NoteOn` carries it to the DAW layer, which maps
                 // the offset cycle to `TrackEffect::Arpeggio`.
-                let threshold = self.module.dispatcher.pitch_arpeggio_threshold().unwrap_or(0x90);
+                let threshold = self
+                    .module
+                    .dispatcher
+                    .pitch_arpeggio_threshold()
+                    .unwrap_or(0x90);
                 let idx = raw.saturating_sub(threshold) as u16;
                 self.channels[ch].current_arpeggio = Some(idx);
                 // Re-arming resets the per-frame pointer to the start of
@@ -1012,7 +1020,7 @@ impl<'a> Simulator<'a> {
                 None // inline — slide accumulates alongside the note
             }
             DwTrackEvent::Effect8(arg) => {
-                // Per spec §10.7 the `Effect8` opcode is module-
+                // The `Effect8` opcode is module-
                 // dependent: it can mean half-volume toggle,
                 // global volume fade, or per-channel transpose,
                 // depending on which detect flags are set. The
@@ -1044,8 +1052,8 @@ impl<'a> Simulator<'a> {
             DwTrackEvent::Effect9(_arg) => {
                 // Counterpart to `Effect8`. On the channel-transpose
                 // family it's unused; on the global-volume family
-                // (tetris) it restores full master volume. Spec
-                // §10.7 lists other per-module bindings (half-volume
+                // (tetris) it restores full master volume. There
+                // are other per-module bindings (half-volume
                 // off, restart) we don't yet need on the corpus.
                 if !self.module.features.enable_channel_transpose {
                     self.global.global_volume = 64;

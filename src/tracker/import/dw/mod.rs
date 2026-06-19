@@ -23,8 +23,8 @@
 //! emulation oracle). See `FORMAT.md` in this directory for the
 //! long-form description and `oracle/` for the verification harness.
 
-pub mod detect;
 pub(crate) mod command_map;
+pub mod detect;
 pub mod dw_module;
 pub mod event;
 pub mod header;

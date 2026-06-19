@@ -66,6 +66,16 @@ pub enum AutomationTarget {
     /// (Slide). Keyed on Track index (vs. `ChannelVolume(u8)` which
     /// is keyed on the raw channel byte).
     TrackChannelVolume(u32),
+    /// RFC §3A — a parameter of an insert [`Device`] on a mixer
+    /// channel's chain (RFC §3B). `track` is the mixer-channel index,
+    /// `device` the slot in [`crate::core::module::Module::channel_inserts`]'s
+    /// chain, `param` the device-specific parameter id (e.g. `0` =
+    /// gain for [`Device::Gain`]). Driven by `Normalized` `Points`
+    /// values. No tracker importer emits it ⇒ inert by default.
+    ///
+    /// [`Device`]: crate::core::daw::device::Device
+    /// [`Device::Gain`]: crate::core::daw::device::Device::Gain
+    DeviceParam { track: u32, device: u16, param: u16 },
 }
 
 /// Typed value of an [`AutomationPoint`], matched against the
@@ -120,10 +130,13 @@ impl AutomationValue {
             ) | (
                 AutomationValue::Normalized(_),
                 AutomationTarget::TrackChannelVolume(_)
-            ) | (
-                AutomationValue::Pitch(_),
-                AutomationTarget::TrackPitch(_)
-            ) | (AutomationValue::Bpm(_), AutomationTarget::Bpm)
+            ) | (AutomationValue::Pitch(_), AutomationTarget::TrackPitch(_))
+                | (
+                    // RFC §3A — insert-device params are normalized scalars.
+                    AutomationValue::Normalized(_),
+                    AutomationTarget::DeviceParam { .. }
+                )
+                | (AutomationValue::Bpm(_), AutomationTarget::Bpm)
                 | (AutomationValue::Speed(_), AutomationTarget::Speed)
         )
     }
@@ -368,6 +381,38 @@ pub struct AutomationLane {
     /// useful from the editor for A/B comparisons without
     /// destroying the curve.
     pub enabled: bool,
+    /// RFC §2B — whether this lane's modulation drives only the
+    /// track's **live** voice ([`ModScope::Track`], the default and
+    /// the only value every tracker importer emits) or **every**
+    /// voice of the track, ghosts included ([`ModScope::Voice`], the
+    /// DAW / MPE path). `#[serde(default)]` so older serialised
+    /// modules round-trip to `Track`.
+    #[serde(default)]
+    pub scope: ModScope,
+    /// Which sub-song this lane belongs to. Automation lives in the
+    /// **per-sub-song** tick space (every sub-song's timeline restarts
+    /// at tick 0), so a lane is only consulted while its own sub-song
+    /// plays — otherwise sub-song N's curve would alias into sub-song
+    /// 0's identical tick window. `#[serde(default)]` → older modules
+    /// and single-song imports round-trip to sub-song `0`.
+    #[serde(default)]
+    pub song: u16,
+}
+
+/// RFC §2B — modulation scope: which voices of a track an
+/// [`AutomationLane`] drives.
+///
+/// `Track` (the default) reproduces the historical tracker behaviour
+/// — the channel's modulation reaches only the **live** voice, while
+/// detached NNA ghosts keep their frozen gain/pitch. `Voice` routes
+/// the same per-tick modulation bus to **every** voice on the track
+/// (live + ghosts), each folding it onto its own base — the
+/// per-voice / MPE path that RFC §2C feeds with per-note expression.
+#[derive(Default, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ModScope {
+    #[default]
+    Track,
+    Voice,
 }
 
 impl AutomationLane {
@@ -379,6 +424,8 @@ impl AutomationLane {
             target,
             kind: LaneKind::default(),
             enabled: true,
+            scope: ModScope::Track,
+            song: 0,
         }
     }
 
@@ -389,7 +436,17 @@ impl AutomationLane {
             target,
             kind,
             enabled: true,
+            scope: ModScope::Track,
+            song: 0,
         }
+    }
+
+    /// Builder: tag this lane with the sub-song it was extracted from.
+    /// The importers stamp this so the player only consults a lane
+    /// while its own sub-song is playing.
+    pub fn with_song(mut self, song: u16) -> Self {
+        self.song = song;
+        self
     }
 
     /// Read-only accessor onto a Points lane's points.

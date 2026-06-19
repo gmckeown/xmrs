@@ -1,20 +1,46 @@
 [package]
 name = "xmrs"
-version = "0.13.2"
+version = "0.14.0"
 edition = "2021"
-description = "A library to edit SoundTracker data with pleasure "
+description = "Read, edit and serialize SoundTracker music with pleasure — MOD/XM/S3M/IT/DW import plus SID & OPL chip synthesis, no_std."
 license = "MIT"
 authors = ["Sebastien Bechet"]
 documentation = "https://docs.rs/xmrs"
 repository = "https://codeberg.org/sbechet/xmrs"
 readme = "README.md"
+# Internal design/RE notes (RFCs, format studies, oracle baselines) live next to
+# the code they document but are not shipped to downstream consumers — keep the
+# published tarball to source + top-level README. (`README.md` is at the crate
+# root, not under `src/`, so it is unaffected.)
+exclude = [
+    "src/**/*.md",
+    # DW Paula-oracle dev/RE tooling (Ghidra script, capture/diff scripts,
+    # hand-RE'd entry-point table) — kept in-tree as provenance for the
+    # importer's fidelity work, but not part of the build; never ships downstream.
+    "src/tracker/import/dw/oracle/",
+    # Integration tests + their fixtures are run from the repo, never by
+    # downstream consumers of the published crate — don't bloat the tarball.
+    "tests/",
+]
 
-keywords = ["xm", "mod", "s3m", "it", "soundtracker"]
+keywords = ["soundtracker", "chiptune", "sid", "tracker", "music"]
 categories = ["multimedia::audio", "embedded", "no-std"]
 
 [dependencies]
 clap = { version = "4.5", optional = true, features = ["cargo", "derive"] }
-serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
+# `rc` enables `Serialize`/`Deserialize` for `Arc<[T]>` (the shared,
+# immutable PCM payload behind `SampleDataType` — see sample.rs). It
+# serialises transparently as a plain sequence, so the on-disk repr is
+# byte-identical to the former `Vec<T>`; on read each `Arc` deserialises
+# to its own allocation (serde does not reconstruct shared identity),
+# which only costs the import-time dedup, never correctness.
+serde = { version = "1.0", default-features = false, features = ["derive", "alloc", "rc"] }
+# Cycle-accurate MOS 6581/8580 SID emulator, pulled in only by `import_sid`
+# (its `dep:sidera` gate below). `no_std`, integer-only, no transitive deps in
+# its default feature set — drives `generators::sid` (the runtime counterpart
+# of `InstrSid`), replacing the old static SID wavetables. 1.0.1 is the first
+# release carrying `Sid::clock_with_voices`, the per-voice routing hook.
+sidera = { version = "1.0.1", optional = true, default-features = false }
 
 [features]
 # `std` and `import` are on by default: the common case is a
@@ -72,8 +98,9 @@ import_xm  = []
 import_s3m = []
 # Impulse Tracker IT.
 import_it  = []
-# Commodore 64 SID (MOS6581).
-import_sid = []
+# Commodore 64 SID (MOS6581/8580). Pulls in `sidera`, the cycle-accurate
+# emulator that backs `generators::sid` at playback.
+import_sid = ["dep:sidera"]
 # David Whittaker custom Amiga player format (`.dw`). The file is a
 # self-contained 68000 binary with embedded music data; detection
 # extracts a small set of init-time constants from the replayer code
@@ -118,6 +145,14 @@ required-features = ["std", "import_sid"]
 [[example]]
 name = "inspect_dw"
 required-features = ["std", "import_dw"]
+
+[[example]]
+name = "it_vst_census"
+required-features = ["std", "import_it"]
+
+[[example]]
+name = "it_dmo_probe"
+required-features = ["std", "import_it"]
 
 [profile.release]
 strip = true

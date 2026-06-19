@@ -675,6 +675,11 @@ impl ItModule {
             // Tracker formats wrap as a whole (song_loop_to); no
             // per-lane loops.
             channel_loops: alloc::vec::Vec::new(),
+            channel_inserts: alloc::vec::Vec::new(),
+            buses: alloc::vec::Vec::new(),
+            channel_sends: alloc::vec::Vec::new(),
+            master_chain: crate::core::daw::device::DeviceChain::default(),
+            assets: alloc::vec::Vec::new(),
         };
 
         let mut im = ImportMemory::default();
@@ -754,6 +759,11 @@ impl ItModule {
             }
         }
         crate::tracker::import::build::build_timeline_layer(&mut module, &pattern_order, &pattern);
+        // Author intent: project the IT/MPTM mix-plugin table onto native
+        // device insert chains so the module plays *with* its effects, the
+        // way the author mixed it. No-op (and bit-identical) for the common
+        // case of a module without plugins; `mix_plugins` is preserved.
+        super::it_plugin_convert::convert_mix_plugins_to_devices(&mut module);
         module
     }
 }

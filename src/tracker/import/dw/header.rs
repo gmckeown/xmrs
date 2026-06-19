@@ -3,11 +3,11 @@
 //! Parsed data structures lifted out of a `.dw` payload.
 //!
 //! The shapes here mirror the runtime layout that the replayer
-//! walks; field names follow the structural spec
-//! `whittaker-dw-format.md` (repo root) and `FORMAT.md` (this
-//! directory). None of the fields carry endianness: the importer
-//! reads them big-endian and stores native integers.
+//! walks; field names follow `FORMAT.md` (this directory, the
+//! canonical reference). None of the fields carry endianness: the
+//! importer reads them big-endian and stores native integers.
 
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 /// Number of Paula channels — fixed at 4 on every Amiga model
@@ -16,7 +16,7 @@ use alloc::vec::Vec;
 pub const DW_NUM_CHANNELS: usize = 4;
 
 /// Sub-song descriptor lifted from the `sub_song_list_offset`
-/// header (spec §4.1). One sub-song per module is the rule for
+/// header. One sub-song per module is the rule for
 /// every Whittaker score we've inspected; the spec allows multiple
 /// but the on-disk layout makes the count implicit, so we expose a
 /// single entry and let the caller cope when (and if) a multi-song
@@ -24,7 +24,7 @@ pub const DW_NUM_CHANNELS: usize = 4;
 #[derive(Debug, Clone)]
 pub struct DwSubSong {
     /// Frames between successive command reads on every channel
-    /// (the canonical "speed" of the replayer; spec §9 phase 4).
+    /// (the canonical "speed" of the replayer).
     pub speed: u8,
 
     /// Optional ratchet for `enable_delay_counter` builds —
@@ -42,7 +42,7 @@ pub struct DwSubSong {
     pub channel_position_offsets: [u32; DW_NUM_CHANNELS],
 }
 
-/// One channel's position list (spec §4.2) — an ordered sequence
+/// One channel's position list — an ordered sequence
 /// of track references. Each entry is the absolute file offset of
 /// a track byte stream; the top bit (15 for new-player u16 entries,
 /// 31 for qball-era u32 entries) marks a backward loop into the
@@ -85,7 +85,7 @@ impl DwPositionList {
 /// position-list reference and its `EndOfTrack` command (`0x80`),
 /// inclusive of the terminator. Notes (`0x00..=0x7F`) and
 /// commands (`0x80..=0xFF`) are stored verbatim; the runtime tick
-/// (spec §9) decodes them into Paula writes.
+/// decodes them into Paula writes.
 ///
 /// The same content is also available pre-decoded in
 /// [`Self::events`] for clients that don't want to re-walk the
@@ -161,7 +161,16 @@ pub struct DwSample {
     pub transpose: i8,
 
     /// PCM data, 8-bit signed. One byte per sample frame.
-    pub pcm: Vec<i8>,
+    ///
+    /// Stored behind an [`Arc<[i8]>`](alloc::sync::Arc) (RFC §1A — the
+    /// shared audio pool): a DW synth bank derives dozens of
+    /// instruments (one per `(sample, arpeggio, envelope)` combo) from
+    /// the same handful of real samples, and identical PCM is
+    /// deduplicated to a single allocation at parse time. Every
+    /// `sample_to_instrument` rebuild then clones a cheap `Arc` handle
+    /// instead of copying the whole buffer (e.g. *back to the future*:
+    /// 60 instruments → 16 PCM allocations, not 60).
+    pub pcm: Arc<[i8]>,
 }
 
 impl DwSample {
@@ -216,7 +225,7 @@ pub struct DwVolumeEnvelope {
 }
 
 /// A per-channel **pitch arpeggio** — the byte stream consumed by
-/// the `0x90..` dispatcher bracket (spec §4.4 / §10.12). Each
+/// the `0x90..` dispatcher bracket. Each
 /// entry is a signed semitone offset added to the current note's
 /// period-table index; the replayer cycles one entry per tick and
 /// loops back to the start when it passes the terminator (the

@@ -149,6 +149,7 @@ fn push_per_track_lanes(
     lanes: &mut Vec<AutomationLane>,
     per_track_rows: &PerTrackRows,
     quirks: &PlaybackQuirks,
+    song: u16,
 ) {
     let push_lane = |lanes: &mut Vec<AutomationLane>, target, kind: LaneKind| {
         let non_empty = match &kind {
@@ -158,7 +159,7 @@ fn push_per_track_lanes(
             LaneKind::Glide { events } => !events.is_empty(),
         };
         if non_empty {
-            lanes.push(AutomationLane::new_with_kind(target, kind));
+            lanes.push(AutomationLane::new_with_kind(target, kind).with_song(song));
         }
     };
 
@@ -248,7 +249,13 @@ pub fn extract_per_track_lanes_from_patterns(
     clips: &crate::core::daw::sorted_clips::SortedClips,
     quirks: &PlaybackQuirks,
 ) -> Vec<AutomationLane> {
-    let mut per_track_rows: PerTrackRows = alloc::collections::BTreeMap::new();
+    // Group rows per **sub-song**: each sub-song's timeline restarts at
+    // tick 0, so a Track played in two sub-songs yields two independent
+    // tick streams. Merging them (the old single-map behaviour) made the
+    // resulting lane non-monotonic and let one sub-song's modulation
+    // alias into another's identical tick window.
+    let mut per_song: alloc::collections::BTreeMap<u16, PerTrackRows> =
+        alloc::collections::BTreeMap::new();
 
     for entry in &timeline_map.entries {
         let Some(pat) = pattern.get(entry.pattern_idx as usize) else {
@@ -261,16 +268,19 @@ pub fn extract_per_track_lanes_from_patterns(
             let Some((_, clip)) = clips.active_at(entry.song, ch_idx as u8, entry.tick) else {
                 continue;
             };
-            per_track_rows.entry(clip.track).or_default().push((
-                entry.tick,
-                tiu.note,
-                tiu.effects.clone(),
-            ));
+            per_song
+                .entry(entry.song)
+                .or_default()
+                .entry(clip.track)
+                .or_default()
+                .push((entry.tick, tiu.note, tiu.effects.clone()));
         }
     }
 
     let mut lanes = Vec::new();
-    push_per_track_lanes(&mut lanes, &per_track_rows, quirks);
+    for (song, per_track_rows) in &per_song {
+        push_per_track_lanes(&mut lanes, per_track_rows, quirks, *song);
+    }
     lanes
 }
 
@@ -284,7 +294,8 @@ pub fn extract_per_track_lanes_from_tius(
     quirks: &PlaybackQuirks,
 ) -> Vec<AutomationLane> {
     let mut lanes = Vec::new();
-    push_per_track_lanes(&mut lanes, per_track_rows, quirks);
+    // Track-native importers (SID) currently project one sub-song.
+    push_per_track_lanes(&mut lanes, per_track_rows, quirks, 0);
     lanes
 }
 
@@ -292,43 +303,52 @@ pub fn extract_per_track_lanes_from_tius(
 /// Speed Points / GlobalVolume Points / GlobalVolume Slide) extracted
 /// from `rows`. Pushes nothing for classes whose extractor returned
 /// empty.
-fn push_song_lanes(lanes: &mut Vec<AutomationLane>, rows: &[GlobalRowVisit<'_>]) {
+fn push_song_lanes(lanes: &mut Vec<AutomationLane>, rows: &[GlobalRowVisit<'_>], song: u16) {
     let bpm_points = extract_bpm_points(rows);
     if !bpm_points.is_empty() {
-        lanes.push(AutomationLane::new_with_kind(
-            AutomationTarget::Bpm,
-            LaneKind::Points(bpm_points),
-        ));
+        lanes.push(
+            AutomationLane::new_with_kind(AutomationTarget::Bpm, LaneKind::Points(bpm_points))
+                .with_song(song),
+        );
     }
     let bpm_slides = extract_bpm_slide_events(rows);
     if !bpm_slides.is_empty() {
-        lanes.push(AutomationLane::new_with_kind(
-            AutomationTarget::Bpm,
-            LaneKind::Slide { events: bpm_slides },
-        ));
+        lanes.push(
+            AutomationLane::new_with_kind(
+                AutomationTarget::Bpm,
+                LaneKind::Slide { events: bpm_slides },
+            )
+            .with_song(song),
+        );
     }
     let speed_points = extract_speed_points(rows);
     if !speed_points.is_empty() {
-        lanes.push(AutomationLane::new_with_kind(
-            AutomationTarget::Speed,
-            LaneKind::Points(speed_points),
-        ));
+        lanes.push(
+            AutomationLane::new_with_kind(AutomationTarget::Speed, LaneKind::Points(speed_points))
+                .with_song(song),
+        );
     }
     let gvol_points = extract_global_volume_points(rows);
     if !gvol_points.is_empty() {
-        lanes.push(AutomationLane::new_with_kind(
-            AutomationTarget::GlobalVolume,
-            LaneKind::Points(gvol_points),
-        ));
+        lanes.push(
+            AutomationLane::new_with_kind(
+                AutomationTarget::GlobalVolume,
+                LaneKind::Points(gvol_points),
+            )
+            .with_song(song),
+        );
     }
     let gvol_slides = extract_global_volume_slide_events(rows);
     if !gvol_slides.is_empty() {
-        lanes.push(AutomationLane::new_with_kind(
-            AutomationTarget::GlobalVolume,
-            LaneKind::Slide {
-                events: gvol_slides,
-            },
-        ));
+        lanes.push(
+            AutomationLane::new_with_kind(
+                AutomationTarget::GlobalVolume,
+                LaneKind::Slide {
+                    events: gvol_slides,
+                },
+            )
+            .with_song(song),
+        );
     }
 }
 
@@ -345,7 +365,10 @@ pub fn extract_song_lanes_from_patterns(
     pattern: &[crate::tracker::import::build::Pattern],
     timeline_map: &crate::core::daw::timeline::TimelineMap,
 ) -> Vec<AutomationLane> {
-    let mut song_rows_owned: Vec<(u32, Vec<SongLevelEffect>)> = Vec::new();
+    // Per **sub-song** (see `extract_per_track_lanes_from_patterns`):
+    // Bpm / Speed / GlobalVolume live in each sub-song's own tick space.
+    let mut per_song: alloc::collections::BTreeMap<u16, Vec<(u32, Vec<SongLevelEffect>)>> =
+        alloc::collections::BTreeMap::new();
     for entry in &timeline_map.entries {
         let pat = match pattern.get(entry.pattern_idx as usize) {
             Some(p) => p,
@@ -357,19 +380,24 @@ pub fn extract_song_lanes_from_patterns(
         };
         for tiu in row {
             if !tiu.song_level.is_empty() {
-                song_rows_owned.push((entry.tick, tiu.song_level.clone()));
+                per_song
+                    .entry(entry.song)
+                    .or_default()
+                    .push((entry.tick, tiu.song_level.clone()));
             }
         }
     }
-    let song_rows: Vec<GlobalRowVisit<'_>> = song_rows_owned
-        .iter()
-        .map(|(t, ge)| GlobalRowVisit {
-            tick: *t,
-            effects: ge.as_slice(),
-        })
-        .collect();
     let mut lanes = Vec::new();
-    push_song_lanes(&mut lanes, &song_rows);
+    for (song, song_rows_owned) in &per_song {
+        let song_rows: Vec<GlobalRowVisit<'_>> = song_rows_owned
+            .iter()
+            .map(|(t, ge)| GlobalRowVisit {
+                tick: *t,
+                effects: ge.as_slice(),
+            })
+            .collect();
+        push_song_lanes(&mut lanes, &song_rows, *song);
+    }
     lanes
 }
 

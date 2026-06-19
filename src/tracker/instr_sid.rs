@@ -16,9 +16,11 @@ use serde::{Deserialize, Serialize};
 /// - voice2: from voice1
 #[derive(Default, Serialize, Deserialize, Copy, Clone, Debug)]
 pub struct SidVoice {
-    /// frequency Voice
+    /// Oscillator frequency, raw 16-bit SID register (0..65535).
+    /// Hz ≈ `freq * Fclk / 16777216` (Fclk ≈ 985248 PAL / 1022727 NTSC).
     pub freq: u16,
-    /// pulse wave duty cycle
+    /// Pulse duty cycle, 12-bit (0..4095); 2048 = 50 % square.
+    /// Only audible when `ctrl_pulse` is set.
     pub pw: u16,
     pub ctrl_noise: bool,    // 7
     pub ctrl_pulse: bool,    // 6
@@ -30,9 +32,13 @@ pub struct SidVoice {
     /// synchronize with (2->0, 0->1, 1->2)
     pub ctrl_sync: bool, // 1
     pub ctrl_gate: bool,     // 0
-    /// attack (0..15), decay (0..15)
+    /// Packed envelope register `$D405`: attack = high nibble (`ad >> 4`,
+    /// 0..15), decay = low nibble (`ad & 0x0F`, 0..15). A GUI must split
+    /// the two nibbles into separate sliders.
     pub ad: u8,
-    /// sustain (0..15), release (0..15)
+    /// Packed envelope register `$D406`: sustain = high nibble (`sr >> 4`,
+    /// 0..15 level), release = low nibble (`sr & 0x0F`, 0..15). A GUI must
+    /// split the two nibbles into separate sliders.
     pub sr: u8,
 }
 
@@ -115,6 +121,7 @@ impl SidVoice {
 /// MOS6581 SID Instrument
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct InstrSid {
+    /// The three SID oscillator voices (sync/ring links are fixed: see above).
     pub voice: [SidVoice; 3],
     pub fc: u16, // Filter cutoff frequency (0..2047) - Used by (Low, Band, High)Pass
     pub filter_resonance: u8, // u4 (0..15) - Amount of feedback a filter receives from itself

@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-"""Corpus-wide strike/fidelity audit: every oracle/corpus/<stem>.csv vs
+"""Corpus-wide strike/fidelity audit: every <DW_ORACLE_CORPUS>/<stem>.csv vs
 its player trace /tmp/ptr/<stem>.csv, ranked.
+
+The golden store lives OUTSIDE the crate (default ~/Documents/dw-oracle-corpus,
+override with $DW_ORACLE_CORPUS) — see diff_baseline.CORPUS.
 
 Build the inputs first:
     cargo run --release --features=demo --example dw_oracle_args > /tmp/dw_args.tsv
-    bash oracle/capture_all.sh                       # → oracle/corpus/*.csv
+    bash oracle/capture_all.sh                       # → $DW_ORACLE_CORPUS/*.csv
     # player traces:
-    for g in oracle/corpus/*.csv; do s=$(basename "$g" .csv); \
+    for g in "$DW_ORACLE_CORPUS"/*.csv; do s=$(basename "$g" .csv); \
       target/release/examples/dw_oracle_trace "$HOME/Music/dw/$s.dw" 2000 "/tmp/ptr/$s.csv"; done
 
 Then:  python3 oracle/audit.py
@@ -23,7 +26,7 @@ import diff_baseline as db
 
 PTR = "/tmp/ptr"
 rows = []
-for g in sorted(glob.glob(os.path.join(HERE, "corpus", "*.csv"))):
+for g in sorted(glob.glob(os.path.join(db.CORPUS, "*.csv"))):
     stem = os.path.basename(g)[:-4]
     p = os.path.join(PTR, f"{stem}.csv")
     if not os.path.exists(p):

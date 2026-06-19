@@ -173,18 +173,25 @@ impl AmigaModule {
     /// overwhelming probability — across 15 sample slots
     /// `volume ≤ 64` × `finetune ≤ 15` is on the order of 1e-27.
     fn validate_structure(data: &[u8], variant: AmigaVariant) -> Result<(), ImportError> {
-        let (num_samples, num_tracks, header_size) = match variant {
-            AmigaVariant::Fifteen => (15usize, 4u8, MOD_15_HEADER_SIZE),
-            AmigaVariant::ThirtyOne { num_tracks } => (31, num_tracks, MOD_31_HEADER_SIZE),
+        let (num_samples, num_tracks, header_size, tagged) = match variant {
+            AmigaVariant::Fifteen => (15usize, 4u8, MOD_15_HEADER_SIZE, false),
+            AmigaVariant::ThirtyOne { num_tracks } => (31, num_tracks, MOD_31_HEADER_SIZE, true),
         };
 
         if data.len() < header_size {
             return Err(ImportError::Other("File too short for MOD header"));
         }
 
-        // Title bytes 0..20 must be printable ASCII or NUL —
-        // pre-rejects nearly all random binary.
-        if !is_clean_text(&data[..20]) {
+        // Name-field cleanliness is *only* load-bearing for the
+        // untagged 15-sample variant. A recognised 4-byte tag at
+        // 0x438 (`M.K.`, `FLT4`, `8CHN`, …) is already a ~1-in-2³²
+        // signature, and real scene 31-sample MODs routinely leave
+        // control bytes (0x01..=0x1F) in sample-name slots — strings
+        // like effect cues or just uninitialised memory — so demanding
+        // clean text there spuriously rejects genuine files. With no
+        // tag the 15-sample layout has no anchor, so its names stay
+        // load-bearing evidence.
+        if !tagged && !is_clean_text(&data[..20]) {
             return Err(ImportError::Other("MOD title is not ASCII"));
         }
 
@@ -197,17 +204,24 @@ impl AmigaModule {
         let mut total_sample_bytes: u32 = 0;
         for i in 0..num_samples {
             let off = 20 + i * AMIGA_SAMPLE_RECORD_SIZE;
-            if !is_clean_text(&data[off..off + 22]) {
+            if !tagged && !is_clean_text(&data[off..off + 22]) {
                 return Err(ImportError::Other("MOD sample name is not ASCII"));
             }
             let length_div2 = u16::from_be_bytes([data[off + 22], data[off + 23]]);
-            let finetune = data[off + 24];
-            let volume = data[off + 25];
-            if finetune > 0x0F {
-                return Err(ImportError::Other("MOD sample finetune > 15"));
-            }
-            if volume > 0x40 {
-                return Err(ImportError::Other("MOD sample volume > 64"));
+            // The finetune ≤ 15 / volume ≤ 64 range checks are evidence
+            // for the untagged 15-sample path only. Real tagged MODs do
+            // carry out-of-spec bytes here — ProTracker masks finetune
+            // to its low nibble (`to_sample` does the same `<< 4`), so a
+            // slot with finetune 0x20 is a valid file, not garbage.
+            if !tagged {
+                let finetune = data[off + 24];
+                let volume = data[off + 25];
+                if finetune > 0x0F {
+                    return Err(ImportError::Other("MOD sample finetune > 15"));
+                }
+                if volume > 0x40 {
+                    return Err(ImportError::Other("MOD sample volume > 64"));
+                }
             }
             total_sample_bytes = total_sample_bytes.saturating_add(2 * length_div2 as u32);
         }
@@ -220,26 +234,43 @@ impl AmigaModule {
 
         let positions_off = song_length_off + 2;
         let positions = &data[positions_off..positions_off + POSITION_TABLE_SIZE];
-        // Only the first `song_length` entries are meaningful; the
-        // rest is don't-care padding written as zeros by every
-        // historical tracker but liable to be garbage in fuzz input.
-        let max_pos = *positions[..song_length as usize].iter().max().unwrap_or(&0);
+        // `load` reads `1 + max(all 128 positions)` patterns (via
+        // `get_number_of_patterns`), so the safety check below must use
+        // that same maximum, not just the first `song_length` entries —
+        // otherwise a high padding byte could make `load` read past the
+        // file. Historical trackers zero the padding, so this is the
+        // same value in practice, but matching `load` exactly keeps the
+        // pattern read provably in-bounds.
+        let max_pos = *positions.iter().max().unwrap_or(&0);
         if max_pos >= 128 {
             return Err(ImportError::Other("MOD position byte out of range"));
         }
 
-        // The decisive check: every byte the loader would read must
-        // actually be present in the file. Headers + patterns +
-        // sample data, summed exactly the way the rest of `load`
-        // walks them. Random blobs almost never satisfy this.
+        // Patterns are read with direct 4-byte indexing in `load`, so
+        // every pattern byte MUST be present or the parse would panic;
+        // this is a hard requirement for both variants. Sample data,
+        // by contrast, is clamped to the bytes that remain (the
+        // COUNTRY.MOD hack in `load`), so a file whose final sample is
+        // truncated still loads cleanly — common in the wild.
         let pattern_size: u32 =
             num_tracks as u32 * AMIGA_ROWS_PER_PATTERN as u32 * AMIGA_SLOT_SIZE as u32;
         let num_patterns: u32 = max_pos as u32 + 1;
-        let expected: u32 = (header_size as u32)
-            .saturating_add(pattern_size.saturating_mul(num_patterns))
-            .saturating_add(total_sample_bytes);
-        if expected as usize > data.len() {
+        let patterns_end: u32 =
+            (header_size as u32).saturating_add(pattern_size.saturating_mul(num_patterns));
+        if patterns_end as usize > data.len() {
             return Err(ImportError::Other("MOD file shorter than declared content"));
+        }
+
+        // For the untagged 15-sample variant the full size equation is
+        // the main evidence it's really a MOD (no tag to anchor on), so
+        // there we additionally require all declared sample bytes to be
+        // present. The tagged variant relies on its tag instead and
+        // tolerates a truncated tail.
+        if !tagged {
+            let expected = patterns_end.saturating_add(total_sample_bytes);
+            if expected as usize > data.len() {
+                return Err(ImportError::Other("MOD file shorter than declared content"));
+            }
         }
 
         Ok(())
@@ -396,7 +427,9 @@ impl AmigaModule {
         let mut instr: Instrument = Instrument::default();
 
         let mut sample: Sample = self.samples[sample_index].to_sample();
-        sample.data = Some(SampleDataType::Mono8(self.audio[sample_index].clone()));
+        sample.data = Some(SampleDataType::Mono8(
+            self.audio[sample_index].clone().into(),
+        ));
 
         instr.name = sample.name.clone();
 
@@ -425,12 +458,16 @@ impl AmigaModule {
         module.quirks = crate::tracker::profiles::pt();
         module.origin = Some(crate::tracker::format::ModuleFormat::Mod);
         module.frequency_type = FrequencyType::AmigaFrequencies;
-        // MOD has no mix-volume byte. Schism initialises the mixer
-        // chain at `mixing_volume = 48` (`csndfile.c:55`,
-        // `fmt/xm.c:885`) — same default as XM. We mirror that so
-        // every format feeds the player's mixer with the same
-        // pre-attenuated level.
-        module.mix_volume = Volume::from_ratio(48, 128);
+        // MOD has no mix-volume byte; this is a convention constant
+        // matching ProTracker's output level. Calibrated against
+        // **pt2-clone** (the cycle-accurate ProTracker reproduction):
+        // its Paula mixer normalises 4 voices as `NORM_FACTOR(2.0) ×
+        // 32768/4`, so one full voice peaks at 16384 (−6 dBFS) — half
+        // of our full-scale accumulator, i.e. exactly 0.5. The empirical
+        // render (median −2.6 dB below pt2 at the old 48/128 on
+        // env-corr-clean modules) confirms 48/128 × 10^(2.6/20) ≈ 0.5.
+        // See `tracker/import/it/BASELINE.md`.
+        module.mix_volume = Volume::from_ratio(64, 128);
         module.default_tempo = 6;
         module.default_bpm = 125;
         // MOD restart byte (offset 0x3B7). Soundtracker / Noisetracker

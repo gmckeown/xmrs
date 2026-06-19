@@ -108,12 +108,12 @@ impl XmSample {
             // 16 bits data
             let sample = u8_slice_to_vec_u16(slice);
             let sample2 = delta16_to_sample(sample);
-            SampleDataType::Mono16(sample2)
+            SampleDataType::Mono16(sample2.into())
         } else {
             // 8 bits data
             let sample = slice.to_vec();
             let sample2 = delta8_to_sample(sample);
-            SampleDataType::Mono8(sample2)
+            SampleDataType::Mono8(sample2.into())
         };
         self.data = Some(d3);
 
@@ -171,7 +171,7 @@ impl XmSample {
 
         let data: SampleDataType = match &self.data {
             Some(d) => d.clone(),
-            None => SampleDataType::Mono8(vec![]),
+            None => SampleDataType::Mono8(vec![].into()),
         };
 
         Sample {

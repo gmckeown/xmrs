@@ -18,13 +18,15 @@ pub struct MdiOpl {
     pub ksl: u8,
     /// 4 bits, Frequency multiplier (OPL: 0x20, bits 0-3)
     pub multiple: u8,
-    /// 3 bits [op 0 only, op 1 ignored] (OPL: 0xC0, bits 1-3)
+    /// 3 bits, modulator self-feedback amount, 0=none..7=max
+    /// [channel-level: op 0 only, op 1 ignored] (OPL: 0xC0, bits 1-3)
     pub feedback: u8,
     /// 4 bits (OPL: 0x60, bits 4-7)
     pub attack: u8,
     /// 4 bits (OPL: 0x80, bits 4-7)
     pub sustain: u8,
-    /// Envelope gain (OPL: 0x20, bit 5)
+    /// EG type / sustaining envelope: true = level held at sustain
+    /// while keyed, false = percussive (decays to 0) (OPL: 0x20, bit 5)
     pub eg: bool,
     /// 4 bits (OPL: 0x60, bits 0-3)
     pub decay: u8,
@@ -36,25 +38,33 @@ pub struct MdiOpl {
     pub am: bool,
     /// Frequency vibrato (OPL: 0x20, bit 6)
     pub vib: bool,
-    /// Key scaling/envelope rate (OPL: 0x20, bit 4)
+    /// Key-scaling rate: true = envelope rates scale with pitch (OPL: 0x20, bit 4)
     pub ksr: bool,
-    /// Key scaling/envelope rate (OPL: 0x20, bit 4)
+    /// Connection / synthesis type: false = FM (modulator → carrier),
+    /// true = additive (both operators sum to output).
+    /// [channel-level: op 0 only, op 1 ignored] (OPL: 0xC0, bit 0)
     pub con: bool,
 }
 
 #[derive(Default, Serialize, Deserialize, Copy, Clone, Debug)]
 pub struct MdiInstr {
-    pub modulator: MdiOpl, // Register values for the Modulator operator (op 0)
-    pub carrier: MdiOpl,   // Register values for the Carriere operator (op 1)
-    pub modulator_wave_select: u8, // (OPL: 0xE0)
-    pub carrier_wave_select: u8, // (OPL: 0xE0)
+    /// Register values for the modulator operator (op 0)
+    pub modulator: MdiOpl,
+    /// Register values for the carrier operator (op 1)
+    pub carrier: MdiOpl,
+    /// Modulator waveform shape, 0..7 (OPL: 0xE0)
+    pub modulator_wave_select: u8,
+    /// Carrier waveform shape, 0..7 (OPL: 0xE0)
+    pub carrier_wave_select: u8,
 }
 
 /// Yamaha OPL with module compatibility
 #[derive(Default, Serialize, Deserialize, Copy, Clone, Debug)]
 pub struct InstrOpl {
+    /// The two-operator FM voice (modulator + carrier + wave selects)
     pub element: MdiInstr,
-    pub volume: u8, // 0-63
+    /// Instrument output volume, 0..63 (0 = silent, 63 = loudest)
+    pub volume: u8,
     /// [-96..95] with 0 <=> C-4
     pub relative_pitch: i8,
     /// Sub-semitone detune, Q1.15. In tracker convention,

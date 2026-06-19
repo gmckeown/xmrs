@@ -281,8 +281,7 @@ fn walk_one_song(
                 // PT clears the shared break position in its loop branch,
                 // so a same-row loop-jump + break lands at row 0 rather
                 // than the break target; FT2 keeps the target.
-                let landing = if module.quirks.pattern_loop_break_resets_row
-                    && loop_jump.is_some()
+                let landing = if module.quirks.pattern_loop_break_resets_row && loop_jump.is_some()
                 {
                     0
                 } else {
@@ -373,7 +372,7 @@ mod walker_wrap_tests {
         // (= the second order, which is pattern 1 again). The
         // intended loop is therefore "order 0 once, then order 1
         // forever".
-        let mut pat_a = empty_pat(4);
+        let pat_a = empty_pat(4);
         let mut pat_b = empty_pat(4);
         // Bxx on the last row of pattern 1, channel 0.
         let mut bxx_unit = TrackImportUnit::default();
@@ -436,7 +435,11 @@ mod walker_wrap_tests {
             .filter(|e| e.loop_iter == 1)
             .map(|e| e.row_idx)
             .collect();
-        assert_eq!(repeats, vec![1, 2, 3, 4], "loop body rows 1..=4 replay once");
+        assert_eq!(
+            repeats,
+            vec![1, 2, 3, 4],
+            "loop body rows 1..=4 replay once"
+        );
     }
 
     /// IT suppresses a same-row `PatternBreak` while a loop is still
@@ -447,14 +450,22 @@ mod walker_wrap_tests {
         let mut pat0 = pat_nch(4, 2);
         pat0[0][0].navigation.push(NavigationEffect::PatternLoop(0)); // E60
         pat0[2][0].navigation.push(NavigationEffect::PatternLoop(1)); // E61
-        pat0[2][1].navigation.push(NavigationEffect::PatternBreak(0)); // Cxx, same row
+        pat0[2][1]
+            .navigation
+            .push(NavigationEffect::PatternBreak(0)); // Cxx, same row
         let patterns = vec![pat0, empty_pat(4)];
         let order = vec![0usize, 1];
 
         // FT2/PT/S3M: break wins → the loop never runs.
         let plain = Module::default();
         let mut out_plain = Vec::new();
-        walk_one_song(&plain, &[order.clone()], &patterns, 0, &mut out_plain);
+        walk_one_song(
+            &plain,
+            core::slice::from_ref(&order),
+            &patterns,
+            0,
+            &mut out_plain,
+        );
         assert!(
             !out_plain.iter().any(|e| e.loop_iter == 1),
             "without the quirk the same-row break preempts the loop",
@@ -486,7 +497,7 @@ mod walker_wrap_tests {
 
         let first_order1_row = |m: &Module| -> u32 {
             let mut out = Vec::new();
-            walk_one_song(m, &[order.clone()], &patterns, 0, &mut out);
+            walk_one_song(m, core::slice::from_ref(&order), &patterns, 0, &mut out);
             out.iter()
                 .find(|e| e.order_idx == 1)
                 .map(|e| e.row_idx)
@@ -511,13 +522,15 @@ mod walker_wrap_tests {
         let mut pat0 = pat_nch(4, 2);
         pat0[0][0].navigation.push(NavigationEffect::PatternLoop(0)); // E60
         pat0[2][0].navigation.push(NavigationEffect::PatternLoop(1)); // E61 → jump
-        pat0[2][1].navigation.push(NavigationEffect::PatternBreak(3)); // Dxx → row 3
+        pat0[2][1]
+            .navigation
+            .push(NavigationEffect::PatternBreak(3)); // Dxx → row 3
         let patterns = vec![pat0, empty_pat(6)];
         let order = vec![0usize, 1];
 
         let first_order1_row = |m: &Module| -> u32 {
             let mut out = Vec::new();
-            walk_one_song(m, &[order.clone()], &patterns, 0, &mut out);
+            walk_one_song(m, core::slice::from_ref(&order), &patterns, 0, &mut out);
             out.iter()
                 .find(|e| e.order_idx == 1)
                 .map(|e| e.row_idx)
@@ -533,13 +546,213 @@ mod walker_wrap_tests {
         assert_eq!(first_order1_row(&pt), 0);
     }
 
-    /// Tier-2 cross-check: the walker's `(order_idx, row_idx)` visit
-    /// sequence matches an independent C transcription of the reference
-    /// replayers (pt2-clone `jumpLoop`, ft2-clone `patternLoop`, schism
-    /// `fx_pattern_loop`) on three crafted cases. Exercises the single
-    /// loop, the FT2 E60-leak (M1), the PT/FT2 loop+break clear (M2),
-    /// and the IT break-suppression — all three dialect divergences.
-    /// See `PATTERN_LOOP_PLAN.md` §7.6 for the C oracle.
+    /// The three tracker dialects whose pattern-loop semantics diverge.
+    #[derive(Clone, Copy)]
+    enum RefDialect {
+        Pt,
+        Ft2,
+        It,
+    }
+
+    const REF_MAXCH: usize = 8;
+
+    /// Read `(loop_effect, break_target)` from one crafted cell.
+    /// `loop_effect`: `None` = no `E6x`; `Some(0)` = `E60` (set loop start);
+    /// `Some(x>0)` = `E6x` loop count.
+    fn ref_cell_fx(cell: &TrackImportUnit) -> (Option<usize>, Option<usize>) {
+        let (mut e6, mut brk) = (None, None);
+        for nav in &cell.navigation {
+            match nav {
+                NavigationEffect::PatternLoop(v) => e6 = Some(*v),
+                NavigationEffect::PatternBreak(t) => brk = Some(*t),
+                _ => {}
+            }
+        }
+        (e6, brk)
+    }
+
+    /// Independent reference walker — a direct state-machine implementation
+    /// of each dialect's documented `E6x` pattern-loop / pattern-break /
+    /// row-advance behaviour, deliberately kept SEPARATE from the
+    /// production `walk_one_song` so the two cross-check each other. The
+    /// behaviours modelled (and only the behaviours, not anyone's code) are
+    /// the well-known divergences: PT clears the break on a loop jump and
+    /// resumes the next order at row 0; FT2 leaks the loop-start row into
+    /// the next order; IT suppresses a same-row break while a loop counter
+    /// is still active. Returns the visited `(order_idx, row_idx)` sequence.
+    fn reference_walk(d: RefDialect, order: &[usize], pats: &[Pattern]) -> Vec<(u32, u32)> {
+        let rows = |o: usize| pats[order[o]].len();
+        let cols = |o: usize, r: usize| pats[order[o]][r].len();
+        let fx = |o: usize, r: usize, ch: usize| ref_cell_fx(&pats[order[o]][r][ch]);
+        let mut out = Vec::new();
+        let (mut sp, mut row, mut guard) = (0usize, 0usize, 0usize);
+        match d {
+            RefDialect::Pt => {
+                let (mut np, mut lc) = ([0usize; REF_MAXCH], [0usize; REF_MAXCH]);
+                let (mut tgt, mut jump, mut order_adv) = (0usize, false, false);
+                while sp < order.len() && guard < 4000 {
+                    guard += 1;
+                    let nr = rows(sp);
+                    if row >= nr {
+                        sp += 1;
+                        row = 0;
+                        continue;
+                    }
+                    out.push((sp as u32, row as u32));
+                    for ch in 0..cols(sp, row) {
+                        let (e6, brk) = fx(sp, row, ch);
+                        match e6 {
+                            Some(0) => np[ch] = row,
+                            Some(x) => {
+                                let do_jump = if lc[ch] == 0 {
+                                    lc[ch] = x;
+                                    true
+                                } else {
+                                    lc[ch] -= 1;
+                                    lc[ch] != 0
+                                };
+                                if do_jump {
+                                    tgt = np[ch];
+                                    jump = true;
+                                }
+                            }
+                            None => {}
+                        }
+                        if let Some(t) = brk {
+                            tgt = if t > 63 { 0 } else { t };
+                            order_adv = true;
+                        }
+                    }
+                    row += 1;
+                    if jump {
+                        row = tgt;
+                        tgt = 0;
+                        jump = false;
+                    }
+                    if row >= nr || order_adv {
+                        row = tgt;
+                        tgt = 0;
+                        order_adv = false;
+                        sp += 1;
+                    }
+                }
+            }
+            RefDialect::Ft2 => {
+                let (mut plsr, mut plc) = ([0usize; REF_MAXCH], [0usize; REF_MAXCH]);
+                let (mut tgt, mut jump, mut order_adv) = (0usize, false, false);
+                while sp < order.len() && guard < 4000 {
+                    guard += 1;
+                    let nr = rows(sp);
+                    if row >= nr {
+                        sp += 1;
+                        row = 0;
+                        continue;
+                    }
+                    out.push((sp as u32, row as u32));
+                    for ch in 0..cols(sp, row) {
+                        let (e6, brk) = fx(sp, row, ch);
+                        match e6 {
+                            Some(0) => plsr[ch] = row,
+                            Some(x) => {
+                                if plc[ch] == 0 {
+                                    plc[ch] = x;
+                                    tgt = plsr[ch];
+                                    jump = true;
+                                } else {
+                                    plc[ch] -= 1;
+                                    if plc[ch] > 0 {
+                                        tgt = plsr[ch];
+                                        jump = true;
+                                    }
+                                }
+                            }
+                            None => {}
+                        }
+                        if let Some(t) = brk {
+                            tgt = t;
+                            order_adv = true;
+                        }
+                    }
+                    row += 1;
+                    if jump {
+                        jump = false;
+                        row = tgt;
+                    }
+                    if row >= nr || order_adv {
+                        row = tgt;
+                        tgt = 0;
+                        order_adv = false;
+                        sp += 1;
+                        let nn = if sp < order.len() { rows(sp) } else { 64 };
+                        if row >= nn {
+                            row = 0;
+                        }
+                    }
+                }
+            }
+            RefDialect::It => {
+                let (mut plr, mut cd) = ([0usize; REF_MAXCH], [0usize; REF_MAXCH]);
+                while sp < order.len() && guard < 4000 {
+                    guard += 1;
+                    let nr = rows(sp);
+                    if row >= nr {
+                        sp += 1;
+                        row = 0;
+                        continue;
+                    }
+                    out.push((sp as u32, row as u32));
+                    let (mut loop_to, mut brk) = (None, None);
+                    for ch in 0..cols(sp, row) {
+                        if let Some(x) = fx(sp, row, ch).0 {
+                            if x == 0 {
+                                plr[ch] = row;
+                            } else if cd[ch] == 0 {
+                                cd[ch] = x;
+                                loop_to = Some(plr[ch]);
+                            } else {
+                                cd[ch] -= 1;
+                                if cd[ch] == 0 {
+                                    plr[ch] = row + 1;
+                                } else {
+                                    loop_to = Some(plr[ch]);
+                                }
+                            }
+                        }
+                    }
+                    let active = (0..cols(sp, row)).any(|ch| cd[ch] != 0);
+                    for ch in 0..cols(sp, row) {
+                        if let Some(t) = fx(sp, row, ch).1 {
+                            if !active {
+                                brk = Some(t);
+                            }
+                        }
+                    }
+                    if let Some(l) = loop_to {
+                        row = l;
+                    } else if let Some(b) = brk {
+                        sp += 1;
+                        row = b;
+                    } else {
+                        row += 1;
+                        if row >= nr {
+                            sp += 1;
+                            row = 0;
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Tier-2 cross-check: the production walker's `(order_idx, row_idx)`
+    /// visit sequence matches an **independent in-crate reference walker**
+    /// (`reference_walk`, a direct transcription of each dialect's
+    /// documented `E6x` loop/break semantics) on three crafted cases.
+    /// Exercises the single loop, the FT2 E60-leak, the PT/FT2 loop+break
+    /// clear, and the IT break-suppression — all three dialect divergences.
+    /// Both implementations are checked against the same documented
+    /// sequence, so neither can silently drift.
     #[test]
     fn walker_matches_reference_replayer_oracle() {
         use crate::tracker::profiles;
@@ -549,6 +762,25 @@ mod walker_wrap_tests {
             let mut out = Vec::new();
             walk_one_song(&m, &[order], &pats, 0, &mut out);
             out.iter().map(|e| (e.order_idx, e.row_idx)).collect()
+        };
+        // Assert that BOTH the independent reference walker and the
+        // production walker reproduce `expected` for dialect `d`.
+        let check = |d: RefDialect,
+                     order: Vec<usize>,
+                     pats: Vec<Pattern>,
+                     expected: Vec<(u32, u32)>,
+                     label: &str| {
+            let q = match d {
+                RefDialect::Pt => profiles::pt(),
+                RefDialect::Ft2 => profiles::ft2(),
+                RefDialect::It => profiles::it214(),
+            };
+            assert_eq!(
+                reference_walk(d, &order, &pats),
+                expected,
+                "{label}: independent reference walker"
+            );
+            assert_eq!(seq(&q, order, pats), expected, "{label}: production walker");
         };
         let lp = |p: &mut Pattern, r: usize, ch: usize, v: usize| {
             p[r][ch].navigation.push(NavigationEffect::PatternLoop(v))
@@ -563,11 +795,19 @@ mod walker_wrap_tests {
         lp(&mut a, 1, 0, 0);
         lp(&mut a, 4, 0, 1);
         let exp_a = vec![
-            row(0, 0), row(0, 1), row(0, 2), row(0, 3), row(0, 4),
-            row(0, 1), row(0, 2), row(0, 3), row(0, 4), row(0, 5),
+            row(0, 0),
+            row(0, 1),
+            row(0, 2),
+            row(0, 3),
+            row(0, 4),
+            row(0, 1),
+            row(0, 2),
+            row(0, 3),
+            row(0, 4),
+            row(0, 5),
         ];
-        for q in [profiles::pt(), profiles::ft2(), profiles::it214()] {
-            assert_eq!(seq(&q, vec![0], vec![a.clone()]), exp_a, "case A");
+        for d in [RefDialect::Pt, RefDialect::Ft2, RefDialect::It] {
+            check(d, vec![0], vec![a.clone()], exp_a.clone(), "case A");
         }
 
         // Case B — E60@2 / E61@4, trailing row, order [0,1]. FT2 leaks
@@ -576,16 +816,48 @@ mod walker_wrap_tests {
         lp(&mut b, 2, 0, 0);
         lp(&mut b, 4, 0, 1);
         let head_b = vec![
-            row(0, 0), row(0, 1), row(0, 2), row(0, 3), row(0, 4),
-            row(0, 2), row(0, 3), row(0, 4), row(0, 5),
+            row(0, 0),
+            row(0, 1),
+            row(0, 2),
+            row(0, 3),
+            row(0, 4),
+            row(0, 2),
+            row(0, 3),
+            row(0, 4),
+            row(0, 5),
         ];
         let mut exp_b_noleak = head_b.clone();
-        exp_b_noleak.extend([row(1, 0), row(1, 1), row(1, 2), row(1, 3), row(1, 4), row(1, 5)]);
+        exp_b_noleak.extend([
+            row(1, 0),
+            row(1, 1),
+            row(1, 2),
+            row(1, 3),
+            row(1, 4),
+            row(1, 5),
+        ]);
         let mut exp_b_leak = head_b;
         exp_b_leak.extend([row(1, 2), row(1, 3), row(1, 4), row(1, 5)]);
-        assert_eq!(seq(&profiles::pt(), vec![0, 1], vec![b.clone(), pat_nch(6, 1)]), exp_b_noleak);
-        assert_eq!(seq(&profiles::it214(), vec![0, 1], vec![b.clone(), pat_nch(6, 1)]), exp_b_noleak);
-        assert_eq!(seq(&profiles::ft2(), vec![0, 1], vec![b, pat_nch(6, 1)]), exp_b_leak);
+        check(
+            RefDialect::Pt,
+            vec![0, 1],
+            vec![b.clone(), pat_nch(6, 1)],
+            exp_b_noleak.clone(),
+            "case B PT",
+        );
+        check(
+            RefDialect::It,
+            vec![0, 1],
+            vec![b.clone(), pat_nch(6, 1)],
+            exp_b_noleak,
+            "case B IT",
+        );
+        check(
+            RefDialect::Ft2,
+            vec![0, 1],
+            vec![b, pat_nch(6, 1)],
+            exp_b_leak,
+            "case B FT2",
+        );
 
         // Case C — loop-jump + same-row break. PT → next order row 0;
         // FT2 → break target row 3; IT → break suppressed, loop runs,
@@ -594,17 +866,53 @@ mod walker_wrap_tests {
         lp(&mut c, 0, 0, 0);
         lp(&mut c, 2, 0, 1);
         br(&mut c, 2, 1, 3);
-        assert_eq!(
-            seq(&profiles::pt(), vec![0, 1], vec![c.clone(), pat_nch(6, 2)]),
-            vec![row(0, 0), row(0, 1), row(0, 2), row(1, 0), row(1, 1), row(1, 2), row(1, 3), row(1, 4), row(1, 5)],
+        check(
+            RefDialect::Pt,
+            vec![0, 1],
+            vec![c.clone(), pat_nch(6, 2)],
+            vec![
+                row(0, 0),
+                row(0, 1),
+                row(0, 2),
+                row(1, 0),
+                row(1, 1),
+                row(1, 2),
+                row(1, 3),
+                row(1, 4),
+                row(1, 5),
+            ],
+            "case C PT",
         );
-        assert_eq!(
-            seq(&profiles::ft2(), vec![0, 1], vec![c.clone(), pat_nch(6, 2)]),
-            vec![row(0, 0), row(0, 1), row(0, 2), row(1, 3), row(1, 4), row(1, 5)],
+        check(
+            RefDialect::Ft2,
+            vec![0, 1],
+            vec![c.clone(), pat_nch(6, 2)],
+            vec![
+                row(0, 0),
+                row(0, 1),
+                row(0, 2),
+                row(1, 3),
+                row(1, 4),
+                row(1, 5),
+            ],
+            "case C FT2",
         );
-        assert_eq!(
-            seq(&profiles::it214(), vec![0, 1], vec![c, pat_nch(6, 2)]),
-            vec![row(0, 0), row(0, 1), row(0, 2), row(0, 0), row(0, 1), row(0, 2), row(1, 3), row(1, 4), row(1, 5)],
+        check(
+            RefDialect::It,
+            vec![0, 1],
+            vec![c, pat_nch(6, 2)],
+            vec![
+                row(0, 0),
+                row(0, 1),
+                row(0, 2),
+                row(0, 0),
+                row(0, 1),
+                row(0, 2),
+                row(1, 3),
+                row(1, 4),
+                row(1, 5),
+            ],
+            "case C IT",
         );
     }
 }

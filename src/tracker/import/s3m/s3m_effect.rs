@@ -558,9 +558,16 @@ impl S3mEffect {
     fn s3m_walk_global_effect(current: &PatternSlot) -> Option<GlobalEffect> {
         let param = current.effect_parameter;
         match current.effect_type {
-            // A - Set speed
+            // A - Set speed. S3M has *separate* speed (A) and tempo (T)
+            // commands, so — unlike the MOD/XM combined `Fxx`, where
+            // `<= 0x1F` means speed and `>= 0x20` means tempo — the FULL
+            // non-zero param range is a speed here; there is no 0x1F split.
+            // Schism `FX_SPEED` (player/effects.c): `if (firsttick && param)
+            // current_speed = param;` — any non-zero value sets the speed.
+            // (The old `param <= 0x1F` cap silently dropped e.g. `A30`
+            // speed-48 rows, shortening them and de-syncing the whole song.)
             1 => {
-                if param > 0 && param <= 0x1F {
+                if param > 0 {
                     Some(SongLevelEffect::Speed(param as usize).into())
                 } else {
                     None

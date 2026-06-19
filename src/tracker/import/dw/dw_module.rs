@@ -18,6 +18,7 @@
 //!    timeline — one xmrs song per sub-song.
 
 use alloc::format;
+use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -171,7 +172,7 @@ pub struct DwModule {
     /// animation. Set for the jump-table (`command_map`) family —
     /// bubble bobble & kin. (Historically this flag also drove the
     /// *pitch* arpeggio via a looping pitch envelope; that role has
-    /// moved to the per-frame [`use_arpeggio_pitch_lane`] Points lane,
+    /// moved to the per-frame `use_arpeggio_pitch_lane` Points lane,
     /// so this now governs only the volume-envelope split.)
     pub use_pitch_arpeggio: bool,
 
@@ -319,9 +320,7 @@ impl DwModule {
     #[inline]
     fn scale_master_volume(&self, v: u8) -> u8 {
         match self.master_volume {
-            Some(master) if master != 64 => {
-                (((v as u32) * (master as u32)) >> 6).min(64) as u8
-            }
+            Some(master) if master != 64 => (((v as u32) * (master as u32)) >> 6).min(64) as u8,
             _ => v,
         }
     }
@@ -841,9 +840,7 @@ impl DwModule {
                 let mut lr = [total_rows; 4];
                 if drift_len.is_some() {
                     for (slot, &w) in lr.iter_mut().zip(sim.first_wrap_frame.iter()) {
-                        if let Some(end) =
-                            w.map(|f| f.saturating_sub(1)).filter(|&e| e > 0)
-                        {
+                        if let Some(end) = w.map(|f| f.saturating_sub(1)).filter(|&e| e > 0) {
                             *slot = (end.saturating_sub(1) / speed_u32 + 1) as usize;
                         }
                     }
@@ -936,8 +933,7 @@ impl DwModule {
             // in frame order, so `row` is non-decreasing: keep the last
             // tuple of each equal-row run.
             for notes in per_ch_notes.iter_mut() {
-                let mut deduped: Vec<NoteRow> =
-                    Vec::with_capacity(notes.len());
+                let mut deduped: Vec<NoteRow> = Vec::with_capacity(notes.len());
                 for &tuple in notes.iter() {
                     if let Some(last) = deduped.last_mut() {
                         if last.0 == tuple.0 {
@@ -1095,6 +1091,7 @@ impl DwModule {
                         rows[rel_row] = Cell {
                             event: CellEvent::NoteOn { pitch, velocity },
                             effects,
+                            expression: crate::core::cell::NoteExpression::NEUTRAL,
                         };
                     }
 
@@ -1225,6 +1222,7 @@ impl DwModule {
                 attach_arpeggio_pitch_lanes(&mut module, *song, trace);
             }
         }
+        collapse_dead_duplicate_modulation_lanes(&mut module);
 
         module
     }
@@ -1251,8 +1249,7 @@ impl DwModule {
                 s.min(instr_count - 1)
             }
         };
-        let mut per_ch_notes: [Vec<NoteRow>; 4] =
-            Default::default();
+        let mut per_ch_notes: [Vec<NoteRow>; 4] = Default::default();
         for (frame, ev) in &trace {
             if let super::runtime::TickEvent::NoteOn {
                 channel,
@@ -1341,6 +1338,11 @@ impl DwModule {
         // still yields the samples up to that point.
         let mut data_reader = open_reader(source, data_off)?;
         let mut samples: Vec<DwSample> = Vec::with_capacity(n);
+        // RFC §1A shared audio pool: identical PCM payloads collapse to
+        // a single `Arc<[i8]>`. Bucketed by an FNV-1a hash with a
+        // byte-exact tie-break, so a hash collision can never alias two
+        // different buffers.
+        let mut pcm_pool: BTreeMap<u64, Vec<Arc<[i8]>>> = BTreeMap::new();
         for idx in 0..n {
             let Ok(length_bytes) = data_reader.read_u32_be() else {
                 break;
@@ -1356,7 +1358,8 @@ impl DwModule {
             let Ok(pcm_bytes) = data_reader.read_slice(length_bytes as usize) else {
                 break;
             };
-            let pcm: Vec<i8> = pcm_bytes.iter().map(|&b| b as i8).collect();
+            let pcm_vec: Vec<i8> = pcm_bytes.iter().map(|&b| b as i8).collect();
+            let pcm: Arc<[i8]> = dedup_pcm(&mut pcm_pool, pcm_vec);
 
             // Per-sample loop-start.
             //
@@ -1439,9 +1442,7 @@ impl DwModule {
                 // full scale. Clamp to Paula's 0..=64.
                 layout
                     .instrument_volume_offset
-                    .and_then(|base| {
-                        source.get(base + idx * 0x10 + 0xE..base + idx * 0x10 + 0x10)
-                    })
+                    .and_then(|base| source.get(base + idx * 0x10 + 0xE..base + idx * 0x10 + 0x10))
                     .map(|b| u16::from_be_bytes([b[0], b[1]]).min(64))
                     .unwrap_or(64)
             } else {
@@ -1568,6 +1569,10 @@ impl DwModule {
             // stay 0 (→ empty position list = silent). On 3-voice
             // modules this stops the param word being read as ch0's
             // base and stops a phantom ch3 from playing.
+            // `i` drives byte-pointer arithmetic (`ptr_width * i`), not
+            // just the `offs[i]` write — an iterator rewrite would
+            // obscure the pointer walk.
+            #[allow(clippy::needless_range_loop)]
             for i in 0..voices {
                 let p = cursor + header + ptr_width * i;
                 let o = if ptr_width == 4 {
@@ -1807,7 +1812,10 @@ impl DwModule {
                         // trim the stored bytes to that span.
                         let mut bytes = read_track_bytes(source, offset as usize);
                         let (events, used) = super::event::decode_track_counted(
-                            &bytes, dispatcher, features, command_map,
+                            &bytes,
+                            dispatcher,
+                            features,
+                            command_map,
                         );
                         bytes.truncate(used);
                         DwTrack {
@@ -1967,10 +1975,13 @@ fn attach_vibrato_lanes(
             };
             (tick, is_set)
         });
-        module.automation.push(AutomationLane::new_with_kind(
-            AutomationTarget::TrackPitch(track_idx),
-            LaneKind::Lfo { events },
-        ));
+        module.automation.push(
+            AutomationLane::new_with_kind(
+                AutomationTarget::TrackPitch(track_idx),
+                LaneKind::Lfo { events },
+            )
+            .with_song(song),
+        );
     }
 }
 
@@ -2081,10 +2092,13 @@ fn attach_slide_lanes(
             SlideEvent::Set { tick, .. } => *tick,
             SlideEvent::Clear { tick } => *tick,
         });
-        module.automation.push(AutomationLane::new_with_kind(
-            AutomationTarget::TrackPitch(track_idx),
-            LaneKind::Slide { events },
-        ));
+        module.automation.push(
+            AutomationLane::new_with_kind(
+                AutomationTarget::TrackPitch(track_idx),
+                LaneKind::Slide { events },
+            )
+            .with_song(song),
+        );
     }
 }
 
@@ -2128,7 +2142,10 @@ fn attach_arpeggio_pitch_lanes(
         let Some((_, clip)) = module.clips.active_at(song, *channel, tick) else {
             continue;
         };
-        by_track.entry(clip.track).or_default().insert(tick, *semitones);
+        by_track
+            .entry(clip.track)
+            .or_default()
+            .insert(tick, *semitones);
     }
 
     for (track_idx, offsets) in by_track {
@@ -2142,10 +2159,13 @@ fn attach_arpeggio_pitch_lanes(
                 value: AutomationValue::Pitch(PitchDelta::from_semitones(semis as i16)),
             })
             .collect();
-        module.automation.push(AutomationLane::new_with_kind(
-            AutomationTarget::TrackPitch(track_idx),
-            LaneKind::Points(points),
-        ));
+        module.automation.push(
+            AutomationLane::new_with_kind(
+                AutomationTarget::TrackPitch(track_idx),
+                LaneKind::Points(points),
+            )
+            .with_song(song),
+        );
     }
 }
 
@@ -2176,7 +2196,7 @@ fn read_track_bytes(source: &[u8], start: usize) -> Vec<u8> {
 /// off into the rest of the image.
 const TRACK_BYTE_CAP: usize = 0x800;
 
-/// Walk a position list (spec §4.2) starting at `start`. Reads
+/// Walk a position list starting at `start`. Reads
 /// `u16` BE entries until either:
 ///
 /// - a `0x0000` terminator (plain end-of-list);
@@ -2304,6 +2324,10 @@ fn follow_seq_ptr_loops(
     uses_32bit: bool,
     start_offset: isize,
 ) {
+    // `lists[ch]` is both read at the top and reassigned at the bottom
+    // of the body; an `iter_mut()` rewrite would fight the borrow on the
+    // intervening `read_position_list` reads.
+    #[allow(clippy::needless_range_loop)]
     for ch in 0..DW_NUM_CHANNELS {
         let Some(&intro_off) = lists[ch].entries.first() else {
             continue;
@@ -2440,6 +2464,7 @@ fn attach_envelope_animation(
                     value: velocity,
                     tick: 0,
                 }],
+                expression: crate::core::cell::NoteExpression::NEUTRAL,
             };
         }
     }
@@ -2534,11 +2559,7 @@ fn split_at_pattern_boundaries(segs: Vec<ChannelSegment>) -> Vec<ChannelSegment>
 /// yields an empty result — channels with no `NoteOn` events
 /// produce no segments (the caller can choose whether to emit an
 /// empty stub or skip them entirely; we skip).
-fn build_segments(
-    notes: &[NoteRow],
-    total_rows: usize,
-    split_by_env: bool,
-) -> Vec<ChannelSegment> {
+fn build_segments(notes: &[NoteRow], total_rows: usize, split_by_env: bool) -> Vec<ChannelSegment> {
     let mut out: Vec<ChannelSegment> = Vec::new();
     if notes.is_empty() || total_rows == 0 {
         return out;
@@ -2600,6 +2621,62 @@ fn open_reader(source: &[u8], offset: usize) -> Result<BinReader<'_>, ImportErro
 /// sample-info table. Each row is 12 bytes; `loop_start` is a
 /// big-endian signed i32 at byte offset +4. Returns `None` for
 /// negative sentinels or out-of-bounds rows.
+/// Drop dead duplicate Lfo/Slide/Glide automation lanes — the RFC §1B
+/// invariant that an importer emits at most one lane per
+/// `(target, kind)`. The DW importer attaches vibrato/slide lanes
+/// *per sub-song*, so a Track that plays in more than one sub-song
+/// accumulates several lanes on the same `TrackPitch(track)` target.
+/// The player only ever read the **first**: its `find_map` over
+/// `lanes_for(target)` returns lane[0], and an Lfo/Slide/Glide lane
+/// always yields `Some` state, so later same-kind lanes were
+/// unreachable. Removing them is therefore bit-identical, and it
+/// restores the single-lane invariant that lets the §1B summed fold
+/// treat any *remaining* multiplicity as deliberate (authored)
+/// modulator stacking rather than an import artifact.
+///
+/// `Points` lanes are deliberately left intact: the player **sums**
+/// them (e.g. the DW per-frame arpeggio transpose in
+/// `track_pitch_points_delta`), so they are not "dead duplicates".
+fn collapse_dead_duplicate_modulation_lanes(module: &mut Module) {
+    use crate::core::daw::automation::{AutomationTarget, LaneKind};
+    let mut seen: Vec<(AutomationTarget, u8)> = Vec::new();
+    module.automation.retain(|l| {
+        let disc: u8 = match &l.kind {
+            LaneKind::Points(_) => return true,
+            LaneKind::Lfo { .. } => 1,
+            LaneKind::Slide { .. } => 2,
+            LaneKind::Glide { .. } => 3,
+        };
+        let key = (l.target, disc);
+        if seen.contains(&key) {
+            false
+        } else {
+            seen.push(key);
+            true
+        }
+    });
+}
+
+/// Intern a freshly-decoded PCM buffer into the shared pool (RFC §1A):
+/// return an existing `Arc<[i8]>` when the exact same bytes were seen
+/// before, otherwise store and return a new one. Bucketed by FNV-1a
+/// with a byte-exact comparison inside the bucket, so the dedup is
+/// content-correct and collision-proof — never merely hash-equal.
+fn dedup_pcm(pool: &mut BTreeMap<u64, Vec<Arc<[i8]>>>, pcm: Vec<i8>) -> Arc<[i8]> {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for &b in &pcm {
+        h ^= b as u8 as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    let bucket = pool.entry(h).or_default();
+    if let Some(existing) = bucket.iter().find(|a| a.as_ref() == pcm.as_slice()) {
+        return Arc::clone(existing);
+    }
+    let arc: Arc<[i8]> = Arc::from(pcm);
+    bucket.push(Arc::clone(&arc));
+    arc
+}
+
 fn read_loop_start(source: &[u8], base: usize, idx: usize, stride: usize) -> Option<u32> {
     let row = base.checked_add(idx.checked_mul(stride)?)?;
     let field = row.checked_add(4)?;
@@ -2756,8 +2833,8 @@ fn volume_to_volume_envelope(env: &DwVolumeEnvelope, master: Option<u16>) -> Opt
         }
     };
     let si = env.step_interval as usize + 1; // frames per step
-    // One point per frame over the decay (cap defends against a
-    // pathological step count); the tail holds via the sustain loop.
+                                             // One point per frame over the decay (cap defends against a
+                                             // pathological step count); the tail holds via the sustain loop.
     let total = (env.steps.len() * si).clamp(1, 256);
     let mut point = Vec::with_capacity(total);
     for f in 0..total {
@@ -2813,7 +2890,11 @@ fn resolve_synth_instrument(
     if pitch_env.is_none() && vol_env.is_none() {
         return base;
     }
-    let key = (base, arp_index.filter(|_| pitch_env.is_some()), env_index.filter(|_| vol_env.is_some()));
+    let key = (
+        base,
+        arp_index.filter(|_| pitch_env.is_some()),
+        env_index.filter(|_| vol_env.is_some()),
+    );
     if let Some(&idx) = cache.get(&key) {
         return idx;
     }

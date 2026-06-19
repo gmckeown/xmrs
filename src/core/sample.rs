@@ -12,7 +12,7 @@
 use serde::{Deserialize, Serialize};
 
 use alloc::string::String;
-use alloc::vec::Vec;
+use alloc::sync::Arc;
 
 use crate::core::fixed::units::{Amp, ChannelVolume, Finetune, Panning, Volume};
 
@@ -72,13 +72,31 @@ impl Eq for LoopType {}
 /// [`Sample::at`]. The audio runtime itself never carries
 /// `f32` after this conversion — the variant is purely an
 /// input-format option.
+/// The PCM payload lives behind an [`Arc<[T]>`](alloc::sync::Arc):
+/// an **immutable, reference-counted** slice. This is the shared
+/// audio pool of DAW_GENERALIZATION_RFC §1A — identical PCM (e.g. the
+/// 16 real samples a DW synth bank duplicates across 60 instruments)
+/// is deduplicated at import to a single allocation, every instrument
+/// holding a cheap `Arc` handle to it.
+///
+/// Immutability is a deliberate design choice, not a limitation:
+/// sample edits never mutate in place, they produce a **fresh**
+/// `Arc<[T]>` (full-buffer replacement, exactly as a tracker editor
+/// rewrites the whole sample) — so no `make_mut` / copy-on-write
+/// machinery is needed. Reads are unchanged: `Arc<[T]>` derefs to
+/// `&[T]`, so indexing and `.len()` behave as before.
+///
+/// Serde: with serde's `rc` feature each variant serialises as a plain
+/// sequence — byte-for-byte the former `Vec<T>` repr — and on read each
+/// `Arc` deserialises to its own allocation (shared identity is not
+/// reconstructed; only the import-time dedup is lost, never data).
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum SampleDataType {
-    Mono8(Vec<i8>),
-    Mono16(Vec<i16>),
-    Stereo8(Vec<i8>),
-    Stereo16(Vec<i16>),
-    StereoFloat(Vec<f32>),
+    Mono8(Arc<[i8]>),
+    Mono16(Arc<[i16]>),
+    Stereo8(Arc<[i8]>),
+    Stereo16(Arc<[i16]>),
+    StereoFloat(Arc<[f32]>),
 }
 
 impl SampleDataType {
@@ -389,7 +407,7 @@ mod tests {
             sustain_loop_flag: LoopType::No,
             sustain_loop_start: 0,
             sustain_loop_length: 0,
-            data: Some(SampleDataType::Mono8(alloc::vec![0i8; len])),
+            data: Some(SampleDataType::Mono8(alloc::vec![0i8; len].into())),
         }
     }
 

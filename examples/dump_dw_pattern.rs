@@ -62,7 +62,9 @@ fn main() -> ExitCode {
 
             let note = match &cell.event {
                 CellEvent::NoteOn { pitch, velocity } => format!("{:?} v{:?}", pitch, velocity),
-                CellEvent::NoteOnGhost { pitch, velocity } => format!("{:?}~ v{:?}", pitch, velocity),
+                CellEvent::NoteOnGhost { pitch, velocity } => {
+                    format!("{:?}~ v{:?}", pitch, velocity)
+                }
                 CellEvent::NoteOff { .. } => "===".into(),
                 CellEvent::NoteCut => "^^^".into(),
                 CellEvent::NoteFade => "~~~".into(),
@@ -79,7 +81,7 @@ fn main() -> ExitCode {
                     AutomationTarget::TrackPanning(t),
                     AutomationTarget::TrackChannelVolume(t),
                 ] {
-                    for lane in module.lanes_for(tgt) {
+                    for lane in module.lanes_for(tgt, 0) {
                         let evs = lane.events_in(tick, row_end);
                         if !evs.is_empty() {
                             lanes_desc.push(format!(

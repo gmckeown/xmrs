@@ -9,6 +9,8 @@
 
 pub mod automation;
 pub mod clip;
+pub mod device;
+pub mod dsp;
 pub mod euclidean;
 pub mod loop_region;
 pub mod sorted_clips;

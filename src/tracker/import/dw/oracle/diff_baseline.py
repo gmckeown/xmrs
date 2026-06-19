@@ -20,8 +20,16 @@ import statistics
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
+# The 12 MB Paula-oracle golden store lives OUTSIDE the crate (it is a
+# regenerable RE artifact, not library/test data). Default location, with
+# a DW_ORACLE_CORPUS env override.
+CORPUS = os.environ.get(
+    "DW_ORACLE_CORPUS",
+    os.path.expanduser("~/Documents/dw-oracle-corpus"),
+)
+
 # Reference clusters for the --markdown scoreboard. Goldens live in the
-# single corpus/ store (keyed by the real .dw stem); player traces in
+# single corpus store (keyed by the real .dw stem); player traces in
 # /tmp/ptr/<stem>.csv, same as audit.py. (corpus stem, human label)
 CLUSTERS = [
     ("xenon2 (title)", "C1 · xenon2 (title)"),
@@ -180,7 +188,7 @@ def markdown_rows():
     print("| Cluster | ch | gate✓ | both-gated | spur | miss | per exact | per medΔ | per MAE | per max | vol exact | vol MAE | vol max |")
     print("|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|")
     for stem, label in CLUSTERS:
-        golden = os.path.join(HERE, "corpus", f"{stem}.csv")
+        golden = os.path.join(CORPUS, f"{stem}.csv")
         player = f"/tmp/ptr/{stem}.csv"
         if not (os.path.exists(golden) and os.path.exists(player)):
             print(f"| {label} | — | (missing trace) | | | | | | | | |")

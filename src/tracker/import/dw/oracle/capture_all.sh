@@ -12,11 +12,12 @@
 # Usage:    capture_all.sh            # all modules
 #           capture_all.sh NAME...    # only these file stems
 #
-# Output:   oracle/corpus/<stem>.csv  + capture_all.log
+# Output:   $DW_ORACLE_CORPUS/<stem>.csv  + capture_all.log
+#           (golden store lives OUTSIDE the crate — default below)
 
 HL=/home/user/bin/ghidra_12.0.4_PUBLIC/support/analyzeHeadless
 HERE=/home/user/Documents/xm-rs/xmrs/src/tracker/import/dw/oracle
-OUT="$HERE/corpus"
+OUT="${DW_ORACLE_CORPUS:-$HOME/Documents/dw-oracle-corpus}"
 ARGS_TSV=/tmp/dw_args.tsv
 KNOWN_TSV="$HERE/known_args.tsv"   # stem<TAB>init<TAB>play<TAB>a3<TAB>f0
 DWDIR="$HOME/Music/dw"

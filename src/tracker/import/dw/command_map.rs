@@ -243,7 +243,11 @@ fn classify_handler(payload: &[u8], off: usize) -> DwCmd {
                 args: DwCmdKind::Retrigger.arg_bytes(),
             };
         }
-        if payload.get(t..scan_end).map(dmacon_kill_in).unwrap_or(false) {
+        if payload
+            .get(t..scan_end)
+            .map(dmacon_kill_in)
+            .unwrap_or(false)
+        {
             return DwCmd {
                 kind: DwCmdKind::ResetAll,
                 args: DwCmdKind::ResetAll.arg_bytes(),
@@ -263,7 +267,12 @@ fn classify_handler(payload: &[u8], off: usize) -> DwCmd {
     }
     let w = match payload.get(off..end) {
         Some(s) => s,
-        None => return DwCmd { kind: DwCmdKind::Unknown, args: 0 },
+        None => {
+            return DwCmd {
+                kind: DwCmdKind::Unknown,
+                args: 0,
+            }
+        }
     };
 
     // Song STOP with the DMACON kill *inline* in the handler body
@@ -344,7 +353,10 @@ fn classify_handler(payload: &[u8], off: usize) -> DwCmd {
         DwCmdKind::Unknown
     };
 
-    DwCmd { kind, args: kind.arg_bytes() }
+    DwCmd {
+        kind,
+        args: kind.arg_bytes(),
+    }
 }
 
 /// Locate the `JMP (0,A3,A2.w)` dispatcher and resolve its table.
@@ -557,10 +569,16 @@ mod tests {
         // company/empire).
         assert_eq!(map.get(0x81).map(|c| c.kind), Some(DwCmdKind::Slide));
         assert_eq!(map.get(0x82).map(|c| c.kind), Some(DwCmdKind::NoteStop));
-        assert_eq!(map.get(0x85).map(|c| c.kind), Some(DwCmdKind::GlobalTranspose));
+        assert_eq!(
+            map.get(0x85).map(|c| c.kind),
+            Some(DwCmdKind::GlobalTranspose)
+        );
         assert_eq!(map.get(0x86).map(|c| c.kind), Some(DwCmdKind::SlideOn));
         assert_eq!(map.get(0x87).map(|c| c.kind), Some(DwCmdKind::SlideOff));
-        assert_eq!(map.get(0x88).map(|c| c.kind), Some(DwCmdKind::ChannelTranspose));
+        assert_eq!(
+            map.get(0x88).map(|c| c.kind),
+            Some(DwCmdKind::ChannelTranspose)
+        );
         assert_eq!(map.get(0x89).map(|c| c.kind), Some(DwCmdKind::SeqPtr));
         assert_eq!(map.get(0x8A).map(|c| c.kind), Some(DwCmdKind::GlobalParam));
         // Arg counts (these happen to match the canonical layout, so

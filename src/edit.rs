@@ -3112,6 +3112,7 @@ mod tests {
         let mixed_src = Cell {
             event: CellEvent::None,
             effects: vec![TrackEffect::Arpeggio { half1: 1, half2: 2 }],
+            expression: crate::core::cell::NoteExpression::NEUTRAL,
         };
         m.apply(EditCommand::PasteBlock {
             tracks: vec![1],
@@ -3427,6 +3428,8 @@ mod tests {
                 ],
             },
             enabled: true,
+            scope: crate::core::daw::automation::ModScope::Track,
+            song: 0,
         });
         m
     }
@@ -3491,6 +3494,8 @@ mod tests {
                 }],
             },
             enabled: true,
+            scope: crate::core::daw::automation::ModScope::Track,
+            song: 0,
         });
         m.apply(EditCommand::AddSlideEvent {
             lane: 0,
@@ -3521,6 +3526,8 @@ mod tests {
             target: AutomationTarget::TrackPitch(0),
             kind: LaneKind::Glide { events: vec![] },
             enabled: true,
+            scope: crate::core::daw::automation::ModScope::Track,
+            song: 0,
         });
         m.apply(EditCommand::AddGlideEvent {
             lane: 0,

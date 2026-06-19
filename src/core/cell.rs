@@ -15,7 +15,8 @@
 
 use crate::core::cell_note::CellNote;
 use crate::core::effect::TrackEffect;
-use crate::core::fixed::units::Volume;
+use crate::core::fixed::fixed::Q15;
+use crate::core::fixed::units::{PitchDelta, Volume};
 use crate::core::pitch::Pitch;
 use core::fmt::*;
 use serde::{Deserialize, Serialize};
@@ -194,10 +195,56 @@ impl Debug for CellEvent {
 /// [`crate::core::daw::timeline::TimelineMap`]. The only "global"
 /// effect that stays on a cell is the MIDI macro, encoded as
 /// [`TrackEffect::MidiMacro`] in `effects`.
+/// RFC §2C — per-note expression (MPE). Modulation that belongs to a
+/// single triggered note rather than the whole track, so two voices
+/// sounding on the same channel (a held NNA ghost and a fresh note)
+/// can modulate **independently**. The player snapshots it onto the
+/// voice at trigger time and folds it into that voice's own pitch /
+/// volume / pan — on top of the channel-wide bus (RFC §2A) and
+/// whatever `ModScope` (§2B) routes.
+///
+/// Every field is a **neutral-at-zero delta**, so the default is
+/// `NEUTRAL` and a cell that carries no expression (every tracker
+/// import — the importers never populate it) leaves the voice exactly
+/// as the pre-2C player did. Bit-identical by construction.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq)]
+pub struct NoteExpression {
+    /// Per-note pitch bend, in semitones (Q8.8). Summed into the
+    /// voice pitch alongside the channel vibrato / Points transpose.
+    pub pitch_bend: PitchDelta,
+    /// Per-note volume delta (Q1.15 signed, MPE channel-pressure).
+    /// Folded like a tremolo offset; `ZERO` = no change.
+    pub volume: Q15,
+    /// Per-note pan offset (Q1.15 signed). Added to the voice pan;
+    /// `ZERO` = no change.
+    pub pan: Q15,
+}
+
+impl NoteExpression {
+    /// The do-nothing expression: every delta zero.
+    pub const NEUTRAL: Self = Self {
+        pitch_bend: PitchDelta::ZERO,
+        volume: Q15::ZERO,
+        pan: Q15::ZERO,
+    };
+
+    /// `true` when this expression has no effect — the common case
+    /// (every tracker note), letting the player skip the fold.
+    #[inline]
+    pub fn is_neutral(&self) -> bool {
+        self.pitch_bend == PitchDelta::ZERO && self.volume == Q15::ZERO && self.pan == Q15::ZERO
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
 pub struct Cell {
     pub event: CellEvent,
     pub effects: Vec<TrackEffect>,
+    /// RFC §2C — per-note expression (MPE). Defaults to
+    /// [`NoteExpression::NEUTRAL`]; `#[serde(default)]` keeps older
+    /// serialised modules readable. Tracker importers never set it.
+    #[serde(default)]
+    pub expression: NoteExpression,
 }
 
 impl Cell {
@@ -218,6 +265,7 @@ impl Cell {
         Self {
             event: CellEvent::from_columns(note, instrument, velocity),
             effects,
+            expression: NoteExpression::NEUTRAL,
         }
     }
 

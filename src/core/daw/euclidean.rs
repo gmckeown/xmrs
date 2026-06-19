@@ -66,6 +66,7 @@ pub fn auto_convert_strict_euclidean_tracks(module: &mut Module) {
                 }
             }
             Track::Euclidean { .. } => continue,
+            Track::Audio { .. } => continue,
         };
         convert_track_in_place(&mut module.tracks[track_idx], params);
     }
@@ -78,7 +79,7 @@ pub fn auto_convert_strict_euclidean_tracks(module: &mut Module) {
 pub fn detect_strict_euclidean(track: &Track) -> Option<EuclideanParams> {
     let rows = match track {
         Track::Notes { rows, .. } => rows,
-        Track::Euclidean { .. } => return None,
+        Track::Euclidean { .. } | Track::Audio { .. } => return None,
     };
     let k = rows.len();
     if !(4..=u8::MAX as usize).contains(&k) {
@@ -148,6 +149,7 @@ pub fn detect_strict_euclidean(track: &Track) -> Option<EuclideanParams> {
             let prototype = Cell {
                 event: CellEvent::NoteOn { pitch, velocity },
                 effects: Vec::new(),
+                expression: crate::core::cell::NoteExpression::NEUTRAL,
             };
             return Some(EuclideanParams {
                 events: n_u8,
@@ -196,7 +198,7 @@ fn convert_track_in_place(track: &mut Track, params: EuclideanParams) {
             muted,
             ..
         } => (core::mem::take(name), *instrument, *muted),
-        Track::Euclidean { .. } => return,
+        Track::Euclidean { .. } | Track::Audio { .. } => return,
     };
 
     *track = Track::Euclidean {
@@ -243,6 +245,7 @@ mod tests {
                 velocity: Volume::FULL,
             },
             effects: vec![],
+            expression: crate::core::cell::NoteExpression::NEUTRAL,
         }
     }
 

@@ -13,9 +13,7 @@
 //! where the data lives.
 //!
 //! The opcode prefixes searched here are documented in `FORMAT.md`
-//! (this directory, the canonical reference) and in the structural
-//! spec `whittaker-dw-format.md` at the repo root, whose `§` section
-//! numbers the comments below refer to.
+//! (this directory, the canonical reference).
 
 use alloc::collections::BTreeSet;
 use alloc::collections::VecDeque;
@@ -28,7 +26,7 @@ use super::tables::PeriodTable;
 /// Whittaker's replayer is parametric: each module turns specific
 /// features on or off by emitting (or omitting) blocks of code,
 /// and the meaning of `Effect8` / `Effect9` is fixed at init time
-/// by *which* of these flags is set (spec §10.7). The detection
+/// by *which* of these flags is set. The detection
 /// layer extracts the flags so the runtime can pick the right
 /// interpretation for every byte.
 ///
@@ -87,7 +85,7 @@ pub struct DwFeatures {
     /// they always clear, so their `0x83` *does* re-strike).
     ///
     /// Both `0x83` jump-table targets begin with `MOVE.L A1,(0x4,A0)`,
-    /// so [`super::command_map::classify_handler`] cannot tell them
+    /// so `command_map::classify_handler` cannot tell them
     /// apart — the only discriminator is this guard in the play loop.
     /// Confirmed present in xenon2 / beast / bad company / empire and
     /// absent in bubble bobble / grimblood / obliterator (Ghidra +
@@ -214,8 +212,7 @@ pub struct DwLayout {
     /// table — the LEA target inside the third bracket
     /// (`0x90..` family) of the dispatcher cascade. Each entry is
     /// a big-endian `u16` PC-relative offset to an arpeggio byte
-    /// stream (semitone offsets, last byte flagged with `0x80`;
-    /// spec §4.4 / §10.12).
+    /// stream (semitone offsets, last byte flagged with `0x80`).
     ///
     /// `None` when the module has no `0x90..` bracket (it then
     /// has no inline pitch-arpeggio commands).
@@ -1102,7 +1099,7 @@ fn is_dispatcher_bracket_relaxed(payload: &[u8], at: usize) -> bool {
 }
 
 // -------------------------------------------------------------------
-// Internal probes — see spec §3 for the rationale.
+// Internal probes — see the module-level docs for the rationale.
 // -------------------------------------------------------------------
 
 fn matches_at(payload: &[u8], at: usize, needle: &[u8]) -> bool {
@@ -1193,7 +1190,6 @@ fn find_lea_a3_pc_neg(payload: &[u8], start: usize, end: usize) -> Option<usize>
     }
     None
 }
-
 
 /// Breadth-first walk: starting at `entry`, scan each reachable
 /// function body up to its `RTS`, descending into every `BSR.W`
@@ -1820,7 +1816,7 @@ fn detect_features(payload: &[u8], play_offset: usize) -> DwFeatures {
     //    opcode + operand instead of a bare 2-byte opcode.
     //
     // 2. Multiple Effect8 interpretations can be present at once.
-    //    Spec §10.7 disambiguates them by *priority*
+    //    They are disambiguated by *priority*
     //    (volume_fade > channel_transpose > half_volume), so the
     //    runtime layer applies the precedence rule even when
     //    several flags are true.

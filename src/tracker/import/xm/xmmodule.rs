@@ -207,14 +207,15 @@ impl XmModule {
             // would assume in the absence of an explicit RPN setup —
             // matches the `Module::default()` value.
             pitch_wheel_depth: 2,
-            // XM has no mix-volume byte in its header. Schism
-            // (`fmt/xm.c:885`) hard-codes `mixing_volume = 48` for
-            // every imported XM, which normalised gives 48/128 =
-            // 0.375. We mirror that so the player's mixer chain
-            // applies the same headroom for XM as for IT — the same
-            // engine-side `MIXING_ATTENUATION` shift expects this
-            // pre-attenuation as input.
-            mix_volume: Volume::from_ratio(48, 128),
+            // XM has no mix-volume byte in its header, so this is a
+            // convention constant: the master gain that makes our mixer
+            // match FT2's output level. Calibrated against **ft2-clone**
+            // (the cycle-accurate FT2 reproduction) at its factory amp —
+            // rendering a 12-module sample through ft2-clone vs our
+            // player put us a tight −1.48 dB (median, env-corr > 0.9)
+            // below it at the old 48/128, so 48/128 × 10^(1.48/20) ≈
+            // 57/128 centres XM on FT2. See `tracker/import/it/BASELINE.md`.
+            mix_volume: Volume::from_ratio(57, 128),
             // DAW layer is filled below by `build_timeline_layer`.
             tracks: vec![],
             clips: crate::core::daw::sorted_clips::SortedClips::new(),
@@ -226,6 +227,11 @@ impl XmModule {
             // Tracker formats wrap as a whole (song_loop_to); no
             // per-lane loops.
             channel_loops: alloc::vec::Vec::new(),
+            channel_inserts: alloc::vec::Vec::new(),
+            buses: alloc::vec::Vec::new(),
+            channel_sends: alloc::vec::Vec::new(),
+            master_chain: crate::core::daw::device::DeviceChain::default(),
+            assets: alloc::vec::Vec::new(),
         };
 
         let raw_patterns: Vec<Vec<Vec<PatternSlot>>> =

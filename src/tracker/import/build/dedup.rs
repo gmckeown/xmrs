@@ -121,6 +121,20 @@ fn hash_track(track: &Track) -> u64 {
             }
             hash_cell(&mut h, prototype);
         }
+        Track::Audio { source, .. } => {
+            use crate::core::daw::track::AudioSource;
+            fnv_mix_byte(&mut h, 2);
+            match source {
+                AudioSource::Inline(sample) => {
+                    fnv_mix_byte(&mut h, 0);
+                    fnv_mix_usize(&mut h, sample.len());
+                }
+                AudioSource::Pooled(i) => {
+                    fnv_mix_byte(&mut h, 1);
+                    fnv_mix_usize(&mut h, *i);
+                }
+            }
+        }
     }
     h
 }

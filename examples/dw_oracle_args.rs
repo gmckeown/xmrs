@@ -10,16 +10,16 @@
 //! Per module it prints:
 //!   name <TAB> a3hex32 <TAB> lea_play <TAB> detect_play <TAB> detect_init
 //! where
-//! * `a3hex32`     = `DwLayout::start_offset` as a 32-bit value (the A3
-//!                   base; `-` when 0). Required by the bubble-bobble
-//!                   family; harmless otherwise (the oracle sets A3
-//!                   before each call; self-basing players overwrite it).
-//! * `lea_play`    = the per-frame driver entry found from the Paula
-//!                   `lea (0xdff000).L,A6` (`4D F9 00 DF F0 00`): scan
-//!                   back to the previous function terminator. This is
-//!                   the directly-callable body on the no-wrapper family.
+//! * `a3hex32` = `DwLayout::start_offset` as a 32-bit value (the A3
+//!   base; `-` when 0). Required by the bubble-bobble family; harmless
+//!   otherwise (the oracle sets A3 before each call; self-basing
+//!   players overwrite it).
+//! * `lea_play` = the per-frame driver entry found from the Paula
+//!   `lea (0xdff000).L,A6` (`4D F9 00 DF F0 00`): scan back to the
+//!   previous function terminator. This is the directly-callable body
+//!   on the no-wrapper family.
 //! * `detect_play` / `detect_init` = `DwLayout`'s own offsets (right for
-//!                   a few modules where the lea/wrapper heuristics miss).
+//!   a few modules where the lea/wrapper heuristics miss).
 //!
 //! The batch tries candidate `(init,play)` pairs built from these plus
 //! the universal `(0x0,0xe)` wrapper convention, and keeps the first

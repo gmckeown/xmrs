@@ -264,21 +264,21 @@ impl ItSampleHeader {
             if self.is_stereo() {
                 let sample_len = 2 * self.sample_length as usize;
                 let output = self.it_unpack_16bit(data, sample_len)?;
-                SampleDataType::Stereo16(self.convert_16bit_sample(output.as_slice()))
+                SampleDataType::Stereo16(self.convert_16bit_sample(output.as_slice()).into())
             } else {
                 let sample_len = self.sample_length as usize;
                 let output = self.it_unpack_16bit(data, sample_len)?;
-                SampleDataType::Mono16(self.convert_16bit_sample(output.as_slice()))
+                SampleDataType::Mono16(self.convert_16bit_sample(output.as_slice()).into())
             }
         } else {
             if self.is_stereo() {
                 let sample_len = 2 * self.sample_length as usize;
                 let output = self.it_unpack_8bit(data, sample_len)?;
-                SampleDataType::Stereo8(self.convert_8bit_sample(output.as_slice()))
+                SampleDataType::Stereo8(self.convert_8bit_sample(output.as_slice()).into())
             } else {
                 let sample_len = self.sample_length as usize;
                 let output = self.it_unpack_8bit(data, sample_len)?;
-                SampleDataType::Mono8(self.convert_8bit_sample(output.as_slice()))
+                SampleDataType::Mono8(self.convert_8bit_sample(output.as_slice()).into())
             }
         };
 
@@ -291,11 +291,11 @@ impl ItSampleHeader {
                 let sample_len = 2 * 2 * self.sample_length as usize;
                 let src = self.convert_u8_to_i16_vec(&data[0..sample_len])?;
                 let stereo = self.convert_16bit_sample(src.as_slice());
-                SampleDataType::Stereo16(stereo)
+                SampleDataType::Stereo16(stereo.into())
             } else {
                 let sample_len = 2 * self.sample_length as usize;
                 let src = self.convert_u8_to_i16_vec(&data[0..sample_len])?;
-                SampleDataType::Mono16(self.convert_16bit_sample(src.as_slice()))
+                SampleDataType::Mono16(self.convert_16bit_sample(src.as_slice()).into())
             }
         } else {
             if self.is_stereo() {
@@ -305,7 +305,7 @@ impl ItSampleHeader {
                     .take(sample_len)
                     .map(|&byte| byte as i8)
                     .collect();
-                SampleDataType::Stereo8(self.convert_8bit_sample(src.as_slice()))
+                SampleDataType::Stereo8(self.convert_8bit_sample(src.as_slice()).into())
             } else {
                 let sample_len = self.sample_length as usize;
                 let src: Vec<i8> = data
@@ -313,7 +313,7 @@ impl ItSampleHeader {
                     .take(sample_len)
                     .map(|&byte| byte as i8)
                     .collect();
-                SampleDataType::Mono8(self.convert_8bit_sample(src.as_slice()))
+                SampleDataType::Mono8(self.convert_8bit_sample(src.as_slice()).into())
             }
         };
 
@@ -394,7 +394,7 @@ impl ItSampleHeader {
         for pair in bytes.chunks_exact(2) {
             out.push(i16::from_le_bytes([pair[0], pair[1]]));
         }
-        Ok(SampleDataType::Mono16(out))
+        Ok(SampleDataType::Mono16(out.into()))
     }
 
     /// PCMD single-delta decoder (IT `convert_flags` bit 2 in
@@ -432,13 +432,11 @@ impl ItSampleHeader {
                     out.push(l[i]);
                     out.push(r[i]);
                 }
-                Ok(SampleDataType::Stereo16(out))
+                Ok(SampleDataType::Stereo16(out.into()))
             } else {
-                Ok(SampleDataType::Mono16(decode_delta_16(
-                    &data[..bytes_per_chan],
-                    frame_count,
-                    be,
-                )))
+                Ok(SampleDataType::Mono16(
+                    decode_delta_16(&data[..bytes_per_chan], frame_count, be).into(),
+                ))
             }
         } else {
             let total = if self.is_stereo() {
@@ -460,9 +458,11 @@ impl ItSampleHeader {
                     out.push(l[i]);
                     out.push(r[i]);
                 }
-                Ok(SampleDataType::Stereo8(out))
+                Ok(SampleDataType::Stereo8(out.into()))
             } else {
-                Ok(SampleDataType::Mono8(decode_delta_8(&data[..frame_count])))
+                Ok(SampleDataType::Mono8(
+                    decode_delta_8(&data[..frame_count]).into(),
+                ))
             }
         }
     }

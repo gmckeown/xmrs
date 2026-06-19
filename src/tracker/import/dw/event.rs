@@ -3,7 +3,7 @@
 //! Structured representation of a track byte stream.
 //!
 //! A `.dw` track is a one-dimensional sequence of bytes whose
-//! grammar follows spec §5: bytes `0x00..=0x7F` are notes,
+//! grammar is: bytes `0x00..=0x7F` are notes,
 //! bytes `0x80..=0xFF` are commands with module-dependent
 //! parameter widths. This module turns the raw stream read by
 //! `dw_module::read_track_bytes` into a typed event list that
@@ -13,12 +13,12 @@
 use alloc::vec::Vec;
 
 /// One decoded item from a track stream. The variants mirror the
-/// 14 named commands of spec §5.2 plus three "above-threshold"
+/// 14 named commands plus three "above-threshold"
 /// table accesses ([`Self::SetSample`] / [`Self::SetPitchArpeggio`] /
 /// [`Self::SetVolumeEnvelope`]) and the long-form wait
 /// ([`Self::LongWait`]).
 ///
-/// Parameter widths follow the spec; for the three commands
+/// Parameter widths follow the format; for the three commands
 /// whose parameter count is module-dependent (`Effect8`,
 /// `Effect9`, `StartOrStopSoundFx`) the decoder assumes the
 /// "one parameter byte present" interpretation — refined when
@@ -61,7 +61,7 @@ pub enum DwTrackEvent {
     /// pitch — see `volume_bracket_is_pitch`.)
     SetVolumeEnvelope(u8),
 
-    /// Standard commands (spec §5.2, codes 0..=14).
+    /// Standard commands (codes 0..=14).
     EndOfTrack,
     Slide {
         speed: i8,
@@ -111,7 +111,7 @@ pub enum DwTrackEvent {
 impl DwTrackEvent {
     /// `true` for the `EndOfTrack` terminator — useful when
     /// walking events to know where the channel hands off to
-    /// `advance_position` (spec §9.2).
+    /// `advance_position`.
     #[inline]
     pub fn is_terminator(&self) -> bool {
         matches!(self, DwTrackEvent::EndOfTrack)

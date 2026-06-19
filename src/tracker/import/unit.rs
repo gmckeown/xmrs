@@ -115,9 +115,25 @@ impl TrackImportUnit {
         for m in &self.midi_macros {
             effects.push(TrackEffect::MidiMacro(m.clone()));
         }
+        // A note-column `^^^` (`CellNote::NoteCut`) is inert at dispatch
+        // (see `CellEvent::NoteCut` docs) — the cut is carried by a
+        // `TrackEffect::NoteCut` on the same row. The per-format effect
+        // parsers only emit that effect for the *effect-column* cut
+        // (IT `SCx`, XM `ECx`, S3M `SCx`); a bare note-column cut would
+        // otherwise never silence its voice (the note rings forever).
+        // Co-emit it here, the single unit→cell site, so every format is
+        // covered uniformly. tick 0 = cut immediately at row start;
+        // past = false = cut the live voice only (S7x handles ghosts).
+        if matches!(self.note, CellNote::NoteCut) {
+            effects.push(TrackEffect::NoteCut {
+                tick: 0,
+                past: false,
+            });
+        }
         Cell {
             event: CellEvent::from_columns(self.note, self.instrument, self.velocity),
             effects,
+            expression: crate::core::cell::NoteExpression::NEUTRAL,
         }
     }
 

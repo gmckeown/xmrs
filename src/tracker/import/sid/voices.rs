@@ -22,20 +22,32 @@ pub struct Voices {
     pub songs: Vec<Vec<usize>>,
     pub orderings: Vec<Vec<u8>>,
     pub phrases: Vec<Vec<u8>>,
+    /// Per-tune note-table overflow substitutions `(raw_note, real_note)`,
+    /// consulted by [`decode_phrase`] before the shared default fixup. Needed
+    /// because a note byte > 95 reads engine work-RAM whose value is tune- and
+    /// frame-dependent (see `decode_phrase`); empty for tunes that use the
+    /// shared default.
+    pub overflow_overrides: &'static [(u8, u8)],
 }
 
 impl Voices {
+    /// Assemble the parsed SID voice layout from the decoded tables: replayer
+    /// `version`, per-sub-song order indices (`songs`), per-channel order lists
+    /// (`orderings`), the shared phrase/pattern pool (`phrases`), and the
+    /// per-tune overflow-note overrides.
     pub fn new(
         version: usize,
         songs: Vec<Vec<usize>>,
         orderings: Vec<Vec<u8>>,
         phrases: Vec<Vec<u8>>,
+        overflow_overrides: &'static [(u8, u8)],
     ) -> Self {
         Self {
             version,
             songs,
             orderings,
             phrases,
+            overflow_overrides,
         }
     }
 
@@ -50,87 +62,70 @@ impl Voices {
     /// "all voices wrapped once" terminator can fail to fire and
     /// the row generator runs away. The cap matches `MAX_ROWS` in
     /// [`crate::tracker::import::build`] for symmetry.
-    pub fn get_voice_grid(&self, song_number: usize) -> Vec<Vec<PatternSlot>> {
-        let phrases = self.decode_all_phrases();
-        let voice_orderings = self.voice_orderings(song_number);
-        let num_voices = voice_orderings.len();
-
-        let mut all_done: Vec<bool> = vec![false; num_voices];
-        let mut ordering_cursor: [usize; 3] = [0; 3];
-        let mut grid: Vec<Vec<PatternSlot>> = Vec::new();
-
-        loop {
-            // Snapshot the current phrase per voice.
-            let mut current_phrase: Vec<&Vec<PatternSlot>> = (0..num_voices)
-                .map(|k| pick_phrase(&phrases, voice_orderings[k][ordering_cursor[k]]))
-                .collect();
-            let mut remaining = current_phrase.iter().map(|p| p.len()).max().unwrap_or(0);
-            let mut row_cursor: [usize; 3] = [0; 3];
-
-            while remaining != 0 {
-                if grid.len() >= Self::MAX_GRID_ROWS {
-                    return grid;
-                }
-                let mut row: Vec<PatternSlot> = Vec::with_capacity(num_voices);
-                for k in 0..num_voices {
-                    if row_cursor[k] >= current_phrase[k].len() {
-                        // Advance to the next phrase in voice k's
-                        // ordering, looping back to the start when
-                        // the ordering ends.
-                        ordering_cursor[k] += 1;
-                        if ordering_cursor[k] >= voice_orderings[k].len() {
-                            ordering_cursor[k] = 0;
-                        }
-                        row_cursor[k] = 0;
-                        current_phrase[k] =
-                            pick_phrase(&phrases, voice_orderings[k][ordering_cursor[k]]);
-                        if current_phrase[k].len() > remaining {
-                            remaining = current_phrase[k].len();
-                        }
-                    }
-                    row.push(current_phrase[k][row_cursor[k]]);
-                    row_cursor[k] += 1;
-                }
-                remaining -= 1;
-                grid.push(row);
-            }
-
-            // After the inner loop, advance each voice's ordering
-            // cursor and check termination.
-            for k in 0..num_voices {
-                ordering_cursor[k] += 1;
-                if ordering_cursor[k] >= voice_orderings[k].len() {
-                    ordering_cursor[k] = 0;
-                    all_done[k] = true;
-                    if all_done.iter().all(|&b| b) {
-                        return grid;
-                    }
-                } else if voice_orderings[k][ordering_cursor[k]] == 254 {
-                    // Original SID end-of-song marker.
-                    return grid;
-                }
-            }
-        }
-    }
-
-    /// Defensive cap on the row count `get_voice_grid` will emit
-    /// before giving up. A typical SID song is `lcm(orderings)` ≈
-    /// a few thousand rows; 65 536 rows is roughly 20 min at SID's
-    /// 50 Hz row rate — well past any plausible song.
-    pub const MAX_GRID_ROWS: usize = 1 << 16;
-
-    fn voice_orderings(&self, song_number: usize) -> Vec<&Vec<u8>> {
+    /// Each voice's full single-pass row sequence: the concatenation of every
+    /// phrase in that voice's ordering (until the `254` end-of-song marker or
+    /// the ordering ends). Voices are **not** cycled into a common LCM grid —
+    /// each one is its own length and loops independently via a `ChannelLoop`,
+    /// exactly as the three SID voices run on the real hardware (no global
+    /// realignment). This replaced the old `get_voice_grid` LCM hack, which
+    /// materialised `lcm(voice lengths)` rows (thousands per song) to fit a
+    /// single pattern-style grid — only needed before the DAW layer had
+    /// per-lane loops.
+    /// `short_gate_instrs[i]` true ⇒ instrument `i` is drum-flagged (fxmask
+    /// bit0) and uses a 1-row gate in the v30 replayer — see [`decode_phrase`].
+    /// Empty (or all-false) reproduces the pre-fix behaviour exactly.
+    pub fn voice_passes(
+        &self,
+        song_number: usize,
+        short_gate_instrs: &[bool],
+    ) -> Vec<Vec<PatternSlot>> {
+        let phrases = self.decode_all_phrases(short_gate_instrs);
         self.songs[song_number]
             .iter()
-            .map(|s| &self.orderings[*s])
+            .map(|&oi| {
+                let mut rows: Vec<PatternSlot> = Vec::new();
+                for &p in &self.orderings[oi] {
+                    if p == 254 {
+                        break; // original SID end-of-song marker
+                    }
+                    rows.extend_from_slice(pick_phrase(&phrases, p));
+                }
+                rows
+            })
             .collect()
     }
 
-    fn decode_all_phrases(&self) -> Vec<Vec<PatternSlot>> {
+    fn decode_all_phrases(&self, short_gate_instrs: &[bool]) -> Vec<Vec<PatternSlot>> {
+        let mut sink = Vec::new();
         self.phrases
             .iter()
-            .map(|p| decode_phrase(self.version, p))
+            .map(|p| {
+                decode_phrase(
+                    self.version,
+                    p,
+                    self.overflow_overrides,
+                    short_gate_instrs,
+                    &mut sink,
+                )
+            })
             .collect()
+    }
+
+    /// Diagnostic: every raw note byte > 95 (a `RH_FREQ_HEX` overflow) the
+    /// decoder encounters, as `(phrase_index, raw_note)`. Used by the
+    /// `sid_overflow_scan` example to list which tunes still need
+    /// `overflow_overrides` entries (see [`decode_phrase`]).
+    pub fn raw_overflow_notes(&self) -> Vec<(usize, u8)> {
+        let mut out = Vec::new();
+        for (pi, p) in self.phrases.iter().enumerate() {
+            let mut raw = Vec::new();
+            // Decode with no overrides so we see the original note bytes.
+            let _ = decode_phrase(self.version, p, &[], &[], &mut raw);
+            for n in raw {
+                out.push((pi, n));
+            }
+        }
+        out
     }
 }
 
@@ -151,7 +146,13 @@ fn pick_phrase(phrases: &[Vec<PatternSlot>], idx: u8) -> &Vec<PatternSlot> {
     &phrases[fallback.min(phrases.len() - 1)]
 }
 
-fn decode_phrase(version: usize, source: &[u8]) -> Vec<PatternSlot> {
+fn decode_phrase(
+    version: usize,
+    source: &[u8],
+    overflow_overrides: &[(u8, u8)],
+    short_gate_instrs: &[bool],
+    raw_overflows: &mut Vec<u8>,
+) -> Vec<PatternSlot> {
     // Treat OOB reads as the 0xFF sentinel: a truncated phrase
     // stream terminates instead of panicking.
     let byte = |idx: usize| -> u8 { source.get(idx).copied().unwrap_or(0xFF) };
@@ -214,18 +215,27 @@ fn decode_phrase(version: usize, source: &[u8]) -> Vec<PatternSlot> {
                             // observed playback in the original engine.
                             index = index.saturating_sub(2);
                         } else {
-                            let direction_down = byte(index) & 0b0100_0000 != 0;
-                            let p: u16 =
-                                ((byte(index) as u16 & 0b0011_1111) << 8) | byte(index + 1) as u16;
+                            // Ghidra IK `play` $ae0c (note-fetch): the 2-byte
+                            // portamento is a per-frame 16-bit FREQ-REGISTER delta.
+                            // First byte `b2f1` = direction (bit0: 0=up/add,
+                            // 1=down/sub) + LOW-byte step (bits1-6) + the bit7 porta
+                            // flag; second byte `b2f4` = HIGH-byte step. The slide
+                            // adds/subtracts `(b2f4<<8) | (b2f1 & 0x7e)` to $d400/01
+                            // each gated frame. (The earlier guess — direction in
+                            // bit6, value `(b2&0x3f)<<8 | next` — both mis-combined
+                            // the bytes AND took the wrong direction bit, inflating
+                            // the step ~15× and railing IK's lead to a screech.)
+                            let b2f1 = byte(index) as u16;
+                            let b2f4 = byte(index + 1) as u16;
+                            let direction_down = byte(index) & 1 != 0;
+                            let p: u16 = (b2f4 << 8) | (b2f1 & 0b0111_1110);
                             index += 1;
                             if p != 0 {
-                                // Scale 14-bit value (0-16383) to 8-bit (0-255)
+                                // Per-frame freq-register delta → 8-bit lane param
+                                // (the player recovers `reg_delta = param << 6`; the
+                                // >>6 / <<4 round-trip drops the low 6 bits, ≲2 %).
                                 current.effect_parameter = (p >> 6).min(255) as u8;
-                                if direction_down {
-                                    current.effect_type = 2; // portamento down
-                                } else {
-                                    current.effect_type = 1; // portamento up
-                                }
+                                current.effect_type = if direction_down { 2 } else { 1 };
                             }
                         }
                     }
@@ -233,23 +243,52 @@ fn decode_phrase(version: usize, source: &[u8]) -> Vec<PatternSlot> {
                 index += 1;
             }
 
-            // Note byte: bits 0-6 = note number (0-84 for 7 octaves).
-            // Values > 96 are overflows in the original SID data where
-            // the player reads from memory locations instead of the
-            // frequency table; the hardcoded fixups below reproduce
-            // the original (buggy) behaviour.
+            // Note byte: bits 0-6 = note number. The frequency table
+            // `RH_FREQ_HEX` (192 bytes @ 0x5428 in commando) holds only 96
+            // notes (0-95); a note byte > 95 makes the original replayer index
+            // *past* the table into adjacent engine work-RAM, so its "pitch" is
+            // an overflow artefact, not a real note — the replayer reads
+            // whatever byte happens to live at `RH_FREQ_HEX + note*2`. We
+            // reproduce that at import time by substituting the note the
+            // overflow actually sounds, so the produced track carries the right
+            // notes.
+            //
+            // The default `match` below is the shared, empirically-tuned fixup.
+            // But the overflow target is engine **work-RAM** (e.g. note 104 in
+            // commando lands on `voice_ctrl`), so its value is tune- *and*
+            // frame-dependent: verified via `sidplay --regdump` of the 6502+SID,
+            // note 104 reads ~0x00 (freq-high 0, a near-DC hard-sync slave) in
+            // commando but ~0x41 (a mid note) in monty. A single global value
+            // can't be right for both, so `overflow_overrides` lets a specific
+            // tune (keyed in `OneSid`) substitute its own correct note first —
+            // commando overrides 104/105 → 0 (`RH_FREQ_HEX[0]` = 0x0116, the
+            // closest representable note to its 0x00xx overflow) instead of the
+            // shared default 65 (F-5), which had made its sync-slave voice 1
+            // sound an audible mid tone.
             let n = byte(index) & 0b0111_1111;
-            let note = if n > 8 * 12 {
-                match n {
-                    96 => 0,
-                    97 => 0,
-                    98 => 12,
-                    100 => 3,
-                    104 => 65,
-                    105 => 65,
-                    107 => 6,
-                    127 => 0,
-                    _ => n & 0b0011_1111, // clamp to 0-63 for unmapped overflows
+            // The freq table `RH_FREQ_HEX` holds 96 notes, indices 0..=95, so the
+            // first overflow is note 96 (`>= 8 * 12`), NOT 97. The earlier `n > 96`
+            // guard let raw note 96 through as a real pitch — and Pitch 96 maps to
+            // ~4.2 kHz, which clamps the SID freq register to 0xFFFF (a screeching
+            // rail, e.g. Thing on a Spring's voice-1 noise drum). It also left the
+            // `96 => …` overflow arm below permanently dead. `>=` routes 96 into
+            // the overflow fixup like every other out-of-table index.
+            let note = if n >= 8 * 12 {
+                raw_overflows.push(n); // diagnostic: record the raw overflow note
+                if let Some(&(_, sub)) = overflow_overrides.iter().find(|&&(k, _)| k == n) {
+                    sub
+                } else {
+                    match n {
+                        96 => 0,
+                        97 => 0,
+                        98 => 12,
+                        100 => 3,
+                        104 => 65,
+                        105 => 65,
+                        107 => 6,
+                        127 => 0,
+                        _ => n & 0b0011_1111, // clamp to 0-63 for unmapped overflows
+                    }
                 }
             } else {
                 n
@@ -258,6 +297,15 @@ fn decode_phrase(version: usize, source: &[u8]) -> Vec<PatternSlot> {
                 Ok(p) => CellNote::Play(p),
                 Err(_) => CellNote::Empty,
             };
+        } else {
+            // Appended note (bit 6 set): the replayer re-programs the voice
+            // with the gate cleared (`ctrl & 0xfe`) at the *same* pitch, i.e.
+            // it RELEASES the held note (it never reads a new pitch). Emit a
+            // KeyOff so the voice stops instead of sustaining forever — without
+            // this a note followed by appended entries is held indefinitely
+            // (e.g. Monty's voice 1 F-5 + 7×`0x7f`).
+            current.note = CellNote::KeyOff;
+            current.instrument = last_instr;
         }
 
         // Bit 7 of the note byte is unused in versions 10/15/20.
@@ -273,13 +321,67 @@ fn decode_phrase(version: usize, source: &[u8]) -> Vec<PatternSlot> {
             current.instrument = last_instr;
         }
 
+        // Replicate the replayer's release: a note with the release bit set
+        // (`0x20` clear) is killed when its length expires — at `lengthleft==0`,
+        // i.e. on the LAST of its `length` empty rows, the player gates the
+        // voice off (Rob-Hubbard `ctrl &= 0xfe`, `sustain_release = 0`). Without
+        // this the note holds at full sustain until the next note retriggers,
+        // leaving sustained passages too loud.
+        // v30 drum-flagged instruments (fxmask bit0) use a SHORT, 1-row gate.
+        // The real replayer (Ghidra Delta `play` FUN_c110 $c124) clears the
+        // gate as soon as `lenleft` drops below its initial value — i.e. after
+        // the FIRST row — independent of the note's total `length` and of the
+        // release bit, then rests for the remaining rows. Modelling only the
+        // general `lenleft==0` release (KeyOff on the LAST row) held these
+        // percussive lead accents as sustained notes: Delta voice 1's periodic
+        // "breathing" rests were filled in, flattening the dynamics. So for a
+        // short-gate instrument, emit the KeyOff on the FIRST empty row.
+        let eff_instr = current.instrument.or(last_instr);
+        let is_short_gate = version == 30
+            && eff_instr.is_some_and(|i| short_gate_instrs.get(i).copied().unwrap_or(false));
+        let note_is_play = matches!(current.note, CellNote::Play(_));
+        let emit_kill = note_is_play && (release || is_short_gate);
+        // 0-based index into the trailing empty rows at which the gate releases.
+        let kill_row = if is_short_gate {
+            0
+        } else {
+            length.saturating_sub(1)
+        };
+        // v30 freq-slide ($c338) continuation: the replayer applies the
+        // per-frame slide EVERY frame the note is gated, not just on the
+        // trigger frame. We decode it as a portamento (effect_type 1/2) on the
+        // note cell, but a porta only runs while the effect is present, so the
+        // trailing empty rows would freeze the pitch (the sweep would last one
+        // row instead of the whole note — e.g. Delta sub-song 11 voice 1's
+        // rising sweep stayed dead-flat). Re-emit the same porta on every held
+        // row so the slide runs for the note's full length, matching the chip.
+        // v30 only: v30 puts the $c338 slide on effect 1/2; v10/v20 portamento
+        // is single-shot per the original decoders and must stay bit-identical.
+        let continue_slide = if version == 30 {
+            match current.effect_type {
+                1 | 2 => Some((current.effect_type, current.effect_parameter)),
+                _ => None,
+            }
+        } else {
+            None
+        };
         index += 1;
         phrase.push(current);
 
         if length != 0 {
-            let empty = PatternSlot::default();
-            for _ in 0..length {
-                phrase.push(empty);
+            for k in 0..length {
+                if emit_kill && k == kill_row {
+                    let mut kill = PatternSlot::default();
+                    kill.note = CellNote::KeyOff;
+                    phrase.push(kill);
+                } else if let Some((ft, fp)) = continue_slide {
+                    let mut held = PatternSlot::default();
+                    held.effect_type = ft;
+                    held.effect_parameter = fp;
+                    phrase.push(held);
+                } else {
+                    phrase.push(PatternSlot::default());
+                }
             }
         }
     }
