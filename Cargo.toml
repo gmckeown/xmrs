@@ -1,6 +1,6 @@
 [package]
 name = "xmrs"
-version = "0.14.0"
+version = "0.14.1"
 edition = "2021"
 description = "Read, edit and serialize SoundTracker music with pleasure — MOD/XM/S3M/IT/DW import plus SID & OPL chip synthesis, no_std."
 license = "MIT"

@@ -83,6 +83,12 @@ pub fn pt() -> PlaybackQuirks {
         // same-row loop-jump + break lands at row 0, not the break
         // target (`pt2_replayer.c:1429`).
         pattern_loop_break_resets_row: true,
+        // Amiga channels are hard-panned by the hardware in a fixed
+        // L-R-R-L layout (set by the importer's `channel_defaults`).
+        // That pan is a property of the channel, not the sample, so a
+        // note retrigger must NOT reset it to the sample's centre pan —
+        // mirror S3M, whose Amiga-derived model is `Never`.
+        pan_reset_policy: PanResetPolicy::Never,
         ..PlaybackQuirks::default()
     }
 }

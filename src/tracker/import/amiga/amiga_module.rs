@@ -6,6 +6,7 @@
 
 use super::amiga_sample::AmigaSample;
 use super::patternslot::PatternSlot;
+use crate::core::cell_note::CellNote;
 use crate::tracker::import::bin_reader::ImportError;
 
 use crate::core::fixed::units::Volume;
@@ -55,6 +56,154 @@ fn tag_str_to_num_tracks(tag: &str) -> Option<u8> {
         }
         _ => None,
     }
+}
+
+/// Per-tracker decode quirks selected by the 4-character format tag.
+///
+/// The channel count is already resolved by `tag_str_to_num_tracks`;
+/// these flags capture behaviours that change how the *pattern bytes
+/// and sample headers are interpreted*, not just how wide a pattern
+/// is. They are derived from observable `.mod` format behaviour
+/// (independently re-expressed here, not transcribed from any
+/// player's source).
+#[derive(Copy, Clone, Debug, Default)]
+struct ModDialect {
+    /// NoiseTracker family (`N.T.`, plus the His Master's Noise tags
+    /// `M&K!` / `FEST` which descend from it): a `Dxx` pattern break
+    /// ignores its parameter and always lands on row 0.
+    is_noisetracker: bool,
+    /// His Master's Noise (`M&K!` / `FEST`): the sample finetune byte
+    /// is the full 8-bit value taken as `-(byte << 3)` through an
+    /// `i8`, not the standard signed low nibble shifted into an `i8`.
+    is_hmnt: bool,
+    /// StarTrekker / Exolon (`FLT4` `FLT8` `EXO4` `EXO8`): the `Exx`
+    /// slot triggers assembly macros rather than the ProTracker
+    /// extended-command set, and the tracker caps ticks-per-row at 31.
+    is_startrekker: bool,
+    /// StarTrekker 8-voice layout (`FLT8` / `EXO8`): each logical
+    /// 8-channel pattern is stored on disk as two consecutive
+    /// 4-channel patterns (channels 0-3 then 4-7), and order entries
+    /// count stored patterns, so they are halved.
+    is_flt8: bool,
+}
+
+/// Resolve the decode quirks for a format tag.
+fn tag_dialect(tag: &str) -> ModDialect {
+    let is_hmnt = matches!(tag, "M&K!" | "FEST");
+    ModDialect {
+        is_noisetracker: is_hmnt || tag == "N.T.",
+        is_hmnt,
+        is_startrekker: matches!(tag, "FLT4" | "FLT8" | "EXO4" | "EXO8"),
+        is_flt8: matches!(tag, "FLT8" | "EXO8"),
+    }
+}
+
+/// Apply tag-driven decode quirks to one freshly-parsed pattern slot.
+fn apply_mod_dialect(slot: &mut PatternSlot, dialect: &ModDialect) {
+    const PATTERN_BREAK: u8 = 0x0D;
+    const EXTENDED: u8 = 0x0E;
+    const SET_SPEED: u8 = 0x0F;
+    if dialect.is_noisetracker && slot.effect_type == PATTERN_BREAK {
+        slot.effect_parameter = 0;
+    }
+    if dialect.is_startrekker {
+        if slot.effect_type == EXTENDED {
+            // Assembly-macro trigger, not ProTracker `Exx` — drop it.
+            slot.effect_type = 0;
+            slot.effect_parameter = 0;
+        } else if slot.effect_type == SET_SPEED && slot.effect_parameter > 0x1F {
+            slot.effect_parameter = 0x1F;
+        }
+    }
+}
+
+/// SoundTracker family sophistication ordering for the untagged
+/// 15-sample variants. Higher = a later, more capable tracker. The
+/// `<= Ust1_80` boundary selects the Ultimate Soundtracker effect
+/// interpretation, where commands 1 and 2 are arpeggio and pitch-bend
+/// rather than the ProTracker portamentos, and only commands 0-2 do
+/// anything at all. The fingerprints used to place a file on this
+/// scale (sample-size limits, disk-label sample names, a non-default
+/// tempo byte, and which effect commands appear) are observable facts
+/// of the format, re-expressed here independently.
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
+enum StkVersion {
+    Ust1_00,
+    Ust1_80,
+    St2_00Exterminator,
+    StIii,
+    StIx,
+    Mst1_00,
+    St2_00,
+}
+
+/// Rewrite one 15-sample SoundTracker pattern slot's effect into the
+/// equivalent ProTracker `(command, parameter)` that the shared
+/// pattern→`TrackEffect` mapper already understands.
+fn remap_stk_slot(slot: &mut PatternSlot, version: StkVersion, use_auto_slides: bool) {
+    let mut command = slot.effect_type & 0x0F;
+    let mut param = slot.effect_parameter;
+    if command == 0 && param == 0 {
+        return;
+    }
+
+    // Command fixups that apply regardless of the UST / standard split.
+    if command == 0x0D {
+        if version != StkVersion::St2_00 {
+            // Pre-2.0 SoundTracker: Dxy is a volume slide, not a break.
+            command = 0x0A;
+        } else {
+            param = 0; // pattern break ignores its parameter
+        }
+    } else if command == 0x0C {
+        param &= 0x7F; // volume byte; the chip ignores the top bit
+    } else if command == 0x0E && (param > 0x01 || version < StkVersion::StIx) && use_auto_slides {
+        // Auto volume-slide. xmrs has no continuous-slide primitive, so
+        // approximate with a per-row volume slide (Axx).
+        slot.effect_type = 0x0A;
+        slot.effect_parameter = param;
+        return;
+    } else if command == 0x0F {
+        param &= 0x0F; // only the low nibble is the tick speed
+    }
+
+    if version <= StkVersion::Ust1_80 {
+        // Ultimate Soundtracker effect set.
+        match command {
+            0 => {
+                if param < 0x03 {
+                    // Too small to be an arpeggio — nothing.
+                    command = 0;
+                    param = 0;
+                }
+                // else: arpeggio (command 0 already)
+            }
+            1 => {
+                // Arpeggio, not portamento up.
+                command = 0;
+            }
+            2 => {
+                if param & 0x0F != 0 {
+                    command = 1; // portamento up by the low nibble
+                    param &= 0x0F;
+                } else if param >> 4 != 0 {
+                    command = 2; // portamento down by the high nibble
+                    param >>= 4;
+                } else {
+                    command = 0;
+                    param = 0;
+                }
+            }
+            _ => {
+                // All other commands do nothing in Ultimate Soundtracker.
+                command = 0;
+                param = 0;
+            }
+        }
+    }
+
+    slot.effect_type = command;
+    slot.effect_parameter = param;
 }
 
 /// `Some(num_tracks)` if the four bytes spell a recognised tag.
@@ -120,6 +269,9 @@ pub struct AmigaModule {
     tag: String,
     patterns: Vec<Vec<Vec<PatternSlot>>>, // pattern, row, element
     audio: Vec<Vec<i8>>,
+    /// His Master's Noise (`M&K!` / `FEST`): selects the inverted
+    /// `-(byte << 3)` finetune interpretation in `to_instr`.
+    is_hmnt: bool,
 }
 
 impl AmigaModule {
@@ -136,6 +288,161 @@ impl AmigaModule {
 
     fn get_number_of_patterns(&self) -> usize {
         1 + *self.positions.iter().max().unwrap_or(&0) as usize
+    }
+
+    /// True when a `M.K.`-tagged file is really a "Mod's Grave" `.wow`
+    /// — a Composer-669-to-MOD conversion that keeps the 4-channel
+    /// magic but stores 8 channels of pattern data. Identified purely
+    /// by the file-size arithmetic closing for an 8-channel reading,
+    /// gated by the header constraints a 669 conversion always meets:
+    /// no sample finetune, full default volume on every used sample,
+    /// and no restart position. The 8-channel size never coincides
+    /// with a genuine 4-channel `M.K.` file — that would require the
+    /// pattern region to be zero bytes — so the equality is decisive.
+    fn is_mods_grave(&self, file_len: usize) -> bool {
+        if self.tag != "M.K." || self.restart_position != 0 {
+            return false;
+        }
+        let mut total_sample_bytes = 0usize;
+        for s in &self.samples {
+            if s.finetune != 0 {
+                return false;
+            }
+            if s.length_div2 != 0 && s.volume != 64 {
+                return false;
+            }
+            total_sample_bytes += 2 * s.length_div2 as usize;
+        }
+        let num_patterns = self.get_number_of_patterns();
+        let eight_ch_bytes = 8 * AMIGA_ROWS_PER_PATTERN * AMIGA_SLOT_SIZE; // 2048
+                                                                           // MOD files cannot have an odd length; round down before
+                                                                           // comparing (some .wow files carry one trailing byte).
+        MOD_31_HEADER_SIZE + total_sample_bytes + num_patterns * eight_ch_bytes == (file_len & !1)
+    }
+
+    /// Estimate which SoundTracker (15-sample) authored this file, from
+    /// the same observable fingerprints the format is known to carry:
+    /// sample-size limits, disk-label sample names, the tempo byte, and
+    /// the set of effect commands actually used. Returns the version
+    /// plus whether the auto-volume-slide (`Exx`) behaviour is active.
+    /// Run after patterns are parsed (the scan inspects every slot).
+    fn detect_stk_version(&self) -> (StkVersion, bool) {
+        use StkVersion::*;
+        let mut version = Ust1_00;
+        // True while no sample carries a disk-label name (`st-NN:`),
+        // which Ultimate Soundtracker 1.8 / D.O.C. IX always do.
+        let mut no_disk_names = true;
+
+        for s in &self.samples {
+            let n = s.name.as_bytes();
+            let is_disk = n.len() >= 6 && n[..3].eq_ignore_ascii_case(b"st-") && n[5] == b':';
+            if is_disk {
+                no_disk_names = false;
+            }
+            // Ultimate Soundtracker is capped at ~10 KB samples; larger
+            // ones imply Master Soundtracker 1.0 or later.
+            if s.length_div2 > 4999 || s.repeat_offset_div2 > 9999 {
+                version = version.max(Mst1_00);
+            }
+        }
+
+        // The restart byte doubles as a default-tempo store; 0 means the
+        // 0x78 (120 BPM) default. Anything else implies variable-tempo
+        // support, which only later trackers had.
+        let restart = if self.restart_position == 0 {
+            0x78
+        } else {
+            self.restart_position
+        };
+        if restart != 0x78 {
+            if version > Ust1_80 {
+                version = version.max(if no_disk_names { StIx } else { Mst1_00 });
+            } else {
+                version = version.max(if no_disk_names {
+                    Ust1_80
+                } else {
+                    St2_00Exterminator
+                });
+            }
+        }
+
+        // Pattern scan. Mutations are sequential and order-sensitive:
+        // some effect fingerprints pull the estimate back down to UST.
+        let num_patterns = self.get_number_of_patterns();
+        let mut use_auto_slides = false;
+        let mut total_num_dxx: u32 = 0;
+        for pat in &self.patterns {
+            let mut num_dxx: u32 = 0;
+            let mut auto_slides: u32 = 0;
+            let mut empty_run: u32 = 0;
+            for (row_idx, row) in pat.iter().enumerate() {
+                for slot in row {
+                    let eff = slot.effect_type & 0x0F;
+                    let param = slot.effect_parameter;
+                    let is_empty = matches!(slot.note, CellNote::Empty)
+                        && slot.instrument.is_none()
+                        && slot.effect_type == 0
+                        && slot.effect_parameter == 0;
+                    // A long run of empty cells after a Dxx suggests the
+                    // Dxx really was a pattern break (latest versions).
+                    if empty_run != 0 && is_empty {
+                        empty_run += 1;
+                        if empty_run > 32 {
+                            version = St2_00;
+                        }
+                    } else {
+                        empty_run = 0;
+                    }
+
+                    match eff {
+                        1 | 2 => {
+                            if param > 0x1F && version == Ust1_80 {
+                                version = if no_disk_names { Ust1_80 } else { Ust1_00 };
+                            } else if eff == 1 && (1..0x03).contains(&param) {
+                                // A 1xy with a tiny parameter is not an arpeggio.
+                                version = version.max(St2_00Exterminator);
+                            } else if eff == 1
+                                && (param == 0x37 || param == 0x47)
+                                && version <= St2_00Exterminator
+                            {
+                                // Strongly arpeggio-shaped → pull back to UST.
+                                version = if no_disk_names { Ust1_80 } else { Ust1_00 };
+                            }
+                        }
+                        0x0B => version = St2_00,
+                        0x0C..=0x0E => {
+                            version = version.max(St2_00Exterminator);
+                            if eff == 0x0D {
+                                empty_run = 1;
+                                // A D00 on row 0 is almost certainly a
+                                // tracking slip, not a real break.
+                                if !(param == 0 && row_idx == 0) {
+                                    num_dxx += 1;
+                                }
+                            } else if eff == 0x0E {
+                                auto_slides += 1;
+                                if param > 1 || auto_slides > 1 {
+                                    use_auto_slides = true;
+                                }
+                            }
+                        }
+                        0x0F => version = version.max(StIii),
+                        _ => {}
+                    }
+                }
+            }
+            // A handful of Dxx in a pattern reads as deliberate breaks.
+            if (1..3).contains(&num_dxx) {
+                version = St2_00;
+            }
+            total_num_dxx += num_dxx;
+        }
+        // Conversely, a flood of Dxx can't be pattern breaks.
+        if total_num_dxx > num_patterns as u32 + 32 && version == St2_00 {
+            version = Mst1_00;
+        }
+
+        (version, use_auto_slides)
     }
 
     /// Decide which MOD variant `data` matches, or refuse it. Run
@@ -252,11 +559,25 @@ impl AmigaModule {
         // by contrast, is clamped to the bytes that remain (the
         // COUNTRY.MOD hack in `load`), so a file whose final sample is
         // truncated still loads cleanly — common in the wild.
-        let pattern_size: u32 =
-            num_tracks as u32 * AMIGA_ROWS_PER_PATTERN as u32 * AMIGA_SLOT_SIZE as u32;
         let num_patterns: u32 = max_pos as u32 + 1;
-        let patterns_end: u32 =
-            (header_size as u32).saturating_add(pattern_size.saturating_mul(num_patterns));
+        // StarTrekker 8-voice (`FLT8` / `EXO8`) stores its 8 channels
+        // as two stacked 4-channel patterns, so its on-disk pattern
+        // region is `(num_patterns + 1)` *4-channel* blocks — narrower
+        // and one longer than a flat `num_tracks`-wide reading. Sizing
+        // it as 8-wide here wrongly rejected genuine FLT8 files as "too
+        // short". Mirror `load`'s actual byte consumption per layout.
+        let is_flt8 = tagged
+            && matches!(
+                core::str::from_utf8(&data[0x438..0x438 + 4]),
+                Ok("FLT8") | Ok("EXO8")
+            );
+        let block: u32 = AMIGA_ROWS_PER_PATTERN as u32 * AMIGA_SLOT_SIZE as u32;
+        let pattern_bytes: u32 = if is_flt8 {
+            num_patterns.saturating_add(1).saturating_mul(4 * block)
+        } else {
+            num_patterns.saturating_mul(num_tracks as u32 * block)
+        };
+        let patterns_end: u32 = (header_size as u32).saturating_add(pattern_bytes);
         if patterns_end as usize > data.len() {
             return Err(ImportError::Other("MOD file shorter than declared content"));
         }
@@ -385,25 +706,85 @@ impl AmigaModule {
         }
 
         // patterns
-        let number_of_tracks = match amiga.get_number_of_tracks() {
+        let dialect = tag_dialect(&amiga.tag);
+        amiga.is_hmnt = dialect.is_hmnt;
+
+        // Resolve the effective channel count. The nominal count comes
+        // from the tag; a `M.K.` file whose size only closes for an
+        // 8-channel reading is a "Mod's Grave" .wow masquerading as
+        // 4-channel ProTracker, so widen it to 8.
+        let nominal_tracks = match amiga.get_number_of_tracks() {
             Some(n) => n as usize,
             None => 4, // default is 4...return Result::Err(ImportError::Other("Not an amiga module?")),
         };
+        let number_of_tracks = if amiga.is_mods_grave(ser_amiga_module.len()) {
+            8
+        } else {
+            nominal_tracks
+        };
 
         let number_of_patterns = amiga.get_number_of_patterns();
-        for _p in 0..number_of_patterns {
-            let mut pattern: Vec<Vec<PatternSlot>> = vec![];
-            for _row in 0..64 {
-                let mut row: Vec<PatternSlot> = vec![];
-                for _elt in 0..number_of_tracks {
-                    let e = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-                    let element = PatternSlot::deserialize(e);
-                    row.push(element);
-                    data = &data[4..];
+        if dialect.is_flt8 {
+            // StarTrekker 8-voice: the byte stream is a run of
+            // 4-channel patterns. Logical pattern k is assembled from
+            // stored pattern 2k (channels 0-3) and 2k+1 (channels
+            // 4-7); the order list counts stored patterns, so it is
+            // halved. One extra stored pattern beyond `max(order)+1`
+            // holds the odd half of the last logical pattern.
+            let stored_count = number_of_patterns + 1;
+            let num_logical = stored_count.div_ceil(2);
+            amiga.patterns =
+                vec![vec![vec![PatternSlot::default(); 8]; AMIGA_ROWS_PER_PATTERN]; num_logical];
+            for stored in 0..stored_count {
+                let lp = stored / 2;
+                let ch_base = if stored % 2 == 0 { 0 } else { 4 };
+                for row in 0..AMIGA_ROWS_PER_PATTERN {
+                    for ch in 0..4 {
+                        let e = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+                        let mut slot = PatternSlot::deserialize(e);
+                        apply_mod_dialect(&mut slot, &dialect);
+                        amiga.patterns[lp][row][ch_base + ch] = slot;
+                        data = &data[4..];
+                    }
                 }
-                pattern.push(row);
             }
-            amiga.patterns.push(pattern);
+            // Collapse the even order entries to logical-pattern indices.
+            for p in amiga.positions.iter_mut() {
+                *p /= 2;
+            }
+        } else {
+            for _p in 0..number_of_patterns {
+                let mut pattern: Vec<Vec<PatternSlot>> = vec![];
+                for _row in 0..AMIGA_ROWS_PER_PATTERN {
+                    let mut row: Vec<PatternSlot> = vec![];
+                    for _elt in 0..number_of_tracks {
+                        let e = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+                        let mut element = PatternSlot::deserialize(e);
+                        apply_mod_dialect(&mut element, &dialect);
+                        row.push(element);
+                        data = &data[4..];
+                    }
+                    pattern.push(row);
+                }
+                amiga.patterns.push(pattern);
+            }
+        }
+
+        // 15-sample SoundTracker: the effect set differs from
+        // ProTracker (Ultimate Soundtracker repurposes commands 1/2 as
+        // arpeggio/pitch-bend, older versions use Dxy as a volume
+        // slide, etc.). Estimate the authoring tracker, then rewrite
+        // each slot's effect into the ProTracker-equivalent the shared
+        // mapper consumes downstream.
+        if matches!(variant, AmigaVariant::Fifteen) {
+            let (stk_version, use_auto_slides) = amiga.detect_stk_version();
+            for pat in amiga.patterns.iter_mut() {
+                for row in pat.iter_mut() {
+                    for slot in row.iter_mut() {
+                        remap_stk_slot(slot, stk_version, use_auto_slides);
+                    }
+                }
+            }
         }
 
         // audio
@@ -427,9 +808,50 @@ impl AmigaModule {
         let mut instr: Instrument = Instrument::default();
 
         let mut sample: Sample = self.samples[sample_index].to_sample();
-        sample.data = Some(SampleDataType::Mono8(
-            self.audio[sample_index].clone().into(),
-        ));
+        if self.is_hmnt {
+            // His Master's Noise reads the finetune byte as a full
+            // 8-bit value applied as `-(byte << 3)` through an `i8`
+            // — a wider, inverted range than the standard signed
+            // nibble that `AmigaSample::to_sample` assumes.
+            let ft = self.samples[sample_index].finetune;
+            sample.finetune = Finetune::from_ratio(-(((ft << 3) as i8) as i32), 127);
+        }
+        // Number of leading sample bytes to drop (15-sample SoundTracker
+        // plays a looped sample *from its loop start*, discarding the
+        // attack — see below).
+        let mut skip_bytes = 0usize;
+        if self.get_number_of_samples() == 15 {
+            // 15-sample SoundTracker stores the loop START in bytes,
+            // not words — the shared `to_sample` (ProTracker word
+            // units) doubles it, which can push the loop past the
+            // sample end and silently drop it (e.g. pretend.mod's
+            // sustained "strings2"). The loop LENGTH stays in words.
+            // SoundTracker also ignores all sample data before the loop
+            // start: the sample is re-based so the loop begins at 0 and
+            // the pre-loop attack is dropped (this is what removes the
+            // click — and the spurious note-onset transient — in those
+            // sustained samples).
+            let s = &self.samples[sample_index];
+            let len = 2 * s.length_div2 as u32;
+            let start = s.repeat_offset_div2 as u32; // bytes
+            let length = 2 * s.repeat_length_div2 as u32; // words → bytes
+            if length > 2 && start + length <= len {
+                skip_bytes = start as usize;
+                sample.loop_flag = LoopType::Forward;
+                sample.loop_start = 0;
+                sample.loop_length = length;
+            } else {
+                sample.loop_flag = LoopType::No;
+                sample.loop_start = 0;
+                sample.loop_length = 0;
+            }
+        }
+        let audio = if skip_bytes > 0 && skip_bytes < self.audio[sample_index].len() {
+            self.audio[sample_index][skip_bytes..].to_vec()
+        } else {
+            self.audio[sample_index].clone()
+        };
+        sample.data = Some(SampleDataType::Mono8(audio.into()));
 
         instr.name = sample.name.clone();
 
@@ -470,6 +892,18 @@ impl AmigaModule {
         module.mix_volume = Volume::from_ratio(64, 128);
         module.default_tempo = 6;
         module.default_bpm = 125;
+        // 15-sample SoundTracker repurposes the restart byte as a
+        // default tempo (the 50 Hz VBlank rate expressed as a divider).
+        // The sentinel 0x78 means the plain 125 BPM default; any other
+        // value maps to a CIA tempo via SoundTracker's divider:
+        //   BPM = 709379·125 / (50·122·(240 − restart)).
+        if self.get_number_of_samples() == 15 {
+            let restart = self.restart_position as usize;
+            if restart != 0 && restart != 0x78 && restart < 240 {
+                let denom = 6100 * (240 - restart); // 50·122·(240−restart)
+                module.default_bpm = (88_672_375 + denom / 2) / denom;
+            }
+        }
         // MOD restart byte (offset 0x3B7). Soundtracker / Noisetracker
         // used it as a real loop point; ProTracker writes 0x7F (127)
         // as a "no restart" sentinel. Realised below as a synthetic
@@ -496,12 +930,36 @@ impl AmigaModule {
             module.instrument.push(instr);
         }
 
+        // Amiga channels are hard-panned by the hardware in an
+        // L-R-R-L pattern (channels 0,3 left; 1,2 right; repeating).
+        // Use the de-facto reference separation of 0x40/0xC0 — the same
+        // soft pan the S3M importer already applies — rather than full
+        // hard-pan, which is fatiguing on headphones.
+        let channels = self
+            .patterns
+            .first()
+            .and_then(|p| p.first())
+            .map_or(0, |row| row.len());
+        module.channel_defaults = (0..channels)
+            .map(|ch| {
+                let right = matches!(ch & 3, 1 | 2);
+                crate::core::module::ChannelDefault {
+                    panning: Some(Panning::from_byte_255(if right { 0xC0 } else { 0x40 })),
+                    ..Default::default()
+                }
+            })
+            .collect();
+
         crate::tracker::import::build::build_timeline_layer(&mut module, &pattern_order, &pattern);
-        crate::tracker::import::build::set_song_loop_to_restart_byte(
-            &mut module,
-            0,
-            self.restart_position as usize,
-        );
+        // For 15-sample SoundTracker the restart byte is a tempo, not a
+        // loop position (handled above), so only ProTracker/NoiseTracker
+        // 31-sample files feed it to the restart-loop helper.
+        let restart_loop = if self.get_number_of_samples() == 15 {
+            0
+        } else {
+            self.restart_position as usize
+        };
+        crate::tracker::import::build::set_song_loop_to_restart_byte(&mut module, 0, restart_loop);
 
         module
     }
@@ -584,6 +1042,284 @@ mod tests {
                 "byte 0x{b:02x} should be {}",
                 if expected { "accepted" } else { "rejected" }
             );
+        }
+    }
+
+    // ---- variant decode tests -------------------------------------
+    //
+    // Synthetic fixtures exercise the tag-driven decode quirks without
+    // depending on any sampled `.mod` file: a 31-sample header with a
+    // chosen tag, order list, sample records, and raw pattern bytes.
+
+    use crate::core::cell_note::CellNote;
+
+    /// Build a minimal valid 31-sample MOD image.
+    /// `samples` is `(length_div2, finetune, volume)` per slot (padded
+    /// to 31 with empties); `pattern_bytes` is the raw pattern stream;
+    /// trailing zero sample audio is appended to satisfy size checks.
+    fn build_mod31(
+        tag: &[u8; 4],
+        song_len: u8,
+        restart: u8,
+        order: &[u8],
+        samples: &[(u16, u8, u8)],
+        pattern_bytes: &[u8],
+    ) -> Vec<u8> {
+        let mut v = vec![0u8; MOD_31_HEADER_SIZE];
+        for (i, &(len_div2, finetune, vol)) in samples.iter().enumerate() {
+            let off = 20 + i * AMIGA_SAMPLE_RECORD_SIZE;
+            v[off + 22..off + 24].copy_from_slice(&len_div2.to_be_bytes());
+            v[off + 24] = finetune;
+            v[off + 25] = vol;
+        }
+        let song_len_off = 20 + 31 * AMIGA_SAMPLE_RECORD_SIZE;
+        v[song_len_off] = song_len;
+        v[song_len_off + 1] = restart;
+        for (i, &o) in order.iter().enumerate() {
+            v[song_len_off + 2 + i] = o;
+        }
+        v[0x438..0x438 + 4].copy_from_slice(tag);
+        v.extend_from_slice(pattern_bytes);
+        let audio_bytes: usize = samples.iter().map(|&(l, _, _)| 2 * l as usize).sum();
+        v.resize(v.len() + audio_bytes, 0);
+        v
+    }
+
+    /// One MOD pattern cell: period only (no instrument/effect).
+    fn cell_period(period: u16) -> [u8; 4] {
+        [(period >> 8) as u8, (period & 0xFF) as u8, 0, 0]
+    }
+
+    /// One MOD pattern cell carrying an effect nibble + parameter.
+    fn cell_effect(effect: u8, param: u8) -> [u8; 4] {
+        [0, 0, effect & 0x0F, param]
+    }
+
+    /// A 64-row, `channels`-wide pattern of empty cells, with the row-0
+    /// cells overridden by `row0`.
+    fn pattern_block(channels: usize, row0: &[[u8; 4]]) -> Vec<u8> {
+        let mut p = vec![0u8; channels * AMIGA_ROWS_PER_PATTERN * AMIGA_SLOT_SIZE];
+        for (ch, cell) in row0.iter().enumerate() {
+            p[ch * 4..ch * 4 + 4].copy_from_slice(cell);
+        }
+        p
+    }
+
+    #[test]
+    fn flt8_interleaves_two_stored_halves() {
+        // One logical 8-channel pattern = two stored 4-channel halves.
+        // Half A (channels 0-3) carries a note on channel 0; half B
+        // (channels 4-7) carries a different note on its channel 0,
+        // which must land on logical channel 4.
+        let mut patterns = pattern_block(4, &[cell_period(428)]); // stored 0
+        patterns.extend(pattern_block(4, &[cell_period(480)])); // stored 1
+        let img = build_mod31(b"FLT8", 1, 0, &[0], &[], &patterns);
+
+        let m = AmigaModule::load(&img).expect("FLT8 loads");
+        assert_eq!(
+            m.patterns.len(),
+            1,
+            "two stored halves → one logical pattern"
+        );
+        let row0 = &m.patterns[0][0];
+        assert_eq!(row0.len(), 8, "logical pattern is 8 channels wide");
+        assert!(
+            matches!(row0[0].note, CellNote::Play(_)),
+            "half A note on ch0"
+        );
+        assert!(
+            matches!(row0[4].note, CellNote::Play(_)),
+            "half B note on ch4"
+        );
+        assert_ne!(
+            row0[0].note, row0[4].note,
+            "the two halves are distinct notes"
+        );
+        for ch in [1usize, 2, 3, 5, 6, 7] {
+            assert_eq!(row0[ch].note, CellNote::Empty, "ch{ch} stays empty");
+        }
+    }
+
+    #[test]
+    fn mods_grave_wow_widens_to_eight_channels() {
+        // A `M.K.`-tagged image whose size only closes for 8 channels
+        // is a Mod's Grave .wow: one 8-channel pattern, no samples,
+        // restart 0 → 1084 + 0 + 2048 == file length.
+        let patterns = pattern_block(8, &[cell_period(428)]);
+        let img = build_mod31(b"M.K.", 1, 0, &[0], &[], &patterns);
+        assert_eq!(img.len(), MOD_31_HEADER_SIZE + 8 * 64 * 4);
+
+        let m = AmigaModule::load(&img).expect("WOW loads");
+        assert_eq!(m.patterns[0][0].len(), 8, "M.K. widened to 8 channels");
+
+        // A genuine 4-channel M.K. of the same shape must NOT widen.
+        let patterns4 = pattern_block(4, &[cell_period(428)]);
+        let img4 = build_mod31(b"M.K.", 1, 0, &[0], &[], &patterns4);
+        let m4 = AmigaModule::load(&img4).expect("4ch M.K. loads");
+        assert_eq!(m4.patterns[0][0].len(), 4, "real M.K. stays 4 channels");
+    }
+
+    #[test]
+    fn noisetracker_pattern_break_drops_parameter() {
+        // N.T.: a Dxx pattern break always lands on row 0, so the
+        // parameter is zeroed at import.
+        let patterns = {
+            let mut p = pattern_block(4, &[cell_effect(0x0D, 0x20)]);
+            // ProTracker-tagged control: parameter must survive.
+            p.extend(pattern_block(4, &[]));
+            p
+        };
+        let nt = build_mod31(b"N.T.", 1, 0, &[0, 1], &[], &patterns);
+        let m = AmigaModule::load(&nt).expect("N.T. loads");
+        assert_eq!(m.patterns[0][0][0].effect_type, 0x0D);
+        assert_eq!(
+            m.patterns[0][0][0].effect_parameter, 0,
+            "NoiseTracker Dxx param dropped"
+        );
+
+        let pt = build_mod31(b"M.K.", 1, 0, &[0, 1], &[], &patterns);
+        let mp = AmigaModule::load(&pt).expect("M.K. loads");
+        assert_eq!(
+            mp.patterns[0][0][0].effect_parameter, 0x20,
+            "ProTracker keeps Dxx param"
+        );
+    }
+
+    fn first_sample_finetune(m: &Module) -> Finetune {
+        match &m.instrument[0].instr_type {
+            InstrumentType::Default(idef) => idef.sample[0].as_ref().unwrap().finetune,
+            _ => panic!("expected default instrument"),
+        }
+    }
+
+    #[test]
+    fn his_masters_noise_finetune_differs_from_standard() {
+        // Same finetune byte decodes to opposite signs: the standard
+        // path reads the low nibble as a positive offset, HMN reads
+        // -(byte << 3) → negative.
+        let patterns = pattern_block(4, &[]);
+        let hmn = build_mod31(b"M&K!", 1, 0, &[0], &[(1, 0x01, 64)], &patterns);
+        let mk = build_mod31(b"M.K.", 1, 0, &[0], &[(1, 0x01, 64)], &patterns);
+
+        let mhmn = AmigaModule::load(&hmn).unwrap();
+        assert!(mhmn.is_hmnt, "M&K! flagged as His Master's Noise");
+        let f_hmn = first_sample_finetune(&mhmn.to_module()).to_signed_byte(127);
+        let f_mk =
+            first_sample_finetune(&AmigaModule::load(&mk).unwrap().to_module()).to_signed_byte(127);
+        assert_ne!(f_hmn, f_mk, "HMN finetune mapping diverges from standard");
+        assert!(
+            f_hmn < 0,
+            "HMN finetune is negative for byte 0x01 (got {f_hmn})"
+        );
+        assert!(
+            f_mk > 0,
+            "standard finetune is positive for nibble 0x01 (got {f_mk})"
+        );
+    }
+
+    // ---- 15-sample SoundTracker tests -----------------------------
+
+    /// Build a minimal valid 15-sample (untagged) SoundTracker image.
+    /// `samples` is `(length_div2, finetune, volume, rep_off, rep_len)`.
+    fn build_mod15(
+        song_len: u8,
+        restart: u8,
+        order: &[u8],
+        samples: &[(u16, u8, u8, u16, u16)],
+        pattern_bytes: &[u8],
+    ) -> Vec<u8> {
+        let mut v = vec![0u8; MOD_15_HEADER_SIZE];
+        for (i, &(len, ft, vol, ro, rl)) in samples.iter().enumerate() {
+            let off = 20 + i * AMIGA_SAMPLE_RECORD_SIZE;
+            v[off + 22..off + 24].copy_from_slice(&len.to_be_bytes());
+            v[off + 24] = ft;
+            v[off + 25] = vol;
+            v[off + 26..off + 28].copy_from_slice(&ro.to_be_bytes());
+            v[off + 28..off + 30].copy_from_slice(&rl.to_be_bytes());
+        }
+        let song_len_off = 20 + 15 * AMIGA_SAMPLE_RECORD_SIZE;
+        v[song_len_off] = song_len;
+        v[song_len_off + 1] = restart;
+        for (i, &o) in order.iter().enumerate() {
+            v[song_len_off + 2 + i] = o;
+        }
+        v.extend_from_slice(pattern_bytes);
+        let audio: usize = samples.iter().map(|&(l, _, _, _, _)| 2 * l as usize).sum();
+        v.resize(v.len() + audio, 0);
+        v
+    }
+
+    /// A pattern cell with an explicit raw command nibble + parameter.
+    fn cell_cmd(cmd: u8, param: u8) -> [u8; 4] {
+        [0, 0, cmd & 0x0F, param]
+    }
+
+    #[test]
+    fn ultimate_soundtracker_remaps_arpeggio_and_pitchbend() {
+        // Small samples + only 1xx/2xx effects → detected as Ultimate
+        // Soundtracker, where command 1 is arpeggio and command 2 is
+        // pitch-bend (low nibble up / high nibble down).
+        let row0 = [cell_cmd(1, 0x47), cell_cmd(2, 0x30), [0; 4], [0; 4]];
+        let patterns = pattern_block(4, &row0);
+        let img = build_mod15(1, 0, &[0], &[(10, 0, 64, 0, 1)], &patterns);
+
+        let m = AmigaModule::load(&img).expect("UST loads");
+        // command 1 → ProTracker arpeggio (command 0), param preserved.
+        assert_eq!(m.patterns[0][0][0].effect_type, 0x00);
+        assert_eq!(m.patterns[0][0][0].effect_parameter, 0x47);
+        // command 2 high nibble → portamento down (command 2), param>>4.
+        assert_eq!(m.patterns[0][0][1].effect_type, 0x02);
+        assert_eq!(m.patterns[0][0][1].effect_parameter, 0x03);
+    }
+
+    #[test]
+    fn later_soundtracker_keeps_protracker_effects() {
+        // A large sample (> UST's ~10 KB limit) forces a Master
+        // Soundtracker / later estimate, where the standard ProTracker
+        // effect set applies: command 1 stays portamento up.
+        let row0 = [cell_cmd(1, 0x47), [0; 4], [0; 4], [0; 4]];
+        let patterns = pattern_block(4, &row0);
+        let img = build_mod15(1, 0, &[0], &[(6000, 0, 64, 0, 1)], &patterns);
+
+        let m = AmigaModule::load(&img).expect("MST loads");
+        assert_eq!(
+            m.patterns[0][0][0].effect_type, 0x01,
+            "command 1 stays portamento up for non-UST SoundTracker"
+        );
+        assert_eq!(m.patterns[0][0][0].effect_parameter, 0x47);
+    }
+
+    #[test]
+    fn amiga_channels_pan_lrrl() {
+        // 4-channel MOD → hardware L-R-R-L hard-pan at 0x40/0xC0.
+        let patterns = pattern_block(4, &[]);
+        let img = build_mod31(b"M.K.", 1, 0, &[0], &[], &patterns);
+        let m = AmigaModule::load(&img).unwrap().to_module();
+        assert_eq!(m.channel_defaults.len(), 4);
+        let left = Panning::from_byte_255(0x40);
+        let right = Panning::from_byte_255(0xC0);
+        assert_eq!(m.channel_defaults[0].panning, Some(left));
+        assert_eq!(m.channel_defaults[1].panning, Some(right));
+        assert_eq!(m.channel_defaults[2].panning, Some(right));
+        assert_eq!(m.channel_defaults[3].panning, Some(left));
+    }
+
+    #[test]
+    fn soundtracker_loop_start_is_bytes_with_attack_dropped() {
+        // SoundTracker loop start is in bytes (not words) and the
+        // pre-loop attack is discarded so the loop begins at sample 0.
+        // rep_off=4 bytes, rep_len=3 words → loop length 6 bytes.
+        let patterns = pattern_block(4, &[]);
+        let img = build_mod15(1, 0, &[0], &[(10, 0, 64, 4, 3)], &patterns);
+        let m = AmigaModule::load(&img).unwrap().to_module();
+        match &m.instrument[0].instr_type {
+            InstrumentType::Default(idef) => {
+                let s = idef.sample[0].as_ref().unwrap();
+                assert_eq!(s.loop_flag, LoopType::Forward);
+                assert_eq!(s.loop_start, 0, "loop re-based to 0 after dropping attack");
+                assert_eq!(s.loop_length, 6, "loop length = rep_len words → bytes");
+            }
+            _ => panic!("expected default instrument"),
         }
     }
 }
