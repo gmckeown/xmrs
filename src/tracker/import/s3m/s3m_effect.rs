@@ -308,11 +308,11 @@ impl S3mEffect {
             FrequencyType::LinearFrequencies => 4,
             FrequencyType::AmigaFrequencies => 1,
         };
-        // oldstvib (masterflags bit 1) doubles the vibrato depth —
-        // ST3 uses a `>> 4` shift under this flag instead of the
-        // regular `>> 5`, giving 2× the depth. The same applies to
-        // the fine vibrato U (`>> 6` vs `>> 7`). Absorbed into the
-        // emitted depth (Q8.8 raw multiplier) so the player stays
+        // oldstvib (masterflags bit 1) doubles the vibrato depth: ST3
+        // uses `vdepth = 5` (`/32`) under this flag instead of the
+        // regular `vdepth = 6` (`/64`), i.e. one bit less of right
+        // shift on the period delta. Applied to both H and U as a ×2
+        // multiplier on the emitted depth so the player stays
         // agnostic.
         let vib_depth_scale: i16 = if flags.oldstvib { 2 } else { 1 };
         match current.effect_type {
@@ -372,12 +372,24 @@ impl S3mEffect {
                 Some(vec![TrackImportEffect::TonePortamento(speed)])
             }
 
-            // H - Vibrato. depth in semitones: `y/16 * vib_depth_scale`.
-            // Q8.8 raw: `y * 16 * vib_depth_scale`.
+            // H - Vibrato. S3M is an Amiga-period format, and the
+            // player applies the effect vibrato in Amiga mode as a
+            // raw *period* delta (`outPeriod = realPeriod ± depth`),
+            // NOT a semitone shift. The depth must therefore be in
+            // Amiga period units, exactly like the ProTracker/MOD
+            // path (`xm_vibrato_depth(.., Amiga, protracker)` →
+            // `(255 * y) >> 7`). This reproduces ST3 / OpenMPT
+            // `ProcessVibrato`: peak `ModSinusTable` = 127, `vdepth =
+            // 6` ⇒ period delta `= 127 * y / 64 ≈ (255 * y) >> 7`.
+            // (The old `y * 16` was a *semitone* Q8.8 scale — correct
+            // only for a Linear-period player — and made the vibrato
+            // ~8× too deep, a wild multi-semitone wail instead of the
+            // intended gentle swing.) `vib_depth_scale` carries the
+            // `oldstvib` ×2 (ST3 `vdepth = 5`, i.e. `/32`).
             8 => {
                 let speed = lfo_speed_from_nibble_64((param & 0xF0) >> 4);
                 let l = (param & 0x0F) as i16;
-                let depth = PitchDelta::from_q8_8_i16(l * 16 * vib_depth_scale);
+                let depth = PitchDelta::from_q8_8_i16(((255 * l) >> 7) * vib_depth_scale);
                 Some(vec![TrackImportEffect::Vibrato(speed, depth)])
             }
 
@@ -520,12 +532,13 @@ impl S3mEffect {
                 }
             }
 
-            // U - Fine vibrato (4x finer depth than H). Q8.8 raw:
-            // `y/64 * 256 = y * 4 * vib_depth_scale`.
+            // U - Fine vibrato: 4× finer depth than H (ST3 `vdepth +=
+            // 2`, i.e. `/256` vs H's `/64`). Same Amiga period-unit
+            // scale as H, shifted two extra bits: `(255 * y) >> 9`.
             21 => {
                 let speed = lfo_speed_from_nibble_64((param & 0xF0) >> 4);
                 let l = (param & 0x0F) as i16;
-                let depth = PitchDelta::from_q8_8_i16(l * 4 * vib_depth_scale);
+                let depth = PitchDelta::from_q8_8_i16(((255 * l) >> 9) * vib_depth_scale);
                 Some(vec![TrackImportEffect::VibratoFine(speed, depth)])
             }
 
