@@ -568,10 +568,45 @@ impl S3mEffect {
                 Some(vec![TrackImportEffect::VibratoFine(speed, depth)])
             }
 
-            // X - Set panning
-            24 => Some(vec![TrackImportEffect::Panning(Panning::from_byte_255(
-                param,
-            ))]),
+            // X - Set panning. ST3 / OpenMPT / Schism treat the S3M
+            // `Xxx` command as **7-bit** (`0x00..=0x80`, `0x80` = hard
+            // right) and double it onto the full pan range; `0xA4` is
+            // the surround sentinel and any other value `> 0x80`
+            // clamps to hard right. Mirrors Schism
+            // `csf_import_s3m_effect` (`!from_it`): `0xA4 → surround`,
+            // `> 0x7F → 0xFF`, else `param *= 2`. (Was
+            // `from_byte_255(param)` — half-range: `X80` landed at
+            // centre and the whole pan was squashed into the left
+            // half, e.g. an intended hard-right `X80` played dead
+            // centre.)
+            // X - Set panning. ST3 / OpenMPT / Schism treat the S3M
+            // `Xxx` command as **7-bit** (`0x00..=0x80`, `0x80` = hard
+            // right) and double it onto the full pan range; `0xA4` is
+            // the surround sentinel and any other value `> 0x80`
+            // clamps to hard right. Mirrors Schism
+            // `csf_import_s3m_effect` (`!from_it`): `0xA4 → surround`,
+            // `> 0x7F → 0xFF`, else `param *= 2`. (Was
+            // `from_byte_255(param)` — half-range: `X80` landed at
+            // centre and the whole pan was squashed into the left
+            // half, e.g. an intended hard-right `X80` played dead
+            // centre.)
+            24 => {
+                if param == 0xA4 {
+                    // Surround: centre pan + surround flag.
+                    Some(vec![
+                        TrackImportEffect::Panning(Panning::CENTER),
+                        TrackImportEffect::InstrumentSurround(true),
+                    ])
+                } else if param > 0x7F {
+                    Some(vec![TrackImportEffect::Panning(Panning::from_byte_255(
+                        0xFF,
+                    ))])
+                } else {
+                    Some(vec![TrackImportEffect::Panning(Panning::from_byte_255(
+                        param * 2,
+                    ))])
+                }
+            }
 
             _ => None,
         }
