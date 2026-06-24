@@ -985,38 +985,42 @@ impl S3mModule {
     /// channel slots declared by the file. Each entry's pan and
     /// mute flag come straight from the channel byte.
     ///
-    /// Mapping mirrors schism's `fmt/s3m.c:208-213`:
-    /// - bit 0x80 → channel disabled (muted)
-    /// - bit 0x10 → Adlib (no PCM pan; left at default)
-    /// - bit 0x08 set → R-side default (~0.78)
-    /// - bit 0x08 clear → L-side default (~0.22)
+    /// The S3M channel-settings byte is a documented format field;
+    /// its meaning (an ST3 playback fact, not borrowed code):
+    /// - bit 0x80 → channel muted (high bit is a mute flag; strip it
+    ///   before classifying the type)
+    /// - type 0x00..=0x07 → L1-L8 (soft left)
+    /// - type 0x08..=0x0F → R1-R8 (soft right)
+    /// - type 0x10..=0x18 → Adlib A1-A9 (centre, no PCM pan)
+    /// - type 0x19..=0x7F (incl. the disabled sentinel 0xFF, whose
+    ///   stripped type is 0x7F) → disabled / "broken" → **muted**.
+    ///   ST3 shows these as `(--)` and never plays them; the pattern
+    ///   data they carry is leftover and must stay silent.
+    ///
+    /// The earlier code special-cased `0xFF` *before* testing the
+    /// mute bit and returned an unmuted default, so disabled slots
+    /// played their residual notes (e.g. PANIC.S3M ch25/ch31 — a
+    /// stray bass + clicks on an out-of-range instrument).
     fn header_channel_defaults(&self) -> Vec<ChannelDefault> {
         self.header
             .channel_settings
             .iter()
             .map(|&s| {
-                if s == 0xFF {
-                    // Unused channel slot — leave fully default.
-                    ChannelDefault::default()
-                } else if s & 0x80 != 0 {
-                    // Disabled channel.
-                    ChannelDefault {
-                        muted: true,
-                        ..ChannelDefault::default()
-                    }
-                } else if s & 0x10 != 0 {
-                    // Adlib — no PCM pan.
-                    ChannelDefault::default()
-                } else if s & 0x08 != 0 {
-                    ChannelDefault {
-                        panning: Some(Panning::from_byte_255(0xC0)), // soft right
-                        ..ChannelDefault::default()
-                    }
+                let muted_flag = s & 0x80 != 0;
+                let c = s & 0x7F;
+                let (panning, type_muted) = if c < 0x08 {
+                    (Some(Panning::from_byte_255(0x40)), false) // L1-L8 soft left
+                } else if c < 0x10 {
+                    (Some(Panning::from_byte_255(0xC0)), false) // R1-R8 soft right
+                } else if c < 0x19 {
+                    (None, false) // Adlib A1-A9 — centre, no PCM pan
                 } else {
-                    ChannelDefault {
-                        panning: Some(Panning::from_byte_255(0x40)), // soft left
-                        ..ChannelDefault::default()
-                    }
+                    (None, true) // Disabled (0xFF/0x7F) or broken type
+                };
+                ChannelDefault {
+                    muted: muted_flag || type_muted,
+                    panning,
+                    ..ChannelDefault::default()
                 }
             })
             .collect()
