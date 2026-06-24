@@ -331,17 +331,28 @@ impl S3mEffect {
                 let high = (param & 0xF0) >> 4;
                 let low = param & 0x0F;
                 match (high, low) {
-                    // EEy: extra-fine slide down (ST3: `info & 0xF`
-                    // subtracted from aspd at tick 0 only). 1x scale
-                    // in ST3 units = `main_scale` in xmrs period
-                    // units.
+                    // EEy: extra-fine slide down. ST3 / Schism
+                    // `fx_extra_fine_portamento` slides by `y` once
+                    // (tick 0), while the regular slide is `y * 4` per
+                    // tick — so extra-fine is 1/4 of one regular tick.
+                    // A regular tick is `main_scale * y` in xmrs Amiga
+                    // units (validated against pt2-clone via the MOD
+                    // path), hence extra-fine = `main_scale * y / 4`.
+                    // (For `y < 4` in Amiga mode this is below our
+                    // period resolution and rounds to 0 — a sub-3-cent
+                    // slide ST3's 4×-finer grid can express but ours
+                    // can't. Was `main_scale * y`, i.e. 4× too large.)
                     (0xE, f) => Some(vec![TrackImportEffect::PortamentoExtraFineDown(
-                        main_scale * f as i16,
+                        main_scale * f as i16 / 4,
                     )]),
-                    // EFy: "extra" fine slide down (4x scale, once
-                    // at tick 0).
+                    // EFy: fine slide down. ST3 / Schism
+                    // `fx_fine_portamento` slides by `y * 4` once =
+                    // exactly one regular tick's worth, so it equals
+                    // the regular per-tick amount `main_scale * y`.
+                    // (Was `main_scale * 4 * y` — 4× too large in Amiga
+                    // mode, making fine slides 4× too fast.)
                     (0xF, f) => Some(vec![TrackImportEffect::PortamentoFineDown(
-                        main_scale * 4 * f as i16,
+                        main_scale * f as i16,
                     )]),
                     _ => Some(vec![TrackImportEffect::PortamentoDown(
                         main_scale * param as i16,
@@ -354,11 +365,15 @@ impl S3mEffect {
                 let high = (param & 0xF0) >> 4;
                 let low = param & 0x0F;
                 match (high, low) {
+                    // FEy / FFy: mirror of E (see the down-slide
+                    // comments). Extra-fine = `main_scale * y / 4`,
+                    // fine = `main_scale * y` (one regular tick), both
+                    // negated because up-slide lowers the period.
                     (0xE, f) => Some(vec![TrackImportEffect::PortamentoExtraFineUp(
-                        -main_scale * f as i16,
+                        -(main_scale * f as i16 / 4),
                     )]),
                     (0xF, f) => Some(vec![TrackImportEffect::PortamentoFineUp(
-                        -main_scale * 4 * f as i16,
+                        -main_scale * f as i16,
                     )]),
                     _ => Some(vec![TrackImportEffect::PortamentoUp(
                         -main_scale * param as i16,
@@ -471,13 +486,24 @@ impl S3mEffect {
                 Some(vec![TrackImportEffect::NoteRetrigExtendedS3m(speed, vol)])
             }
 
-            // R - Tremolo. depth in volume amplitude: `y/16 *
-            // vib_depth_scale`. Q15 raw: `y * 2048 *
-            // vib_depth_scale`, saturating at Q15 max.
+            // R - Tremolo. The player adds the tremolo LFO output to a
+            // Q15 volume where full scale ≈ 32768. ST3 / OpenMPT
+            // `ProcessTremolo` computes the volume delta as `(delta *
+            // depth) / (1 << 6)` on a 0..256 volume scale, with
+            // `delta` = `ModSinusTable` (peak 127). Converting that
+            // peak to our Q15 full scale: `127 * y / 64 * (32768/256)
+            // = 127 * y * 2 = 254 * y`. (The old `y * 2048` matched a
+            // 0..64 volume scale, leaving the tremolo ~8× too deep — a
+            // near full-scale amplitude wobble instead of ST3's subtle
+            // swing.) Unlike the vibrato, ST3 does NOT apply the
+            // `oldstvib`/`S3MOLDVIBRATO` ×2 to tremolo (OpenMPT's
+            // attenuation is a fixed `6` for S3M; the flag only
+            // touches `ProcessVibrato`), so `vib_depth_scale` is not
+            // applied here.
             18 => {
                 let speed = lfo_speed_from_nibble_64((param & 0xF0) >> 4);
                 let l = (param & 0x0F) as i32;
-                let depth = Q15::from_i32_unsigned_sat(l * 2048 * vib_depth_scale as i32);
+                let depth = Q15::from_i32_unsigned_sat(254 * l);
                 Some(vec![TrackImportEffect::Tremolo(speed, depth)])
             }
 
