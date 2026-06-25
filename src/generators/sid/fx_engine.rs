@@ -80,7 +80,11 @@ pub(crate) fn modulate(
         let p = (frame % period) as i64;
         let phase = if p <= depth { p } else { period as i64 - p };
         let semitone = (base as i64) * SEMI_NUM / SEMI_DEN;
-        let step = semitone >> (fx.vib_div as u32);
+        // `vib_div` is a right-shift divisor decoded from instrument data; real
+        // tunes carry tiny values. Clamp to the i64 width so a hand-crafted /
+        // deserialized `SidFx` with `vib_div >= 64` cannot overflow the shift
+        // (debug panic). No-op for every real value — bit-identical.
+        let step = semitone >> (fx.vib_div as u32).min(63);
         let delta = (phase - depth / 2) * step;
         reg = freq_reg((base as i64 + delta).max(0) as u32, clock_hz);
     } else if fx.vibrato && fx.vib_depth != 0 && vib_ok {
@@ -163,7 +167,11 @@ pub(crate) fn modulate(
     if fx.interp_vib && fx.interp_half_depth > 0 {
         let base_reg = freq_reg(base, clock_hz) as i32;
         let down1 = freq_reg(shift_semitones_down(base, 1), clock_hz) as i32;
-        let step = (base_reg - down1) >> fx.interp_shift;
+        // `interp_shift` is instrument-derived; real tunes use small values.
+        // Clamp to the i32 width so a crafted / deserialized `SidFx` with
+        // `interp_shift >= 32` cannot overflow the shift (debug panic). No-op
+        // for every real value — bit-identical.
+        let step = (base_reg - down1) >> fx.interp_shift.min(31);
         let half = (fx.interp_half_depth >> 1) as i32;
         let ctr = s.interp_ctr as i32;
         reg = (base_reg - half * step + ctr * step).clamp(0, 0xFFFF) as u16;

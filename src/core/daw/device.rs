@@ -444,8 +444,15 @@ const REVERB_FIXED_GAIN_Q15: i64 = dsp::q15_ratio(15, 1000) as i64;
 const REVERB_SCALEWET: i64 = 3;
 /// Freeverb `scaledry` — the dry level can reach 2×.
 const REVERB_SCALEDRY: i64 = 2;
-/// Comb feedback for a **frozen** tail: unit gain (`1.0`) so the
+/// Comb feedback for a **frozen** tail: exact unit gain so the
 /// recirculating signal neither grows nor decays (Freeverb `roomsize1 = 1`).
+///
+/// `q15_ratio(1, 1)` is `32768 = 2^15`, which is the *exact* unity for the
+/// comb's `(filterstore * feedback) >> 15` recirculation (not `Q15::ONE =
+/// 32767`, which would introduce a slow decay). It is deliberately above
+/// `REVERB_FEEDBACK_MAX_Q15` (0.992): the normal-mode clamp keeps tails
+/// stable, while freeze mode wants true 1.0. The damping stage (`damp2`)
+/// already holds the closed-loop gain just under 1.0, so it never grows.
 const REVERB_FREEZE_FEEDBACK: i32 = dsp::q15_ratio(1, 1);
 
 /// Freeverb room-size mapping: `feedback = room·scaleroom + offsetroom`.
@@ -668,6 +675,12 @@ impl Device {
         right_delay_ms: u16,
         pan_delay: bool,
     ) -> Self {
+        // Clamp to the buffer-backed maximum: `prepare` only allocates
+        // `ECHO_MAX_DELAY_MS` of delay line, so a longer request would be
+        // silently truncated at read time. In-range DMO params are
+        // unaffected.
+        let left_delay_ms = left_delay_ms.min(ECHO_MAX_DELAY_MS as u16);
+        let right_delay_ms = right_delay_ms.min(ECHO_MAX_DELAY_MS as u16);
         Device::Echo {
             wet_dry,
             feedback,
@@ -694,6 +707,10 @@ impl Device {
         base_delay_ms_q8_8: u16,
         quadrature: bool,
     ) -> Self {
+        // Clamp the centre delay to the buffer-backed maximum (Q8.8 ms);
+        // `prepare` allocates only `MODDELAY_MAX_MS`. In-range DMO params
+        // are unaffected.
+        let base_delay_ms_q8_8 = base_delay_ms_q8_8.min((MODDELAY_MAX_MS * 256) as u16);
         Device::ModDelay {
             mode,
             wet_dry,

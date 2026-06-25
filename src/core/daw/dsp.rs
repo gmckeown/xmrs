@@ -557,7 +557,7 @@ impl DelayLine {
 }
 
 /// `scaledamp` from Freeverb (damping → feedback-LPF coefficient), Q15.
-const FREEVERB_SCALEDAMP_Q15: i64 = 13_107; // 0.4 · 32768
+const FREEVERB_SCALEDAMP_Q15: i64 = q15_ratio(2, 5) as i64; // 0.4
 
 /// A Freeverb-style **lowpass-damped comb filter** (a fixed delay whose
 /// feedback path runs through a one-pole lowpass). Operates in Q15.16
@@ -638,7 +638,7 @@ pub struct Allpass {
 impl Allpass {
     pub fn new() -> Self {
         Self {
-            feedback_q15: 16_384, // 0.5
+            feedback_q15: q15_ratio(1, 2), // 0.5
             ..Self::default()
         }
     }

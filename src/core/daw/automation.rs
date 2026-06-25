@@ -493,33 +493,32 @@ impl AutomationLane {
     /// the runtime typically reads a single-tick window and so
     /// pays for ≤ 1-2 elements per call in practice.
     pub fn events_in(&self, start_tick: u32, end_tick: u32) -> alloc::vec::Vec<LaneEvent<'_>> {
-        let in_window = |t: u32| t >= start_tick && t < end_tick;
         let mut out: alloc::vec::Vec<LaneEvent<'_>> = alloc::vec::Vec::new();
+        // Events are sorted ascending by tick, so the half-open window
+        // is a contiguous slice: binary-search its bounds instead of
+        // scanning the whole stream (this is called once per tick by
+        // the runtime, with a 1-2 element window).
         match &self.kind {
-            LaneKind::Points(points) => out.extend(
-                points
-                    .iter()
-                    .filter(|p| in_window(p.tick))
-                    .map(LaneEvent::Point),
-            ),
-            LaneKind::Lfo { events } => out.extend(
-                events
-                    .iter()
-                    .filter(|e| in_window(e.tick()))
-                    .map(LaneEvent::Lfo),
-            ),
-            LaneKind::Slide { events } => out.extend(
-                events
-                    .iter()
-                    .filter(|e| in_window(e.tick()))
-                    .map(LaneEvent::Slide),
-            ),
-            LaneKind::Glide { events } => out.extend(
-                events
-                    .iter()
-                    .filter(|e| in_window(e.tick()))
-                    .map(LaneEvent::Glide),
-            ),
+            LaneKind::Points(points) => {
+                let lo = points.partition_point(|p| p.tick < start_tick);
+                let hi = points.partition_point(|p| p.tick < end_tick);
+                out.extend(points[lo..hi].iter().map(LaneEvent::Point));
+            }
+            LaneKind::Lfo { events } => {
+                let lo = events.partition_point(|e| e.tick() < start_tick);
+                let hi = events.partition_point(|e| e.tick() < end_tick);
+                out.extend(events[lo..hi].iter().map(LaneEvent::Lfo));
+            }
+            LaneKind::Slide { events } => {
+                let lo = events.partition_point(|e| e.tick() < start_tick);
+                let hi = events.partition_point(|e| e.tick() < end_tick);
+                out.extend(events[lo..hi].iter().map(LaneEvent::Slide));
+            }
+            LaneKind::Glide { events } => {
+                let lo = events.partition_point(|e| e.tick() < start_tick);
+                let hi = events.partition_point(|e| e.tick() < end_tick);
+                out.extend(events[lo..hi].iter().map(LaneEvent::Glide));
+            }
         }
         out
     }
@@ -553,11 +552,26 @@ impl AutomationLane {
         } else {
             return None;
         };
+        // Events are sorted ascending by tick (lane invariant), so the
+        // state at `tick` depends only on the events at or before it.
+        // Binary-search that boundary, then walk *backwards* just far
+        // enough to resolve each field: a `Set` writes them all and
+        // ends the walk, so in the common case (LFOs re-arm per note)
+        // this touches a handful of events instead of replaying the
+        // whole stream from zero on every tick. Reproduces the forward
+        // fold exactly, including "params survive a Clear".
+        let hi = events.partition_point(|e| e.tick() <= tick);
         let mut s = LfoState::default();
-        for e in events {
-            if e.tick() > tick {
-                break;
-            }
+        if hi == 0 {
+            return Some(s); // no event at or before `tick`
+        }
+        // Per-field "already resolved" flags — the nearest writer of a
+        // field (scanning backwards) wins, exactly as the last writer
+        // wins scanning forwards. `WaveformOnly` deliberately does not
+        // touch `armed` (matches the cell-driven runtime dispatch).
+        let (mut armed_done, mut speed_done, mut depth_done, mut wave_done) =
+            (false, false, false, false);
+        for e in events[..hi].iter().rev() {
             match *e {
                 LfoEvent::Set {
                     speed,
@@ -566,34 +580,59 @@ impl AutomationLane {
                     retrig,
                     ..
                 } => {
-                    s.armed = true;
-                    s.speed = speed;
-                    s.depth = depth;
-                    s.waveform = waveform;
-                    s.retrig = retrig;
+                    if !speed_done {
+                        s.speed = speed;
+                    }
+                    if !depth_done {
+                        s.depth = depth;
+                    }
+                    if !wave_done {
+                        s.waveform = waveform;
+                        s.retrig = retrig;
+                    }
+                    if !armed_done {
+                        s.armed = true;
+                    }
+                    break; // a Set defines every field
                 }
                 LfoEvent::DepthOnly { depth, .. } => {
-                    s.armed = true;
-                    s.depth = depth;
+                    if !depth_done {
+                        s.depth = depth;
+                        depth_done = true;
+                    }
+                    if !armed_done {
+                        s.armed = true;
+                        armed_done = true;
+                    }
                 }
                 LfoEvent::SpeedOnly { speed, .. } => {
-                    s.armed = true;
-                    s.speed = speed;
+                    if !speed_done {
+                        s.speed = speed;
+                        speed_done = true;
+                    }
+                    if !armed_done {
+                        s.armed = true;
+                        armed_done = true;
+                    }
                 }
                 LfoEvent::WaveformOnly {
                     waveform, retrig, ..
                 } => {
-                    // Updates the shape without touching `armed`,
-                    // `speed`, or `depth`. Matches the runtime's
-                    // cell-driven dispatch where `*Waveform` rows
-                    // mutate `effect_*.data.waveform` immediately
-                    // without re-arming the LFO.
-                    s.waveform = waveform;
-                    s.retrig = retrig;
+                    if !wave_done {
+                        s.waveform = waveform;
+                        s.retrig = retrig;
+                        wave_done = true;
+                    }
                 }
                 LfoEvent::Clear { .. } => {
-                    s.armed = false;
+                    if !armed_done {
+                        s.armed = false;
+                        armed_done = true;
+                    }
                 }
+            }
+            if armed_done && speed_done && depth_done && wave_done {
+                break;
             }
         }
         Some(s)
@@ -608,19 +647,33 @@ impl AutomationLane {
         } else {
             return None;
         };
+        // Sorted by tick: binary-search the boundary, then walk back to
+        // the nearest event. `armed` is decided by that nearest event;
+        // `rate`/`fine` are the most recent `Set`'s (a `Clear` disarms
+        // but leaves them last-known, so we keep scanning to recover
+        // them — matches the forward fold). O(log n) when the boundary
+        // is a `Set` (the dense, common case).
+        let hi = events.partition_point(|e| e.tick() <= tick);
         let mut s = SlideState::default();
-        for e in events {
-            if e.tick() > tick {
-                break;
-            }
+        if hi == 0 {
+            return Some(s);
+        }
+        let mut armed_done = false;
+        for e in events[..hi].iter().rev() {
             match *e {
                 SlideEvent::Set { rate, fine, .. } => {
-                    s.armed = true;
                     s.rate = rate;
                     s.fine = fine;
+                    if !armed_done {
+                        s.armed = true;
+                    }
+                    break; // a Set defines rate+fine
                 }
                 SlideEvent::Clear { .. } => {
-                    s.armed = false;
+                    if !armed_done {
+                        s.armed = false;
+                        armed_done = true;
+                    }
                 }
             }
         }
@@ -636,19 +689,30 @@ impl AutomationLane {
         } else {
             return None;
         };
+        // Same shape as `slide_state_at`: binary-search the boundary,
+        // walk back to the nearest event for `armed`, recover
+        // `target`/`rate` from the most recent `Set`.
+        let hi = events.partition_point(|e| e.tick() <= tick);
         let mut s = GlideState::default();
-        for e in events {
-            if e.tick() > tick {
-                break;
-            }
+        if hi == 0 {
+            return Some(s);
+        }
+        let mut armed_done = false;
+        for e in events[..hi].iter().rev() {
             match *e {
                 GlideEvent::Set { target, rate, .. } => {
-                    s.armed = true;
                     s.target = target;
                     s.rate = rate;
+                    if !armed_done {
+                        s.armed = true;
+                    }
+                    break; // a Set defines target+rate
                 }
                 GlideEvent::Clear { .. } => {
-                    s.armed = false;
+                    if !armed_done {
+                        s.armed = false;
+                        armed_done = true;
+                    }
                 }
             }
         }
@@ -913,6 +977,54 @@ mod tests {
 
     fn glide_lane(events: Vec<GlideEvent>) -> AutomationLane {
         AutomationLane::new_with_kind(AutomationTarget::TrackPitch(0), LaneKind::Glide { events })
+    }
+
+    #[test]
+    fn lfo_state_at_waveform_only_after_clear_keeps_disarmed() {
+        // Backward fold corner: resolving `armed` must skip a trailing
+        // `WaveformOnly` (it never touches `armed`), land on the
+        // `Clear` (disarmed), yet still recover speed/depth from the
+        // earlier `Set` and the shape from the `WaveformOnly`.
+        let lane = lfo_lane(vec![
+            LfoEvent::Set {
+                tick: 0,
+                speed: Q8_8::from_int(3),
+                depth: Q15::from_ratio(1, 4),
+                waveform: Waveform::BipolarSine,
+                retrig: true,
+            },
+            LfoEvent::Clear { tick: 6 },
+            LfoEvent::WaveformOnly {
+                tick: 10,
+                waveform: Waveform::BipolarSquare,
+                retrig: false,
+            },
+        ]);
+        let s = lane.lfo_state_at(10).unwrap();
+        assert!(!s.armed, "WaveformOnly must not re-arm a cleared LFO");
+        assert_eq!(s.waveform, Waveform::BipolarSquare);
+        assert!(!s.retrig);
+        assert_eq!(s.speed, Q8_8::from_int(3));
+        assert_eq!(s.depth, Q15::from_ratio(1, 4));
+    }
+
+    #[test]
+    fn slide_state_at_clear_retains_rate() {
+        // Querying well past a `Clear` must disarm but still report the
+        // last `Set`'s rate/fine (last-known), identical to the forward
+        // fold — even though the consumer ignores rate while disarmed.
+        let lane = slide_lane(vec![
+            SlideEvent::Set {
+                tick: 0,
+                rate: Q15::from_raw(5),
+                fine: false,
+            },
+            SlideEvent::Clear { tick: 12 },
+        ]);
+        let s = lane.slide_state_at(20).unwrap();
+        assert!(!s.armed);
+        assert_eq!(s.rate, Q15::from_raw(5));
+        assert!(!s.fine);
     }
 
     #[test]

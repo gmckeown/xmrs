@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 pub struct InstrMidi {
     /// Can be used when `InstrMidi` duplicates `InstrDefault` otherwise use `muted` in `Instrument`
     pub muted: bool,
-    /// MIDI channel (0-16)
+    /// MIDI channel (0-15)
     pub channel: u8,
     /// MIDI program (1-128)
     pub program: u16,

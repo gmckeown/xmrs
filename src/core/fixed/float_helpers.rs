@@ -293,10 +293,6 @@ impl GlobalVolume {
     /// Convert to `f32` in `[0.0, 1.0]`.
     #[inline]
     pub fn to_f32(self) -> f32 {
-        // GlobalVolume's underlying Q15 is private; route
-        // through `applied_to(Amp::SILENCE)`-style trick is
-        // ugly. Add a tiny accessor in `units.rs` (see patch
-        // below) so this method becomes a one-liner.
         self.raw_q15().to_f32()
     }
 

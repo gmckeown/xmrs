@@ -480,6 +480,39 @@ mod tests {
     ///
     /// Replace the path with any `.dw` from Modland (`David
     /// Whittaker/dw.*`) to test against a different module.
+    /// `Module::load_dw_path` titles the module after the file stem
+    /// (the `.dw` format carries no embedded title), whereas the
+    /// byte-only `load_dw` keeps the generic placeholder.
+    #[cfg(all(feature = "import_dw", feature = "std"))]
+    #[test]
+    fn load_dw_path_titles_from_filename() {
+        let dir = "/home/user/Music/dw";
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            eprintln!("skipped: {} not found", dir);
+            return;
+        };
+        let Some(path) = entries
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .find(|p| p.extension().and_then(|e| e.to_str()) == Some("dw"))
+        else {
+            eprintln!("skipped: no .dw under {}", dir);
+            return;
+        };
+
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap()
+            .to_string();
+        match crate::core::module::Module::load_dw_path(&path) {
+            Ok(m) => assert_eq!(m.name, stem, "title should be the file stem"),
+            // Some banks legitimately reject as `dw_no_song`; only a
+            // successful import carries a name to check.
+            Err(e) => eprintln!("skipped {}: {:?}", stem, e),
+        }
+    }
+
     #[cfg(all(feature = "import_dw", feature = "std"))]
     #[test]
     fn load_dw_xenon2_from_home() {

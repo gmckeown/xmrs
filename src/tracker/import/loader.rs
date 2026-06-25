@@ -58,6 +58,42 @@ impl Module {
         Ok(DwModule::load(source)?.to_module())
     }
 
+    /// Import a `.dw` from bytes and give it an explicit title.
+    ///
+    /// The `.dw` format carries no textual title — the byte-only
+    /// [`Self::load_dw`] therefore tags every module with the same
+    /// `"David Whittaker (.dw)"` placeholder, which is useless once
+    /// several songs sit side by side in an editor. This variant runs
+    /// the exact same importer, then overrides [`Module::name`] with
+    /// `name` (an empty `name` is ignored, keeping the placeholder).
+    ///
+    /// Titling needs only `alloc`, so this works in `no_std` builds:
+    /// a caller that already has the bytes and a name (from any
+    /// source) can title the module without pulling in `std`. The
+    /// std-only [`Self::load_dw_path`] is a thin convenience over this.
+    #[cfg(feature = "import_dw")]
+    pub fn load_dw_named(source: &[u8], name: &str) -> Result<Self, ImportError> {
+        let mut module = Self::load_dw(source)?;
+        if !name.is_empty() {
+            module.name = name.into();
+        }
+        Ok(module)
+    }
+
+    /// Import a `.dw` file from disk and title it after the file name.
+    ///
+    /// Reads `path`, then delegates to [`Self::load_dw_named`] with the
+    /// file stem (the name minus its extension, e.g. `xenon2.dw` →
+    /// `xenon2`). Requires `std` for the filesystem read; the titling
+    /// itself does not — see [`Self::load_dw_named`].
+    #[cfg(all(feature = "import_dw", feature = "std"))]
+    pub fn load_dw_path<P: AsRef<std::path::Path>>(path: P) -> Result<Self, ImportError> {
+        let path = path.as_ref();
+        let data = std::fs::read(path).map_err(|_| ImportError::Other("dw: cannot read file"))?;
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        Self::load_dw_named(&data, stem)
+    }
+
     /// Try to auto-detect and import any supported historical module
     /// file (MOD / XM / S3M / IT / DW). Formats are tried in the
     /// order XM → S3M → IT → MOD → DW. The Amiga MOD format is

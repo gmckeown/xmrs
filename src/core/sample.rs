@@ -354,10 +354,11 @@ impl Sample {
     /// The calling function must save the real position at sustain end to avoid problems
     ///
     /// **Note**: when the play head is past the end of a non-looping
-    /// sample, this clamps to the last frame. That makes the voice hold
-    /// its tail value forever, which is almost never what a player
-    /// wants — prefer [`Sample::seek`] and treat `None` as "stop the
-    /// voice". This wrapper is kept for backward compatibility.
+    /// sample, this clamps to the last frame (the voice holds its tail
+    /// value) instead of signalling end-of-sample. For the per-sample
+    /// playback path prefer [`Sample::seek`] and treat `None` as "stop
+    /// the voice"; `meta_seek` is the right tool for one-shot position
+    /// conversions such as re-anchoring at the sustain-loop transition.
     pub fn meta_seek(&self, pos: usize, sustain: bool) -> usize {
         if sustain && self.sustain_loop_flag != LoopType::No {
             self.calculate_loop(

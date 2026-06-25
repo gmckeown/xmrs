@@ -974,7 +974,7 @@ mod tests {
         // f2 should be ≈ 2 × f1
         let r1 = f1.raw_q24_8() as u64;
         let r2 = f2.raw_q24_8() as u64;
-        assert!((r2 * 1000 / r1) as i64 - 2000 < 5);
+        assert!(((r2 * 1000 / r1) as i64 - 2000).abs() < 5);
     }
 
     #[test]

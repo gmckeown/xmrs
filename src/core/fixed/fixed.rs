@@ -401,8 +401,8 @@ impl Q8_8 {
                 Self(-0x8000)
             };
         }
-        // `(num << 8) / den` in widened i32 (or i64) to avoid
-        // overflow on the multiply step.
+        // `(num << 8) / den` in a widened i32 to avoid overflow on
+        // the shift step (`num` is i16, so `num << 8` fits i32).
         let scaled = (num as i32) << 8;
         let q = scaled / den as i32;
         if q > 0x7FFF {

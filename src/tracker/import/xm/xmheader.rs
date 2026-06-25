@@ -137,6 +137,33 @@ impl XmHeader {
             return Err(ImportError::InvalidMagic("Not an Extended Module?"));
         }
 
+        // Format-conformant bounds. FT2/XM hard-limit these counts:
+        // ≤ 64 channels (FT2 writes 2..32; OpenMPT XM export stays
+        // ≤ 64), ≤ 256 order entries, ≤ 256 patterns. The fields are
+        // `u16` on disk, so a malformed file can declare up to 65535
+        // — which, multiplied through the empty-pattern padding
+        // (`XmPattern::get_slots`) and the empty-order expansion
+        // (`XmModule::load`), turns a few KB of input into hundreds
+        // of GB of `PatternSlot` allocation (OOM DoS). Reject out-of-
+        // range counts up front; the largest real corpus file uses
+        // 38 channels / 255 orders / 256 patterns, so these caps
+        // never reject a genuine module.
+        if xmh.number_of_channels == 0 || xmh.number_of_channels > 64 {
+            return Err(ImportError::OutOfRange(
+                "XmHeader: number_of_channels outside XM range 1..=64",
+            ));
+        }
+        if xmh.song_length > 256 {
+            return Err(ImportError::OutOfRange(
+                "XmHeader: song_length exceeds XM maximum of 256",
+            ));
+        }
+        if xmh.number_of_patterns > 256 {
+            return Err(ImportError::OutOfRange(
+                "XmHeader: number_of_patterns exceeds XM maximum of 256",
+            ));
+        }
+
         let (tail, pattern_order) = xmh.get_pattern_order(r.tail())?;
         Ok((tail, xmh, pattern_order))
     }

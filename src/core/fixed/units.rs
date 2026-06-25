@@ -659,10 +659,18 @@ impl Amplification {
         self.0
     }
 
-    /// Build from an integer multiplier.
+    /// Build from an integer multiplier, saturating to the Q4.12
+    /// range `[-8, +8)`. (`n << 12` would otherwise wrap and flip
+    /// the sign for `n >= 8`, e.g. `+8` → `-8.0`.)
     #[inline]
     pub const fn from_int(n: i8) -> Self {
-        Self((n as i16) << 12)
+        if n >= 8 {
+            Self(i16::MAX) // largest representable, just under +8.0
+        } else if n <= -8 {
+            Self(i16::MIN) // -8.0 exactly
+        } else {
+            Self((n as i16) << 12)
+        }
     }
 
     /// Apply this amplification to a final mixed sample,
@@ -1735,6 +1743,19 @@ mod tests {
         let f = Frequency::from_hz(440);
         let r = SampleRate(0);
         assert_eq!(SampleStep::for_frequency(f, r), SampleStep::ZERO);
+    }
+
+    #[test]
+    fn amplification_from_int_saturates() {
+        // In-range multipliers are exact.
+        assert_eq!(Amplification::from_int(1), Amplification::UNITY);
+        assert_eq!(Amplification::from_int(7).raw_q4_12(), 7 << 12);
+        assert_eq!(Amplification::from_int(-8).raw_q4_12(), i16::MIN); // -8.0
+                                                                       // Out of Q4.12 range must saturate, never wrap/flip sign.
+        assert_eq!(Amplification::from_int(8).raw_q4_12(), i16::MAX);
+        assert_eq!(Amplification::from_int(127).raw_q4_12(), i16::MAX);
+        assert_eq!(Amplification::from_int(-9).raw_q4_12(), i16::MIN);
+        assert_eq!(Amplification::from_int(-128).raw_q4_12(), i16::MIN);
     }
 
     #[test]

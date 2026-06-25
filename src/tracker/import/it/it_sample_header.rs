@@ -288,12 +288,19 @@ impl ItSampleHeader {
     fn get_sample_data_from_values(&self, data: &[u8]) -> Result<SampleDataType, ImportError> {
         let dst = if self.is_16bits() {
             if self.is_stereo() {
-                let sample_len = 2 * 2 * self.sample_length as usize;
+                // `sample_length` is an untrusted u32 from the IMPS
+                // header; `2*2*len` can exceed the bytes that remain.
+                // Clamp to the available (even) byte count instead of
+                // slicing past the end — mirrors the lenient `.take()`
+                // used by the 8-bit arms below. For a well-formed file
+                // (`sample_len <= data.len()`) this is a no-op, so the
+                // decoded PCM is byte-identical.
+                let sample_len = (2 * 2 * self.sample_length as usize).min(data.len() & !1);
                 let src = self.convert_u8_to_i16_vec(&data[0..sample_len])?;
                 let stereo = self.convert_16bit_sample(src.as_slice());
                 SampleDataType::Stereo16(stereo.into())
             } else {
-                let sample_len = 2 * self.sample_length as usize;
+                let sample_len = (2 * self.sample_length as usize).min(data.len() & !1);
                 let src = self.convert_u8_to_i16_vec(&data[0..sample_len])?;
                 SampleDataType::Mono16(self.convert_16bit_sample(src.as_slice()).into())
             }

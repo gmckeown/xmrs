@@ -875,7 +875,7 @@ impl Module {
             last_tick = e.tick;
         }
 
-        // 5. Per-lane loops well-formed: a `ChannelLoop` must have a
+        // 7. Per-lane loops well-formed: a `ChannelLoop` must have a
         //    positive body (`start_tick < end_tick`), otherwise
         //    `fold_tick` can't make progress.
         for (i, l) in self.channel_loops.iter().enumerate() {

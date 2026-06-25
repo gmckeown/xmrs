@@ -44,6 +44,16 @@ impl XmPatternHeader {
         let packing_type = r.read_u8()?;
         let num_rows = r.read_u16_le()?;
         let pattern_data_size = r.read_u16_le()?;
+        // XM patterns are hard-limited to 256 rows (FT2 / OpenMPT).
+        // `num_rows` is `u16` on disk; an out-of-range value drives
+        // the empty-row padding in `get_slots` (which pads up to
+        // `num_rows` rows of `number_of_channels` slots) into an
+        // unbounded allocation. >256 is definitionally corrupt.
+        if num_rows > 256 {
+            return Err(ImportError::OutOfRange(
+                "XmPatternHeader: num_rows exceeds XM maximum of 256",
+            ));
+        }
         let xmph = XmPatternHeader {
             pattern_header_len,
             packing_type,

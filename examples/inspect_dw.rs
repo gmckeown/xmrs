@@ -328,14 +328,25 @@ fn inspect_one(path: &str, quiet: bool) -> Result<(), String> {
     // End-to-end sanity: the conversion to xmrs `Module` is what
     // downstream callers see. Failing here would mean the importer
     // builds a `DwModule` that the DAW projection can't handle.
-    let module = dw.to_module();
+    let mut module = dw.to_module();
+    // `.dw` has no embedded title; title the module after the file
+    // name (sans extension), mirroring `Module::load_dw_path`.
+    if let Some(stem) = std::path::Path::new(path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+    {
+        if !stem.is_empty() {
+            module.name = stem.to_string();
+        }
+    }
     let cell_count: usize = module
         .tracks
         .iter()
         .map(|t| t.rows().map(|r| r.len()).unwrap_or(0))
         .sum();
     println!(
-        "  module: instruments={} tracks={} clips={} cells={} timeline={}",
+        "  module: name={:?} instruments={} tracks={} clips={} cells={} timeline={}",
+        module.name,
         module.instrument.len(),
         module.tracks.len(),
         module.clips.len(),
