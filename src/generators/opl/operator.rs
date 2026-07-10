@@ -207,6 +207,47 @@ impl Operator {
         self.tl_eg = ((tl_reg & 0x3F) as u16) << 2;
     }
 
+    // --- Raw OPL register writes (for a register-level `OplChip::write_reg`) ---
+
+    /// Register 0x20: AM / VIB / EG-type / KSR / MULT. Recomputes `phase_inc`
+    /// (MULT affects it) from the stored F-number / block.
+    pub(crate) fn write_reg20(&mut self, val: u8) {
+        self.am = val & 0x80 != 0;
+        self.vib = val & 0x40 != 0;
+        self.sustaining = val & 0x20 != 0;
+        self.ksr = val & 0x10 != 0;
+        self.mul = val & 0x0F;
+        self.set_frequency(self.fnum, self.block, 1 << 16);
+    }
+
+    /// Register 0x40: KSL (bits 6-7) + total level (bits 0-5).
+    pub(crate) fn write_reg40(&mut self, val: u8) {
+        self.ksl_reg = val >> 6;
+        self.tl_eg = ((val & 0x3F) as u16) << 2;
+    }
+
+    /// Register 0x60: attack rate (bits 4-7) + decay rate (bits 0-3).
+    pub(crate) fn write_reg60(&mut self, val: u8) {
+        self.attack_rate = val >> 4;
+        self.decay_rate = val & 0x0F;
+    }
+
+    /// Register 0x80: sustain level (bits 4-7) + release rate (bits 0-3).
+    pub(crate) fn write_reg80(&mut self, val: u8) {
+        let sustain_reg = val >> 4;
+        self.sustain_level_eg = if sustain_reg >= 0x0F {
+            0x1F0
+        } else {
+            (sustain_reg as u16) << 4
+        };
+        self.release_rate = val & 0x0F;
+    }
+
+    /// Register 0xE0: waveform select (bits 0-2).
+    pub(crate) fn write_reg_e0(&mut self, val: u8) {
+        self.waveform = val & 0x07;
+    }
+
     /// Key-on: (re)start the envelope from the attack phase and reset the
     /// phase accumulator (a fresh note restarts the waveform).
     pub(crate) fn key_on(&mut self) {
@@ -371,17 +412,34 @@ impl Operator {
     /// envelope by one sample. Returns a signed magnitude (~±4084 at full
     /// volume — the chip's 12-bit operator output).
     pub(crate) fn next(&mut self, mod_input: i32, tremolo: u16, vibpos: u8, eg_cnt: u32) -> i32 {
+        self.advance(vibpos, eg_cnt);
+        let phase10 = ((self.phase >> 9) as i32).wrapping_add(mod_input) as u32 & 0x3FF;
+        self.output_at(phase10, tremolo)
+    }
+
+    /// Tick the envelope and advance the phase accumulator (without producing output). Split from
+    /// [`Self::output_at`] for the **OPL rhythm mode**, where the output phase of some operators
+    /// (HH/SD/CY) is *forced* from the phase bits of other operators, while still letting each
+    /// operator advance its own phase.
+    pub(crate) fn advance(&mut self, vibpos: u8, eg_cnt: u32) {
         self.tick_envelope(eg_cnt);
         let inc = (self.phase_inc as i32).wrapping_add(self.vib_delta(vibpos));
         self.phase = self.phase.wrapping_add(inc as u32);
+    }
 
-        let phase10 = ((self.phase >> 9) as i32).wrapping_add(mod_input) as u32 & 0x3FF;
+    /// Produce the operator's output at a given 10-bit phase (already advanced by
+    /// [`Self::advance`]). In normal mode `phase10 = (phase>>9) + mod_input`.
+    pub(crate) fn output_at(&mut self, phase10: u32, tremolo: u16) -> i32 {
         let att = self.attenuation_eg(tremolo);
-        let out = waveform_output(self.waveform, phase10, att);
-
+        let out = waveform_output(self.waveform, phase10 & 0x3FF, att);
         self.prev_out = self.out;
         self.out = out;
         out
+    }
+
+    /// Current phase bits (`phase >> 9`) — for the rhythm-mode correlated-noise computation.
+    pub(crate) fn phase_out(&self) -> u32 {
+        self.phase >> 9
     }
 
     /// Modulator self-feedback in phase-index units. The chip sums the last

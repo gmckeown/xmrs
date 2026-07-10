@@ -53,6 +53,11 @@ struct OplChannel {
     /// Stereo enable bits (OPL3 panning): `(left, right)`.
     pan_l: bool,
     pan_r: bool,
+    /// Latched F-number low byte (reg 0xA0) and high 2 bits + block (reg 0xB0), so an 0xA0 write
+    /// can recompute pitch with the current block.
+    fnum_low: u8,
+    fnum_high: u8,
+    block: u8,
 }
 
 impl OplChannel {
@@ -64,7 +69,17 @@ impl OplChannel {
             additive: false,
             pan_l: true,
             pan_r: true,
+            fnum_low: 0,
+            fnum_high: 0,
+            block: 0,
         }
+    }
+
+    /// Recompute pitch on both operators from the latched F-number / block.
+    fn refresh_freq(&mut self) {
+        let fnum = (self.fnum_low as u16) | (((self.fnum_high & 0x03) as u16) << 8);
+        self.modulator.set_frequency(fnum, self.block, 1 << 16);
+        self.carrier.set_frequency(fnum, self.block, 1 << 16);
     }
 
     fn is_silent(&self) -> bool {
@@ -122,7 +137,23 @@ pub(crate) struct OplChip {
     /// envelope reads the *same* counter, so their fractional-rate dither
     /// phases stay aligned exactly as on the chip.
     eg_cnt: u32,
+    /// **OPL rhythm mode** (reg 0xBD bit 5): channels 6/7/8 become BD/HH/SD/TT/CY.
+    rhythm_mode: bool,
+    /// Active percussion bits (reg 0xBD bits 0-4: BD 0x10, SD 0x08, TT 0x04, CY 0x02, HH 0x01).
+    rhythm_keys: u8,
+    /// 23-bit noise LFSR for HH/SD/CY (rhythm mode).
+    noise: u32,
 }
+
+// Rhythm-mode channels and reg 0xBD bit masks.
+const CH_BD: usize = 6; // bass drum (2-operator FM)
+const CH_HH_SD: usize = 7; // modulator = hi-hat (HH), carrier = snare (SD)
+const CH_TT_CY: usize = 8; // modulator = tom-tom (TT), carrier = cymbal (CY)
+const RM_BD: u8 = 0x10;
+const RM_SD: u8 = 0x08;
+const RM_TT: u8 = 0x04;
+const RM_CY: u8 = 0x02;
+const RM_HH: u8 = 0x01;
 
 impl OplChip {
     pub(crate) fn new(output_rate: u32) -> Self {
@@ -137,6 +168,154 @@ impl OplChip {
             lfo_timer: 0,
             tremolopos: 0,
             eg_cnt: 0,
+            rhythm_mode: false,
+            rhythm_keys: 0,
+            noise: 1,
+        }
+    }
+
+    /// Write the OPL rhythm register (0xBD): bit 5 = enable, bits 0-4 = drum key-ons.
+    /// A rising bit → key-on the drum's operator(s); a falling bit → key-off.
+    pub(crate) fn write_rhythm(&mut self, bd: u8) {
+        self.rhythm_mode = bd & 0x20 != 0;
+        let old = self.rhythm_keys;
+        let new = bd & 0x1F;
+        self.rhythm_keys = new;
+        if !self.rhythm_mode {
+            return;
+        }
+        let edge = |mask: u8| (new & mask != 0, (new & mask) != (old & mask));
+        // (channel, modulateur?, masque)
+        for &(ch, modu, mask) in &[
+            (CH_BD, true, RM_BD),
+            (CH_BD, false, RM_BD),
+            (CH_HH_SD, true, RM_HH),
+            (CH_HH_SD, false, RM_SD),
+            (CH_TT_CY, true, RM_TT),
+            (CH_TT_CY, false, RM_CY),
+        ] {
+            let (on, changed) = edge(mask);
+            if !changed {
+                continue;
+            }
+            if let Some(c) = self.channels.get_mut(ch) {
+                let op = if modu {
+                    &mut c.modulator
+                } else {
+                    &mut c.carrier
+                };
+                if on {
+                    op.key_on();
+                } else {
+                    op.key_off();
+                }
+            }
+        }
+    }
+
+    pub(crate) fn rhythm_enabled(&self) -> bool {
+        self.rhythm_mode
+    }
+
+    /// Raw OPL2 register write — decodes the register address and updates the affected operator
+    /// or channel, exactly like writing to the chip's register port. This is the primitive a
+    /// register-level player (DRO / VGM / a ported sound driver) needs. Registers: 0x20-0x35
+    /// (AM/VIB/EG/KSR/MULT), 0x40-0x55 (KSL/TL), 0x60-0x75 (AR/DR), 0x80-0x95 (SL/RR), 0xA0-0xA8
+    /// (F-num low), 0xB0-0xB8 (F-num high / block / key-on), 0xC0-0xC8 (feedback/connection),
+    /// 0xE0-0xF5 (waveform), 0xBD (rhythm mode + drum key-on).
+    pub(crate) fn write_reg(&mut self, reg: u8, val: u8) {
+        // Operator register block → (channel, is_carrier). Offsets 0x06/0x07/0x0E/0x0F unused.
+        fn op_slot(off: u8) -> Option<(usize, bool)> {
+            let (grp, idx) = (off / 8, off % 8);
+            if idx >= 6 || grp >= 3 {
+                return None;
+            }
+            let base = (grp * 3) as usize;
+            match idx {
+                0..=2 => Some((base + idx as usize, false)), // modulators
+                3..=5 => Some((base + (idx - 3) as usize, true)), // carriers
+                _ => None,
+            }
+        }
+        fn op_mut(c: &mut OplChannel, carrier: bool) -> &mut Operator {
+            if carrier {
+                &mut c.carrier
+            } else {
+                &mut c.modulator
+            }
+        }
+        match reg {
+            0xBD => self.write_rhythm(val),
+            0x20..=0x35 => {
+                if let Some((ch, car)) = op_slot(reg - 0x20) {
+                    if let Some(c) = self.channels.get_mut(ch) {
+                        op_mut(c, car).write_reg20(val);
+                    }
+                }
+            }
+            0x40..=0x55 => {
+                if let Some((ch, car)) = op_slot(reg - 0x40) {
+                    if let Some(c) = self.channels.get_mut(ch) {
+                        op_mut(c, car).write_reg40(val);
+                    }
+                }
+            }
+            0x60..=0x75 => {
+                if let Some((ch, car)) = op_slot(reg - 0x60) {
+                    if let Some(c) = self.channels.get_mut(ch) {
+                        op_mut(c, car).write_reg60(val);
+                    }
+                }
+            }
+            0x80..=0x95 => {
+                if let Some((ch, car)) = op_slot(reg - 0x80) {
+                    if let Some(c) = self.channels.get_mut(ch) {
+                        op_mut(c, car).write_reg80(val);
+                    }
+                }
+            }
+            0xE0..=0xF5 => {
+                if let Some((ch, car)) = op_slot(reg - 0xE0) {
+                    if let Some(c) = self.channels.get_mut(ch) {
+                        op_mut(c, car).write_reg_e0(val);
+                    }
+                }
+            }
+            0xA0..=0xA8 => {
+                let ch = (reg - 0xA0) as usize;
+                if let Some(c) = self.channels.get_mut(ch) {
+                    c.fnum_low = val;
+                    c.refresh_freq();
+                }
+            }
+            0xB0..=0xB8 => {
+                let ch = (reg - 0xB0) as usize;
+                let rhythm_ch =
+                    self.rhythm_mode && (ch == CH_BD || ch == CH_HH_SD || ch == CH_TT_CY);
+                if let Some(c) = self.channels.get_mut(ch) {
+                    c.fnum_high = val & 0x03;
+                    c.block = (val >> 2) & 0x07;
+                    c.refresh_freq();
+                    // Key-on/off (bit 5) — ignored for rhythm channels in rhythm mode (0xBD keys them).
+                    if !rhythm_ch {
+                        if val & 0x20 != 0 {
+                            c.modulator.key_on();
+                            c.carrier.key_on();
+                        } else {
+                            c.modulator.key_off();
+                            c.carrier.key_off();
+                        }
+                    }
+                }
+            }
+            0xC0..=0xC8 => {
+                let ch = (reg - 0xC0) as usize;
+                if let Some(c) = self.channels.get_mut(ch) {
+                    c.feedback = (val >> 1) & 0x07;
+                    c.additive = val & 0x01 != 0;
+                }
+            }
+            _ => {}
         }
     }
 
@@ -182,6 +361,53 @@ impl OplChip {
             cr.am,
             cr.vib,
         );
+    }
+
+    /// Program a **single** operator (modulator or carrier) of a channel from an [`OpPatch`] —
+    /// used to load the rhythm-mode percussion voices (HH/SD on ch7, TT/CY on ch8, which are
+    /// single operators; BD on ch6 uses the full channel via [`Self::set_patch`]).
+    pub(crate) fn set_rhythm_operator(&mut self, ch: usize, carrier: bool, p: &OpPatch) {
+        let Some(c) = self.channels.get_mut(ch) else {
+            return;
+        };
+        let op = if carrier {
+            &mut c.carrier
+        } else {
+            &mut c.modulator
+        };
+        op.set_patch(
+            p.mul,
+            p.waveform,
+            p.tl,
+            p.ksl,
+            p.ksr,
+            p.sustaining,
+            p.attack,
+            p.decay,
+            p.sustain,
+            p.release,
+            p.am,
+            p.vib,
+        );
+    }
+
+    /// Set the pitch of a single rhythm operator (ch7/ch8 carry two drums sharing the channel
+    /// F-number on hardware, but each drum's operator can be phase-driven independently here).
+    pub(crate) fn set_operator_frequency(
+        &mut self,
+        ch: usize,
+        carrier: bool,
+        fnum: u16,
+        block: u8,
+    ) {
+        if let Some(c) = self.channels.get_mut(ch) {
+            let op = if carrier {
+                &mut c.carrier
+            } else {
+                &mut c.modulator
+            };
+            op.set_frequency(fnum, block, 1 << 16);
+        }
     }
 
     /// Set a channel's F-number / block (pitch). Recomputes both
@@ -267,7 +493,14 @@ impl OplChip {
 
         let mut l: i32 = 0;
         let mut r: i32 = 0;
-        for c in &mut self.channels {
+        let rhythm = self.rhythm_mode && self.channels.len() >= 9;
+        for ch in 0..self.channels.len() {
+            // In rhythm mode, channels 7/8 (HH/SD/TT/CY) are rendered separately; channel 6 (BD)
+            // stays a normal FM channel (keyed by `write_rhythm`), so it is handled in this loop.
+            if rhythm && (ch == CH_HH_SD || ch == CH_TT_CY) {
+                continue;
+            }
+            let c = &mut self.channels[ch];
             if c.is_silent() {
                 continue;
             }
@@ -278,6 +511,75 @@ impl OplChip {
             if c.pan_r {
                 r += s;
             }
+        }
+
+        if rhythm {
+            let (dl, dr) = self.render_rhythm_percussion(tremolo, vibpos, eg_cnt);
+            l += dl;
+            r += dr;
+        }
+        // 23-bit noise LFSR (advances every native frame, whether or not rhythm mode is on).
+        self.noise = if self.noise & 1 != 0 {
+            (self.noise >> 1) ^ 0x0080_0302
+        } else {
+            self.noise >> 1
+        };
+        (l, r)
+    }
+
+    /// Render the 4 percussion voices on channels 7/8 (HH/SD on ch7, TT/CY on ch8) using the OPL
+    /// correlated-noise algorithm (ref. Nuked-OPL3): each operator advances its phase, then HH/SD/CY
+    /// have their **output phase forced** from the phase bits of HH (ch7 mod) and CY (ch8 carrier)
+    /// combined with the noise bit. TT is a normal operator.
+    fn render_rhythm_percussion(&mut self, tremolo: u16, vibpos: u8, eg_cnt: u32) -> (i32, i32) {
+        let noise_bit = self.noise & 1;
+        // Advance the 4 operators (envelope + phase) before reading their phase bits.
+        self.channels[CH_HH_SD].modulator.advance(vibpos, eg_cnt); // HH
+        self.channels[CH_HH_SD].carrier.advance(vibpos, eg_cnt); // SD
+        self.channels[CH_TT_CY].modulator.advance(vibpos, eg_cnt); // TT
+        self.channels[CH_TT_CY].carrier.advance(vibpos, eg_cnt); // CY
+
+        let hh_p = self.channels[CH_HH_SD].modulator.phase_out();
+        let cy_p = self.channels[CH_TT_CY].carrier.phase_out();
+        let bit = |v: u32, n: u32| (v >> n) & 1;
+        let rm = (bit(hh_p, 2) ^ bit(hh_p, 7))
+            | (bit(hh_p, 3) ^ bit(cy_p, 5))
+            | (bit(cy_p, 3) ^ bit(cy_p, 5));
+
+        // Hi-hat (HH)
+        let hh_phase = (rm << 9) | if (rm ^ noise_bit) != 0 { 0xD0 } else { 0x34 };
+        let hh_out = self.channels[CH_HH_SD]
+            .modulator
+            .output_at(hh_phase, tremolo);
+        // Snare drum (SD)
+        let hh_bit8 = bit(hh_p, 8);
+        let sd_phase = (hh_bit8 << 9) | ((hh_bit8 ^ noise_bit) << 8);
+        let sd_out = self.channels[CH_HH_SD].carrier.output_at(sd_phase, tremolo);
+        // Tom-tom (TT): normal operator (own phase, no modulation)
+        let tt_phase = self.channels[CH_TT_CY].modulator.phase_out() & 0x3FF;
+        let tt_out = self.channels[CH_TT_CY]
+            .modulator
+            .output_at(tt_phase, tremolo);
+        // Cymbal (CY)
+        let cy_phase = (rm << 9) | 0x80;
+        let cy_out = self.channels[CH_TT_CY].carrier.output_at(cy_phase, tremolo);
+
+        // Percussion is summed at double gain (hardware), with each voice's panning.
+        let d7 = (hh_out + sd_out) * 2;
+        let d8 = (tt_out + cy_out) * 2;
+        let mut l = 0;
+        let mut r = 0;
+        if self.channels[CH_HH_SD].pan_l {
+            l += d7;
+        }
+        if self.channels[CH_HH_SD].pan_r {
+            r += d7;
+        }
+        if self.channels[CH_TT_CY].pan_l {
+            l += d8;
+        }
+        if self.channels[CH_TT_CY].pan_r {
+            r += d8;
         }
         (l, r)
     }
@@ -309,6 +611,40 @@ impl OplChip {
             cubic(h[0].0, h[1].0, h[2].0, h[3].0, t),
             cubic(h[0].1, h[1].1, h[2].1, h[3].1, t),
         )
+    }
+}
+
+/// A **register-level OPL2 (YM3812) emulator** — the public, raw interface over the internal
+/// [`OplChip`]. Write chip registers with [`Opl2::write_reg`] exactly as a real driver would, then
+/// pull output-rate stereo frames with [`Opl2::render_frame`]. This is what a ported sound driver
+/// or a DRO / VGM player needs (the structured note/patch API lives in [`super::driver::OplDriver`]).
+///
+/// The chip runs internally at 49716 Hz and resamples to `output_rate` (cubic).
+pub struct Opl2 {
+    chip: OplChip,
+}
+
+impl Opl2 {
+    /// New OPL2 rendering at `output_rate` Hz (stereo).
+    pub fn new(output_rate: u32) -> Self {
+        Self {
+            chip: OplChip::new(output_rate),
+        }
+    }
+
+    /// Write a raw OPL2 register (`reg`, `val`). See [`OplChip::write_reg`] for the register map.
+    pub fn write_reg(&mut self, reg: u8, val: u8) {
+        self.chip.write_reg(reg, val);
+    }
+
+    /// Render one output-rate stereo frame (`left`, `right`), each ~±full-scale `i32`.
+    pub fn render_frame(&mut self) -> (i32, i32) {
+        self.chip.render_frame()
+    }
+
+    /// Any channel still sounding?
+    pub fn any_active(&self) -> bool {
+        self.chip.any_active()
     }
 }
 
@@ -357,6 +693,31 @@ pub(crate) struct ChannelPatch {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opl2_raw_registers_render_a_tone() {
+        // Program a simple FM voice on channel 0 via raw register writes (as a driver would),
+        // key it on, and check it produces sound — validates the `write_reg` decoder + `Opl2`.
+        let mut opl = Opl2::new(44100);
+        // Modulator (op slot 0x00) quiet, carrier (op slot 0x03) audible.
+        opl.write_reg(0x20, 0x01); // mod: mult=1
+        opl.write_reg(0x23, 0x01); // car: mult=1
+        opl.write_reg(0x40, 0x3F); // mod: TL max attenuation (silent modulator)
+        opl.write_reg(0x43, 0x00); // car: TL loud
+        opl.write_reg(0x60, 0xF0); // mod: fast attack
+        opl.write_reg(0x63, 0xF0); // car: fast attack
+        opl.write_reg(0x80, 0x00); // mod: sustain/release
+        opl.write_reg(0x83, 0x00); // car
+        opl.write_reg(0xC0, 0x00); // FM, no feedback
+        opl.write_reg(0xA0, 0x98); // fnum low
+        opl.write_reg(0xB0, 0x20 | (4 << 2) | 0x01); // key-on + block 4 + fnum high
+        let mut peak = 0i32;
+        for _ in 0..8820 {
+            let (l, _r) = opl.render_frame();
+            peak = peak.max(l.abs());
+        }
+        assert!(peak > 100, "raw-register tone silent, peak={peak}");
+    }
 
     #[test]
     fn chip_renders_a_tone() {
@@ -422,5 +783,49 @@ mod tests {
             "channel should release to silence"
         );
         let _ = tail_peak;
+    }
+
+    #[test]
+    fn rhythm_mode_percussion_sounds() {
+        let mut chip = OplChip::new(44100);
+        // Percussive patches for the rhythm voices (fast attack, short release).
+        let perc = ChannelPatch {
+            modulator: OpPatch {
+                mul: 1,
+                tl: 0,
+                attack: 15,
+                decay: 4,
+                sustain: 0,
+                release: 7,
+                sustaining: false,
+                ..Default::default()
+            },
+            carrier: OpPatch {
+                mul: 1,
+                tl: 0,
+                attack: 15,
+                decay: 4,
+                sustain: 0,
+                release: 7,
+                sustaining: false,
+                ..Default::default()
+            },
+            feedback: 0,
+            additive: false,
+        };
+        for ch in [CH_BD, CH_HH_SD, CH_TT_CY] {
+            chip.set_patch(ch, &perc);
+            chip.set_frequency(ch, 0x200, 4);
+        }
+        // Enable rhythm mode + trigger BD, SD and HH.
+        chip.write_rhythm(0x20 | RM_BD | RM_SD | RM_HH);
+        assert!(chip.rhythm_enabled());
+
+        let mut peak = 0i32;
+        for _ in 0..4410 {
+            let (l, _r) = chip.render_frame();
+            peak = peak.max(l.abs());
+        }
+        assert!(peak > 100, "rhythm percussion is silent, peak={peak}");
     }
 }

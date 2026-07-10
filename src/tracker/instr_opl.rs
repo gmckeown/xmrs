@@ -59,6 +59,22 @@ pub struct MdiInstr {
 }
 
 /// Yamaha OPL with module compatibility
+/// OPL rhythm-mode role of an instrument. `Melodic` (default) is an ordinary two-operator FM voice
+/// on a dynamically-allocated channel. The five percussion roles map to the fixed rhythm channels
+/// (BD = channel 6, HH/SD = channel 7 modulator/carrier, TT/CY = channel 8 modulator/carrier) and
+/// are keyed via the rhythm register (0xBD). In S3M these come from the Adlib instrument type byte
+/// (2 = melody, 3 = bass drum, 4 = snare, 5 = tom-tom, 6 = cymbal, 7 = hi-hat).
+#[derive(Default, Serialize, Deserialize, Copy, Clone, Debug, PartialEq, Eq)]
+pub enum OplRhythm {
+    #[default]
+    Melodic,
+    BassDrum,
+    Snare,
+    TomTom,
+    Cymbal,
+    HiHat,
+}
+
 #[derive(Default, Serialize, Deserialize, Copy, Clone, Debug)]
 pub struct InstrOpl {
     /// The two-operator FM voice (modulator + carrier + wave selects)
@@ -71,4 +87,6 @@ pub struct InstrOpl {
     /// `±0x4000` raw ≈ `±0.5` semitone (one full step span);
     /// `Finetune::ZERO` = on the integer grid.
     pub finetune: Finetune,
+    /// OPL rhythm-mode role (default `Melodic` — ordinary FM voice).
+    pub rhythm: OplRhythm,
 }

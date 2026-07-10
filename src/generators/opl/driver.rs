@@ -7,7 +7,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::tracker::instr_opl::{InstrOpl, MdiOpl};
+use crate::tracker::instr_opl::{InstrOpl, MdiOpl, OplRhythm};
 
 use super::{ChannelPatch, OpPatch, OplChip, OPL_NATIVE_RATE};
 
@@ -25,6 +25,24 @@ struct SlotState {
 pub struct OplDriver {
     chip: OplChip,
     slots: Vec<SlotState>,
+    /// Current rhythm register (0xBD) drum bits, and which tracker channel triggered each drum
+    /// (so note-off clears the right bit). Empty until a percussion instrument plays.
+    rhythm_owner: Vec<(usize, u8)>,
+    rhythm_on: bool,
+}
+
+/// Fixed rhythm placement of a percussion role: `(chip channel, use carrier operator?, full
+/// 2-op channel?, 0xBD drum bit)`. BD is a full FM channel (both operators); the others are
+/// single operators sharing channels 7 and 8.
+fn rhythm_placement(role: OplRhythm) -> Option<(usize, bool, bool, u8)> {
+    match role {
+        OplRhythm::Melodic => None,
+        OplRhythm::BassDrum => Some((6, false, true, 0x10)),
+        OplRhythm::HiHat => Some((7, false, false, 0x01)),
+        OplRhythm::Snare => Some((7, true, false, 0x08)),
+        OplRhythm::TomTom => Some((8, false, false, 0x04)),
+        OplRhythm::Cymbal => Some((8, true, false, 0x02)),
+    }
 }
 
 impl OplDriver {
@@ -34,7 +52,28 @@ impl OplDriver {
         Self {
             chip,
             slots: vec![SlotState::default(); n],
+            rhythm_owner: Vec::new(),
+            rhythm_on: false,
         }
+    }
+
+    /// Import the imports needed for rhythm mapping (kept local to avoid a wide `use`).
+    fn drum_bit_of(&self, track_ch: usize) -> Option<u8> {
+        self.rhythm_owner
+            .iter()
+            .find(|(c, _)| *c == track_ch)
+            .map(|(_, b)| *b)
+    }
+
+    /// Key on/off a rhythm drum bit in the 0xBD register and update ownership.
+    fn set_drum(&mut self, track_ch: usize, bit: u8, on: bool) {
+        // current 0xBD drum bits = OR of all owned bits
+        self.rhythm_owner.retain(|(c, _)| *c != track_ch);
+        if on {
+            self.rhythm_owner.push((track_ch, bit));
+        }
+        let drums = self.rhythm_owner.iter().fold(0u8, |a, (_, b)| a | b);
+        self.chip.write_rhythm(0x20 | drums); // bit5 = rhythm mode enabled
     }
 
     pub fn any_active(&self) -> bool {
@@ -50,17 +89,25 @@ impl OplDriver {
     /// first slot (mirrors `snd_fm.c`'s GetVoice/SetVoice intent — when
     /// the chip is oversubscribed something has to give).
     fn assign_slot(&mut self, track_ch: usize) -> usize {
-        if let Some(i) = self.slots.iter().position(|s| s.owner == Some(track_ch)) {
+        // In rhythm mode, channels 6/7/8 are reserved for percussion — melodic notes avoid them.
+        let melodic_max = if self.rhythm_on {
+            self.slots.len().min(6)
+        } else {
+            self.slots.len()
+        };
+        if let Some(i) = self.slots[..melodic_max]
+            .iter()
+            .position(|s| s.owner == Some(track_ch))
+        {
             return i;
         }
-        if let Some(i) = self
-            .slots
+        if let Some(i) = self.slots[..melodic_max]
             .iter()
             .position(|s| s.owner.is_none() || !s.keyed)
         {
             return i;
         }
-        if let Some(i) = (0..self.slots.len()).find(|&i| self.chip.channel_is_silent(i)) {
+        if let Some(i) = (0..melodic_max).find(|&i| self.chip.channel_is_silent(i)) {
             return i;
         }
         0
@@ -81,6 +128,30 @@ impl OplDriver {
         pan_l: bool,
         pan_r: bool,
     ) {
+        // Percussion (rhythm mode): route to the fixed rhythm channel instead of a melodic slot.
+        if let Some((ch, carrier, full, bit)) = rhythm_placement(instr.rhythm) {
+            self.rhythm_on = true;
+            let patch = channel_patch_from_instr(instr);
+            let (fnum, block) = hz_to_fnum_block(milli_hz);
+            if full {
+                self.chip.set_patch(ch, &patch);
+                self.chip.set_frequency(ch, fnum, block);
+            } else {
+                let op = if carrier {
+                    &patch.carrier
+                } else {
+                    &patch.modulator
+                };
+                self.chip.set_rhythm_operator(ch, carrier, op);
+                self.chip.set_operator_frequency(ch, carrier, fnum, block);
+            }
+            self.chip.set_pan(ch, pan_l, pan_r);
+            // Retrigger: clear then set the drum bit so a repeated hit re-keys the envelope.
+            self.set_drum(track_ch, bit, false);
+            self.set_drum(track_ch, bit, true);
+            return;
+        }
+
         let slot = self.assign_slot(track_ch);
         let patch = channel_patch_from_instr(instr);
 
@@ -120,6 +191,10 @@ impl OplDriver {
     }
 
     pub fn note_off(&mut self, track_ch: usize) {
+        if let Some(bit) = self.drum_bit_of(track_ch) {
+            self.set_drum(track_ch, bit, false);
+            return;
+        }
         if let Some(slot) = self.slot_of(track_ch) {
             self.chip.key_off(slot);
             self.slots[slot].keyed = false;
@@ -129,6 +204,10 @@ impl OplDriver {
     /// Hard cut (note-cut / channel reused by a sample instrument): key
     /// off and release ownership immediately.
     pub fn note_cut(&mut self, track_ch: usize) {
+        if let Some(bit) = self.drum_bit_of(track_ch) {
+            self.set_drum(track_ch, bit, false);
+            return;
+        }
         if let Some(slot) = self.slot_of(track_ch) {
             self.chip.key_off(slot);
             self.slots[slot] = SlotState::default();
@@ -231,5 +310,44 @@ mod tests {
         // freq = fnum * 49716 / 2^(20-block)
         let freq = (fnum as u64 * OPL_NATIVE_RATE as u64) as f64 / (1u64 << (20 - block)) as f64;
         assert!((freq - 440.0).abs() < 2.0, "freq={freq}");
+    }
+
+    #[test]
+    fn rhythm_instrument_routes_to_percussion() {
+        use crate::tracker::instr_opl::{InstrOpl, MdiInstr, MdiOpl, OplRhythm};
+        let mut drv = OplDriver::new(44100);
+        // Percussive patch (fast attack, quick decay) as a bass-drum instrument.
+        let op = MdiOpl {
+            multiple: 1,
+            attack: 15,
+            decay: 4,
+            sustain: 0,
+            release: 7,
+            total_level: 0,
+            ..Default::default()
+        };
+        let bd = InstrOpl {
+            element: MdiInstr {
+                modulator: op,
+                carrier: op,
+                ..Default::default()
+            },
+            volume: 63,
+            rhythm: OplRhythm::BassDrum,
+            ..Default::default()
+        };
+        // A bass-drum note on tracker channel 0 must produce sound via rhythm mode,
+        // without consuming a melodic slot.
+        drv.note_on(0, &bd, 100_000, 63, true, true);
+        let mut peak = 0i32;
+        for _ in 0..4410 {
+            let (l, _r) = drv.render_frame();
+            peak = peak.max(l.abs());
+        }
+        assert!(peak > 100, "bass drum silent, peak={peak}");
+        assert!(
+            drv.slots.iter().all(|s| s.owner.is_none()),
+            "no melodic slot used"
+        );
     }
 }
