@@ -432,6 +432,20 @@ impl OplChip {
         }
     }
 
+    /// Override a single rhythm operator's total level (per-note volume for a percussion voice,
+    /// which shares its channel with another drum and so can't use [`Self::set_carrier_tl`]).
+    /// `carrier` selects the operator; `tl` is the 0..63 register value.
+    pub(crate) fn set_rhythm_operator_tl(&mut self, ch: usize, carrier: bool, tl: u8) {
+        if let Some(c) = self.channels.get_mut(ch) {
+            let op = if carrier {
+                &mut c.carrier
+            } else {
+                &mut c.modulator
+            };
+            op.set_total_level(tl);
+        }
+    }
+
     pub(crate) fn set_pan(&mut self, ch: usize, left: bool, right: bool) {
         if let Some(c) = self.channels.get_mut(ch) {
             c.pan_l = left;

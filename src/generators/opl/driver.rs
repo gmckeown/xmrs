@@ -22,13 +22,34 @@ struct SlotState {
     additive: bool,
 }
 
+/// A live percussion voice's placement + resting level, so a later volume change can re-apply
+/// `OPL_Touch` to the correct operator (a rhythm drum shares its chip channel with another drum,
+/// so it can't be addressed through the melodic slot table).
+#[derive(Clone, Copy)]
+struct RhythmVoice {
+    track_ch: usize,
+    ch: usize,
+    carrier: bool,
+    full: bool,
+    resting_tl: u8,
+}
+
 pub struct OplDriver {
     chip: OplChip,
     slots: Vec<SlotState>,
     /// Current rhythm register (0xBD) drum bits, and which tracker channel triggered each drum
     /// (so note-off clears the right bit). Empty until a percussion instrument plays.
     rhythm_owner: Vec<(usize, u8)>,
+    /// Per-tracker-channel percussion voice placement + resting TL (for per-note volume).
+    rhythm_vol: Vec<RhythmVoice>,
     rhythm_on: bool,
+}
+
+/// `OPL_Touch` volume law (Bisqwit's ST3-measured curve, `snd_fm.c`): effective operator TL =
+/// `63 + (resting_tl·vol/63) − vol`, clamped to 0..63.
+fn touch_tl(resting_tl: u8, vol: u8) -> u8 {
+    let v = vol.min(63) as i32;
+    (63 + (resting_tl as i32 * v / 63) - v).clamp(0, 63) as u8
 }
 
 /// Fixed rhythm placement of a percussion role: `(chip channel, use carrier operator?, full
@@ -53,6 +74,7 @@ impl OplDriver {
             chip,
             slots: vec![SlotState::default(); n],
             rhythm_owner: Vec::new(),
+            rhythm_vol: Vec::new(),
             rhythm_on: false,
         }
     }
@@ -133,9 +155,18 @@ impl OplDriver {
             self.rhythm_on = true;
             let patch = channel_patch_from_instr(instr);
             let (fnum, block) = hz_to_fnum_block(milli_hz);
+            // The operator that carries this drum's level: the carrier for BD (2-op) / SD / CY,
+            // the modulator for HH / TT. Its patch TL is the resting level `OPL_Touch` scales.
+            let resting_tl = if full || carrier {
+                patch.carrier.tl
+            } else {
+                patch.modulator.tl
+            };
+            let touched = touch_tl(resting_tl, volume_0_63);
             if full {
                 self.chip.set_patch(ch, &patch);
                 self.chip.set_frequency(ch, fnum, block);
+                self.chip.set_carrier_tl(ch, touched);
             } else {
                 let op = if carrier {
                     &patch.carrier
@@ -144,14 +175,26 @@ impl OplDriver {
                 };
                 self.chip.set_rhythm_operator(ch, carrier, op);
                 self.chip.set_operator_frequency(ch, carrier, fnum, block);
+                self.chip.set_rhythm_operator_tl(ch, carrier, touched);
             }
             self.chip.set_pan(ch, pan_l, pan_r);
+            // Remember this voice so a later `set_volume` re-touches the right operator.
+            self.rhythm_vol.retain(|v| v.track_ch != track_ch);
+            self.rhythm_vol.push(RhythmVoice {
+                track_ch,
+                ch,
+                carrier,
+                full,
+                resting_tl,
+            });
             // Retrigger: clear then set the drum bit so a repeated hit re-keys the envelope.
             self.set_drum(track_ch, bit, false);
             self.set_drum(track_ch, bit, true);
             return;
         }
 
+        // Melodic note takes this tracker channel: drop any stale percussion binding for it.
+        self.rhythm_vol.retain(|v| v.track_ch != track_ch);
         let slot = self.assign_slot(track_ch);
         let patch = channel_patch_from_instr(instr);
 
@@ -179,6 +222,21 @@ impl OplDriver {
     }
 
     pub fn set_volume(&mut self, track_ch: usize, volume_0_63: u8) {
+        // Percussion voice: re-touch the drum's operator TL (it isn't in the melodic slot table).
+        if let Some(v) = self
+            .rhythm_vol
+            .iter()
+            .find(|v| v.track_ch == track_ch)
+            .copied()
+        {
+            let tl = touch_tl(v.resting_tl, volume_0_63);
+            if v.full {
+                self.chip.set_carrier_tl(v.ch, tl);
+            } else {
+                self.chip.set_rhythm_operator_tl(v.ch, v.carrier, tl);
+            }
+            return;
+        }
         if let Some(slot) = self.slot_of(track_ch) {
             self.apply_volume(slot, volume_0_63);
         }
@@ -214,16 +272,11 @@ impl OplDriver {
         }
     }
 
-    /// `OPL_Touch` volume law (Bisqwit's ST3-measured curve, `snd_fm.c`):
-    /// effective carrier TL = `63 + (patch_tl·vol/63) − vol`. Modulator TL
-    /// is only touched in additive mode.
+    /// Apply the per-note volume to a melodic voice via the [`touch_tl`] `OPL_Touch` law.
+    /// The additive modulator TL is mirrored inside `set_carrier_tl`.
     fn apply_volume(&mut self, slot: usize, vol: u8) {
-        let v = vol.min(63) as i32;
         let st = self.slots[slot];
-        let new_carrier = (63 + (st.carrier_tl as i32 * v / 63) - v).clamp(0, 63) as u8;
-        self.chip.set_carrier_tl(slot, new_carrier);
-        // (Additive modulator TL is handled inside `set_carrier_tl`, which
-        // mirrors the change to the modulator when the channel is additive.)
+        self.chip.set_carrier_tl(slot, touch_tl(st.carrier_tl, vol));
         let _ = st.modulator_tl;
     }
 }
@@ -348,6 +401,101 @@ mod tests {
         assert!(
             drv.slots.iter().all(|s| s.owner.is_none()),
             "no melodic slot used"
+        );
+    }
+
+    /// A rhythm drum's per-note volume must attenuate its output (via `OPL_Touch` on the drum's
+    /// operator), for both the full 2-op voice (BD) and the single-operator voices sharing a
+    /// channel (carrier = CY, modulator = HH). Before this was wired, `note_on` dropped the
+    /// volume for rhythm voices and every hit played at full level.
+    #[test]
+    fn rhythm_note_volume_attenuates() {
+        use crate::tracker::instr_opl::{InstrOpl, MdiInstr, MdiOpl, OplRhythm};
+        // Sustaining operator so the level is steady while we measure.
+        let op = MdiOpl {
+            multiple: 1,
+            attack: 15,
+            eg: true,
+            total_level: 0,
+            ..Default::default()
+        };
+        let make = |role| InstrOpl {
+            element: MdiInstr {
+                modulator: op,
+                carrier: op,
+                ..Default::default()
+            },
+            volume: 63,
+            rhythm: role,
+            ..Default::default()
+        };
+        let peak = |instr: &InstrOpl, vol: u8| -> i32 {
+            let mut drv = OplDriver::new(44100);
+            drv.note_on(0, instr, 200_000, vol, true, true);
+            let mut p = 0i32;
+            for _ in 0..4410 {
+                let (l, _r) = drv.render_frame();
+                p = p.max(l.abs());
+            }
+            p
+        };
+        for role in [OplRhythm::BassDrum, OplRhythm::Cymbal, OplRhythm::HiHat] {
+            let instr = make(role);
+            let loud = peak(&instr, 63);
+            let soft = peak(&instr, 12);
+            assert!(
+                loud > 100,
+                "{role:?}: full-volume drum silent (peak={loud})"
+            );
+            assert!(
+                soft * 2 < loud,
+                "{role:?}: note volume ignored (loud={loud}, soft={soft})"
+            );
+        }
+    }
+
+    /// A mid-note `set_volume` must also re-touch the drum's operator (percussion voices aren't in
+    /// the melodic slot table, so the old `slot_of`-only path was a no-op for them).
+    #[test]
+    fn rhythm_set_volume_attenuates() {
+        use crate::tracker::instr_opl::{InstrOpl, MdiInstr, MdiOpl, OplRhythm};
+        let op = MdiOpl {
+            multiple: 1,
+            attack: 15,
+            eg: true,
+            total_level: 0,
+            ..Default::default()
+        };
+        let instr = InstrOpl {
+            element: MdiInstr {
+                modulator: op,
+                carrier: op,
+                ..Default::default()
+            },
+            volume: 63,
+            rhythm: OplRhythm::BassDrum,
+            ..Default::default()
+        };
+        let mut drv = OplDriver::new(44100);
+        drv.note_on(0, &instr, 200_000, 63, true, true);
+        let mut loud = 0i32;
+        for _ in 0..2205 {
+            let (l, _r) = drv.render_frame();
+            loud = loud.max(l.abs());
+        }
+        drv.set_volume(0, 8);
+        // Let the level settle (the abrupt TL change clicks; skip that transient).
+        for _ in 0..512 {
+            let _ = drv.render_frame();
+        }
+        let mut soft = 0i32;
+        for _ in 0..2205 {
+            let (l, _r) = drv.render_frame();
+            soft = soft.max(l.abs());
+        }
+        assert!(
+            loud > 100 && soft * 2 < loud,
+            "set_volume ignored (loud={loud}, soft={soft})"
         );
     }
 }
