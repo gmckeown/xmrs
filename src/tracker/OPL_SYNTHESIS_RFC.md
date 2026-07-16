@@ -1,7 +1,16 @@
 # OPL / AdLib FM synthesis — architecture reference
 
+**Update (2026-07):** the chip core described below now lives in the standalone
+**`oplon`** crate (`OplChip` → `oplon::Opl2`, a full OPL2/**OPL3** emulator:
+18 channels, waveforms 0-7, 4-operator mode, hardware ±4084 output scale,
+validated against Nuked-OPL3). `generators/opl/` keeps only the tracker-facing
+`OplDriver`, which drives an `oplon::Opl2`; `xmrs` depends on `oplon` via the
+`import_s3m` feature (mirroring how `import_sid` pulls `sidera`). The one OPL
+golden (`s3m:opl_min`) was rebaked once for oplon's hardware-accurate scale;
+every non-OPL golden is unchanged. The sections below are the original design.
+
 **Status: delivered.** OPL2 FM synthesis ships: a clean-room, `no_std`,
-integer-only chip in `generators/opl/` (ROM tables generated const-fn; EG
+integer-only chip (now in the `oplon` crate; ROM tables generated const-fn; EG
 an independent, cycle-exact reimplementation of the documented YMF262
 envelope mechanism) with isolated player
 integration (`xmrsplayer/src/channel/opl.rs`). S3M/MPTM modules carrying

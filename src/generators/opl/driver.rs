@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 
 use crate::tracker::instr_opl::{InstrOpl, MdiOpl, OplRhythm};
 
-use super::{ChannelPatch, OpPatch, OplChip, OPL_NATIVE_RATE};
+use oplon::{ChannelPatch, OpPatch, Opl2, OPL_NATIVE_RATE};
 
 /// Per-hardware-slot ownership + the patch's resting carrier/modulator
 /// total levels (needed to recompute volume via the `OPL_Touch` law).
@@ -35,7 +35,7 @@ struct RhythmVoice {
 }
 
 pub struct OplDriver {
-    chip: OplChip,
+    chip: Opl2,
     slots: Vec<SlotState>,
     /// Current rhythm register (0xBD) drum bits, and which tracker channel triggered each drum
     /// (so note-off clears the right bit). Empty until a percussion instrument plays.
@@ -68,7 +68,7 @@ fn rhythm_placement(role: OplRhythm) -> Option<(usize, bool, bool, u8)> {
 
 impl OplDriver {
     pub fn new(output_rate: u32) -> Self {
-        let chip = OplChip::new(output_rate);
+        let chip = Opl2::new(output_rate);
         let n = chip.channel_count();
         Self {
             chip,

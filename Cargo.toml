@@ -1,6 +1,6 @@
 [package]
 name = "xmrs"
-version = "0.14.6"
+version = "0.14.7"
 edition = "2021"
 description = "Read, edit and serialize SoundTracker music with pleasure — MOD/XM/S3M/IT/DW import plus SID & OPL chip synthesis, no_std."
 license = "MIT"
@@ -40,7 +40,13 @@ serde = { version = "1.0", default-features = false, features = ["derive", "allo
 # its default feature set — drives `generators::sid` (the runtime counterpart
 # of `InstrSid`), replacing the old static SID wavetables. 1.0.1 is the first
 # release carrying `Sid::clock_with_voices`, the per-voice routing hook.
-sidera = { version = "1.0.1", optional = true, default-features = false }
+sidera = { version = "1.1.0", optional = true, default-features = false }
+# Clean-room OPL2/OPL3 (Yamaha YM3812/YMF262) FM emulator, pulled in only by
+# `import_s3m` (its `dep:oplon` gate below). `no_std`, integer-only, no
+# transitive deps — backs `generators::opl` (the runtime counterpart of
+# `InstrOpl`), replacing the former inline OPL chip. Hardware-calibrated
+# (±4084 operator scale), validated against Nuked-OPL3.
+oplon = { version = "1.0.0", optional = true, default-features = false }
 
 [features]
 # `std` and `import` are on by default: the common case is a
@@ -94,8 +100,9 @@ import = [
 import_mod = []
 # Fasttracker II XM.
 import_xm  = []
-# ScreamTracker 3 S3M.
-import_s3m = []
+# ScreamTracker 3 S3M. Pulls in `oplon`, the OPL2/OPL3 emulator that backs
+# `generators::opl` for AdLib/FM instruments.
+import_s3m = ["dep:oplon"]
 # Impulse Tracker IT.
 import_it  = []
 # Commodore 64 SID (MOS6581/8580). Pulls in `sidera`, the cycle-accurate

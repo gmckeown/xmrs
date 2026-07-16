@@ -1202,7 +1202,18 @@ impl S3mModule {
                     // Create Instrument
                     let mut instr = Instrument::default();
                     instr.name = opl.title.clone();
-                    instr.instr_type = InstrumentType::Opl(opl.to_instr_opl());
+                    let mut i_opl = opl.to_instr_opl();
+                    // Adlib instrument type byte (discriminator): 2 = melody, 3 = bass drum,
+                    // 4 = snare, 5 = tom-tom, 6 = cymbal, 7 = hi-hat (ScreamTracker 3 rhythm mode).
+                    i_opl.rhythm = match s3m_meta_instr.discriminator {
+                        3 => crate::tracker::instr_opl::OplRhythm::BassDrum,
+                        4 => crate::tracker::instr_opl::OplRhythm::Snare,
+                        5 => crate::tracker::instr_opl::OplRhythm::TomTom,
+                        6 => crate::tracker::instr_opl::OplRhythm::Cymbal,
+                        7 => crate::tracker::instr_opl::OplRhythm::HiHat,
+                        _ => crate::tracker::instr_opl::OplRhythm::Melodic,
+                    };
+                    instr.instr_type = InstrumentType::Opl(i_opl);
 
                     // Add Instrument to module
                     module.instrument.push(instr);

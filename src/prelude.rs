@@ -45,7 +45,7 @@ pub use crate::{
 };
 
 #[cfg(feature = "import_s3m")]
-pub use crate::tracker::instr_opl::{InstrOpl, MdiInstr, MdiOpl};
+pub use crate::tracker::instr_opl::{InstrOpl, MdiInstr, MdiOpl, OplRhythm};
 
 #[cfg(feature = "import_sid")]
 pub use crate::tracker::instr_sid::InstrSid;
