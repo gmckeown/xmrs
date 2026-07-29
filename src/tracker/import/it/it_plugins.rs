@@ -36,7 +36,25 @@ pub struct SndMixPluginInfo {
     pub routing_flags: u8,
     pub mix_mode: u8,
     pub gain: u8,
+    /// `SNDMIXPLUGININFO::reserved`, the padding byte after `gain`.
+    /// Kept because a byte a format calls reserved is a byte some
+    /// writer eventually puts something in.
+    pub reserved: u8,
     pub output_routing: u32,
+    /// Child plugin to load inside a *shell* plugin — one DLL that
+    /// hosts several effects (Waves, Komplete, …).
+    ///
+    /// This is not redundant with [`Self::id1`] / [`Self::id2`]:
+    /// OpenMPT gives **every child of one shell the same `id1` and
+    /// `id2`** (see `PluginManager.cpp`, where the contained-plugin
+    /// assertion checks exactly that), and resolves which child to
+    /// load by matching all three values. Reading only the ID pair
+    /// therefore collapses a whole bundle into a single identity.
+    pub shell_plugin_id: u32,
+    /// The three words OpenMPT documents as "reserved for routing
+    /// info". Preserved verbatim for the same reason as
+    /// [`Self::reserved`].
+    pub reserved3: [u32; 3],
     pub name: String,
     pub library_name: String,
 }
@@ -49,10 +67,10 @@ impl SndMixPluginInfo {
         let routing_flags = r.read_u8()?;
         let mix_mode = r.read_u8()?;
         let gain = r.read_u8()?;
-        let _reserved = r.read_u8()?;
+        let reserved = r.read_u8()?;
         let output_routing = r.read_u32_le()?;
-        let _shell_plugin_id = r.read_u32_le()?;
-        let _reserved3 = [r.read_u32_le()?, r.read_u32_le()?, r.read_u32_le()?];
+        let shell_plugin_id = r.read_u32_le()?;
+        let reserved3 = [r.read_u32_le()?, r.read_u32_le()?, r.read_u32_le()?];
         let name = r.read_array::<32>()?;
         let library_name = r.read_array::<64>()?;
         Ok(Self {
@@ -61,7 +79,10 @@ impl SndMixPluginInfo {
             routing_flags,
             mix_mode,
             gain,
+            reserved,
             output_routing,
+            shell_plugin_id,
+            reserved3,
             name: read_cstr(&name),
             library_name: read_cstr(&library_name),
         })
@@ -187,7 +208,10 @@ impl Plugins {
                         routing_flags: p.info.routing_flags,
                         mix_mode: p.info.mix_mode,
                         gain: p.info.gain,
+                        reserved: p.info.reserved,
                         output_routing: p.info.output_routing,
+                        shell_plugin_id: p.info.shell_plugin_id,
+                        reserved3: p.info.reserved3,
                         name: p.info.name.clone(),
                         library_name: p.info.library_name.clone(),
                     },

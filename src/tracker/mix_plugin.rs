@@ -36,9 +36,28 @@ pub struct MixPluginInfo {
     pub mix_mode: u8,
     /// Plugin gain, tenths (real gain = `gain / 10`).
     pub gain: u8,
+    /// `SNDMIXPLUGININFO::reserved` — the padding byte after `gain`,
+    /// carried through rather than dropped.
+    #[serde(default)]
+    pub reserved: u8,
     /// Output routing (`dwOutputRouting`): `0` = master, `0x80 + x` =
     /// chained into plugin `x`.
     pub output_routing: u32,
+    /// Which child to load inside a *shell* plugin — a single DLL
+    /// hosting several effects.
+    ///
+    /// Required to identify such a plugin: OpenMPT assigns every
+    /// child of one shell the **same** [`Self::id1`] and
+    /// [`Self::id2`], and disambiguates on this third value. A
+    /// census keyed on the ID pair alone merges a whole bundle into
+    /// one entry. `0` for ordinary, non-shell plugins.
+    #[serde(default)]
+    pub shell_plugin_id: u32,
+    /// The three words OpenMPT reserves for routing information.
+    /// Always zero in practice; preserved so a reader sees the file
+    /// as it is rather than as the format promises it should be.
+    #[serde(default)]
+    pub reserved3: [u32; 3],
     /// User-chosen display name (`szName`, ANSI in the file).
     pub name: String,
     /// Original library / DLL name (`szLibraryName`, UTF-8 in the file).

@@ -12,6 +12,7 @@
 //! - `version: usize` — SID variant (10, 15, 20+) that selects the
 //!   phrase-byte decoder.
 
+use super::detect::StreamLayout;
 use crate::prelude::*;
 use crate::tracker::import::patternslot::PatternSlot;
 use alloc::{vec, vec::Vec};
@@ -19,11 +20,22 @@ use alloc::{vec, vec::Vec};
 #[derive(Debug)]
 pub struct Voices {
     pub version: usize,
+    /// Note-stream payload encoding, when it must differ from what `version`
+    /// implies. `None` — every bundled tune — follows `version`, which is how
+    /// this behaved before the encoding became separately knowable.
+    ///
+    /// The two are not the same thing: `version` also selects the release mode,
+    /// the vibrato model and the drum semantics, whereas this decides only how
+    /// many bytes an entry's payload occupies. The binary disagrees with the
+    /// transcribed `version` on that point for three tunes (see
+    /// [`super::detect::StreamLayout`]), so it needs its own knob to be
+    /// measurable independently.
+    pub stream: Option<StreamLayout>,
     pub songs: Vec<Vec<usize>>,
     pub orderings: Vec<Vec<u8>>,
     pub phrases: Vec<Vec<u8>>,
     /// Per-tune note-table overflow substitutions `(raw_note, real_note)`,
-    /// consulted by [`decode_phrase`] before the shared default fixup. Needed
+    /// consulted by `decode_phrase` before the shared default fixup. Needed
     /// because a note byte > 95 reads engine work-RAM whose value is tune- and
     /// frame-dependent (see `decode_phrase`); empty for tunes that use the
     /// shared default.
@@ -44,6 +56,7 @@ impl Voices {
     ) -> Self {
         Self {
             version,
+            stream: None,
             songs,
             orderings,
             phrases,
@@ -51,28 +64,37 @@ impl Voices {
         }
     }
 
-    /// Cycle each voice through its phrase ordering until every
-    /// voice has completed at least one full pass, and return the
-    /// resulting `(rows × 3 voices)` grid of [`PatternSlot`]s.
+    /// Override the note-stream payload encoding. `None` restores "follow
+    /// `version`". See [`Self::stream`].
+    pub fn with_stream(mut self, stream: Option<StreamLayout>) -> Self {
+        self.stream = stream;
+        self
+    }
+
+    /// The encoding actually used to decode this tune's phrases.
+    fn stream_layout(&self) -> StreamLayout {
+        self.stream.unwrap_or(match self.version {
+            10 => StreamLayout::PortaByte,
+            15 => StreamLayout::InstrumentOnly,
+            _ => StreamLayout::PortaWord,
+        })
+    }
+
+    /// Each voice's full single-pass row sequence, as [`PatternSlot`]s: the
+    /// concatenation of every phrase in that voice's ordering (until the `254`
+    /// end-of-song marker, or the ordering ends).
     ///
-    /// Bounded by [`Self::MAX_GRID_ROWS`]. SID v30 (Delta) does not
-    /// emit a 254 end-of-song marker in every ordering and uses
-    /// phrase-level compression / per-channel pattern loops that
-    /// the v10/v20 decoder doesn't model — the natural
-    /// "all voices wrapped once" terminator can fail to fire and
-    /// the row generator runs away. The cap matches `MAX_ROWS` in
-    /// [`crate::tracker::import::build`] for symmetry.
-    /// Each voice's full single-pass row sequence: the concatenation of every
-    /// phrase in that voice's ordering (until the `254` end-of-song marker or
-    /// the ordering ends). Voices are **not** cycled into a common LCM grid —
-    /// each one is its own length and loops independently via a `ChannelLoop`,
-    /// exactly as the three SID voices run on the real hardware (no global
-    /// realignment). This replaced the old `get_voice_grid` LCM hack, which
-    /// materialised `lcm(voice lengths)` rows (thousands per song) to fit a
-    /// single pattern-style grid — only needed before the DAW layer had
-    /// per-lane loops.
+    /// Voices are **not** cycled into a common grid — each one is its own
+    /// length and loops independently via a `ChannelLoop`, exactly as the three
+    /// SID voices run on the real hardware (no global realignment). This
+    /// replaced the old `get_voice_grid` LCM hack, which materialised
+    /// `lcm(voice lengths)` rows (thousands per song) to fit a single
+    /// pattern-style grid — only needed before the DAW layer had per-lane
+    /// loops. With it went its `MAX_GRID_ROWS` runaway cap: a single pass is
+    /// bounded by the phrase data itself.
+    ///
     /// `short_gate_instrs[i]` true ⇒ instrument `i` is drum-flagged (fxmask
-    /// bit0) and uses a 1-row gate in the v30 replayer — see [`decode_phrase`].
+    /// bit0) and uses a 1-row gate in the v30 replayer — see `decode_phrase`.
     /// Empty (or all-false) reproduces the pre-fix behaviour exactly.
     pub fn voice_passes(
         &self,
@@ -102,6 +124,7 @@ impl Voices {
             .map(|p| {
                 decode_phrase(
                     self.version,
+                    self.stream_layout(),
                     p,
                     self.overflow_overrides,
                     short_gate_instrs,
@@ -114,13 +137,13 @@ impl Voices {
     /// Diagnostic: every raw note byte > 95 (a `RH_FREQ_HEX` overflow) the
     /// decoder encounters, as `(phrase_index, raw_note)`. Used by the
     /// `sid_overflow_scan` example to list which tunes still need
-    /// `overflow_overrides` entries (see [`decode_phrase`]).
+    /// `overflow_overrides` entries (see `decode_phrase`).
     pub fn raw_overflow_notes(&self) -> Vec<(usize, u8)> {
         let mut out = Vec::new();
         for (pi, p) in self.phrases.iter().enumerate() {
             let mut raw = Vec::new();
             // Decode with no overrides so we see the original note bytes.
-            let _ = decode_phrase(self.version, p, &[], &[], &mut raw);
+            let _ = decode_phrase(self.version, self.stream_layout(), p, &[], &[], &mut raw);
             for n in raw {
                 out.push((pi, n));
             }
@@ -148,6 +171,7 @@ fn pick_phrase(phrases: &[Vec<PatternSlot>], idx: u8) -> &Vec<PatternSlot> {
 
 fn decode_phrase(
     version: usize,
+    stream: StreamLayout,
     source: &[u8],
     overflow_overrides: &[(u8, u8)],
     short_gate_instrs: &[bool],
@@ -172,8 +196,8 @@ fn decode_phrase(
         if append {
             index += 1;
             if instr_or_portamento {
-                match version {
-                    10 => {
+                match stream {
+                    StreamLayout::PortaByte => {
                         if byte(index) & 0b1000_0000 == 0 {
                             current.instrument = Some((byte(index) & 0b0111_1111) as usize);
                             last_instr = current.instrument;
@@ -192,14 +216,14 @@ fn decode_phrase(
                             }
                         }
                     }
-                    15 => {
+                    StreamLayout::InstrumentOnly => {
                         // Spellbound variant: byte 2 is always instrument, never portamento
                         if byte(index) & 0b1000_0000 == 0 {
                             current.instrument = Some((byte(index) & 0b0111_1111) as usize);
                             last_instr = current.instrument;
                         }
                     }
-                    _ => {
+                    StreamLayout::PortaWord => {
                         // Version 20+: portamento uses 14-bit value across 2 bytes
                         // Byte 1: bit 7=portamento, bit 6=direction, bits 5-0=high 6 bits
                         // Byte 2: low 8 bits of portamento speed

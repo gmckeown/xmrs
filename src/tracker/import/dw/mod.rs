@@ -24,6 +24,11 @@
 //! long-form description and `oracle/` for the verification harness.
 
 pub(crate) mod command_map;
+/// The per-family note-stream command table recovered from the replayer, and
+/// its command kinds. The module stays `pub(crate)` — its contents track the
+/// 68k dispatchers, not a public contract — but `DwConfig::command_map` is a
+/// public field, so the types it exposes need a nameable path.
+pub use command_map::{DwCmd, DwCmdKind, DwCommandMap};
 pub mod detect;
 pub mod dw_module;
 pub mod event;

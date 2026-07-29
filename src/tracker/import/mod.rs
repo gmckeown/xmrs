@@ -50,6 +50,18 @@ pub(crate) mod memory;
 ))]
 pub(crate) mod patternslot;
 
+/// Read-only view of the pre-DAW, importer-side state (`RawModule`),
+/// for consumers that want what the file said rather than what the
+/// player needs. Also the supported re-export path for
+/// [`patternslot::PatternSlot`], whose own module stays `pub(crate)`.
+#[cfg(any(
+    feature = "import_mod",
+    feature = "import_xm",
+    feature = "import_s3m",
+    feature = "import_it",
+))]
+pub mod raw;
+
 /// Order-list parsing helper (used by XM/S3M/IT; MOD and SID build
 /// their orders directly).
 #[cfg(any(feature = "import_xm", feature = "import_s3m", feature = "import_it",))]
@@ -83,10 +95,10 @@ pub mod build;
 pub mod extract;
 
 /// impl of `Module::load_mod` / `load_xm` / `load_s3m` / `load_it` /
-/// `load_dw` / `load`. Each method is individually gated inside.
-/// SID is not auto-detected via `Module::load` (it is imported via
-/// `SidModule::load` directly), so SID alone doesn't pull this in.
-/// DW *is* auto-detected even though it has no magic header: its
+/// `load_dw` / `load_sid` / `load`. Each method is individually gated
+/// inside. SID *is* auto-detected via `Module::load` — off its PSID/RSID
+/// magic, first and exclusively — so `import_sid` alone pulls this in.
+/// DW is auto-detected even though it has no magic header: its
 /// probe quadruple (`LEA / LEA / MOVEQ / DBF`) is unique enough
 /// that scanning a few hundred bytes can tell a `.dw` apart from
 /// random data.
@@ -96,6 +108,7 @@ pub mod extract;
     feature = "import_s3m",
     feature = "import_it",
     feature = "import_dw",
+    feature = "import_sid",
 ))]
 mod loader;
 

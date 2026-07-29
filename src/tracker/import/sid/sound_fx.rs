@@ -5,7 +5,7 @@
 //! importer materialises the table into per-row `TrackImportUnit`
 //! mutations.
 
-use crate::tracker::instr_sid::SidVoice;
+use crate::core::instr_sid::SidVoice;
 
 #[derive(Debug)]
 pub struct SoundFx {

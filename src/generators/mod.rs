@@ -6,16 +6,17 @@
 //! Each generator is self-contained, `no_std`, integer-only DSP/logic with
 //! no dependency on the player crate; the player owns instances and feeds
 //! them gestures. Today this hosts the OPL FM synthesiser (the rendering
-//! counterpart of [`crate::tracker::instr_opl::InstrOpl`]); future
-//! generators (SID, the DW chip, Euclidean rhythm) belong here too.
+//! counterpart of [`crate::core::instr_opl::InstrOpl`]) and the SID
+//! synthesiser (counterpart of [`crate::core::instr_sid::InstrSid`]); future
+//! generators (the DW chip, Euclidean rhythm) belong here too.
 
 /// Clean-room OPL2 (Yamaha YM3812) FM synthesiser. See
 /// `OPL_SYNTHESIS_RFC.md`.
-#[cfg(feature = "import_s3m")]
+#[cfg(feature = "synth_opl")]
 pub mod opl;
 
 /// Cycle-accurate MOS 6581/8580 SID synthesiser — the runtime counterpart
-/// of [`crate::tracker::instr_sid::InstrSid`], wrapping the `sidera`
+/// of [`crate::core::instr_sid::InstrSid`], wrapping the `sidera`
 /// emulator.
-#[cfg(feature = "import_sid")]
+#[cfg(feature = "synth_sid")]
 pub mod sid;

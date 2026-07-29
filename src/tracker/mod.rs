@@ -1,7 +1,8 @@
 //! Format-tied items: presets of [`crate::core::compatibility::PlaybackQuirks`]
-//! mirroring historical trackers, the `format::ModuleFormat` tag,
-//! format-specific instruments, and the import readers / build /
-//! extract pipelines.
+//! mirroring historical trackers, the `format::ModuleFormat` tag, and the
+//! import readers / build / extract pipelines. (The chip-synthesis instrument
+//! types are *not* here — they are format-agnostic authoring primitives and
+//! live under [`crate::core`].)
 //!
 //! Always-on sub-modules `period` and `codepage` compile in every
 //! configuration — the player needs `period` for sample frequency
@@ -34,12 +35,5 @@ pub mod profiles;
 
 #[cfg(feature = "import_it")]
 pub mod mix_plugin;
-
-#[cfg(feature = "import_s3m")]
-pub mod instr_opl;
-#[cfg(feature = "import_sid")]
-pub mod instr_robsid;
-#[cfg(feature = "import_sid")]
-pub mod instr_sid;
 
 pub mod import;

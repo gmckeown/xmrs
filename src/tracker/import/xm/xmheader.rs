@@ -54,19 +54,19 @@ impl TryFrom<u16> for XmFlagType {
 #[derive(Debug)]
 pub struct XmHeader {
     id_text: String, // "Extended Module: "
-    pub name: String,
+    pub(crate) name: String,
     right_arrow: u8, // 0x1A on IBM437 charset matches →
-    pub tracker_name: String,
-    pub version_number: u16,
-    pub header_size: u32, // 20 (starting from here to PatternOrder start) + pattern size (default 256, can be less...or more)
-    song_length: u16,     // pattern order table "size" in bytes
-    pub restart_position: u16, // PatternOrder index
-    pub number_of_channels: u16, // 0..32/64
-    pub number_of_patterns: u16, // 1..256
-    pub number_of_instruments: u16, // 0..128
-    pub flags: XmFlagType,
-    pub default_tempo: u16,
-    pub default_bpm: u16,
+    pub(crate) tracker_name: String,
+    pub(crate) version_number: u16,
+    pub(crate) header_size: u32, // 20 (starting from here to PatternOrder start) + pattern size (default 256, can be less...or more)
+    song_length: u16,            // pattern order table "size" in bytes
+    pub(crate) restart_position: u16, // PatternOrder index
+    pub(crate) number_of_channels: u16, // 0..32/64
+    pub(crate) number_of_patterns: u16, // 1..256
+    pub(crate) number_of_instruments: u16, // 0..128
+    pub(crate) flags: XmFlagType,
+    pub(crate) default_tempo: u16,
+    pub(crate) default_bpm: u16,
 }
 
 impl Default for XmHeader {

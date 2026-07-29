@@ -14,8 +14,9 @@
 //! may carry per-channel state — [`Device::process`] takes `&mut self` —
 //! and time-based devices precompute coefficients in [`Device::prepare`].
 //!
-//! It is deliberately **separate** from [`crate::tracker::mix_plugin`]
-//! (`MixPlugins`): those are opaque, host-dependent VST chunks the
+//! It is deliberately **separate** from `tracker::mix_plugin`
+//! (`MixPlugins`, a module that only exists under `import_it`, hence no
+//! link): those are opaque, host-dependent VST chunks the
 //! player can't execute, preserved only for round-trip. This chain is
 //! native and player-processable.
 //!
@@ -380,6 +381,35 @@ pub enum Device {
     /// unipolar `[0, 1]` triangle (ramp up then down) or square (on/off)
     /// wave at `rate_hz`. A coarse, "gargling" tremolo. The cycle counter
     /// is runtime-only; un-prepared ⇒ pass-through.
+    /// The MOS 6581/8580 filter, as an ordinary audio effect.
+    ///
+    /// Not a low-pass with extras: the SID filter is a two-integrator
+    /// state-variable filter with a **non-linear** cutoff scale and its own
+    /// resonance curve, and the three modes can be combined. The 6581's is
+    /// famously uneven from chip to chip and is a large part of that machine's
+    /// character; the 8580's is clean and symmetric.
+    ///
+    /// Usable on ANY track, not just SID ones — the real chip has an EXT IN pin
+    /// routed into this same filter, so passing foreign audio through it is a
+    /// hardware feature rather than a trick.
+    ///
+    /// On a SID track it is not run as an insert (the chip already filters
+    /// internally, and a second pass would cascade); there the driver reads
+    /// these parameters and applies them to the chip's own filter, so one set of
+    /// automation serves both cases.
+    SidFilter {
+        /// Cutoff on the chip's own 11-bit scale (`0..=2047`), non-linear.
+        cutoff: u16,
+        /// Resonance nibble (`0..=15`).
+        resonance: u8,
+        /// Mode bits: `1` low-pass, `2` band-pass, `4` high-pass, combinable.
+        /// `0` SILENCES a routed signal — that is what the chip does, not a
+        /// bypass.
+        mode: u8,
+        /// `false` = 6581 (non-linear, the classic character), `true` = 8580.
+        model_8580: bool,
+    },
+
     Gargle {
         /// Modulation rate in Hz (DMO `Rate`, 1–1000).
         rate_hz: u16,
@@ -808,6 +838,16 @@ impl Device {
     #[inline]
     pub fn process(&mut self, sample: (Amp, Amp)) -> (Amp, Amp) {
         match self {
+            // The audio path is not wired yet: it runs the chip's own filter
+            // (`sidera::filter`) oversampled to the chip rate, which needs a
+            // sidera release carrying the now-public module. Until then this is
+            // a deliberate pass-through, the same contract `prepare` states for
+            // any unprepared device — inert, never a panic, never a half-filter
+            // that would flatter the ear while being wrong.
+            //
+            // On a SID track it is never processed here at all: the driver reads
+            // its parameters and applies them to the chip's internal filter.
+            Device::SidFilter { .. } => sample,
             Device::Gain(g) => (g.apply(sample.0), g.apply(sample.1)),
             Device::LowPass { cutoff, state } => {
                 // Q1.15 one-pole: y += (x − y)·a >> 15. State kept in
@@ -1198,6 +1238,21 @@ impl Device {
                     *cutoff = value.max(Q15::ZERO);
                 }
             }
+            Device::SidFilter {
+                cutoff,
+                resonance,
+                mode,
+                model_8580,
+            } => match param {
+                0 => *cutoff = lerp_param(value, 0, 2047) as u16,
+                1 => *resonance = lerp_param(value, 0, 15) as u8,
+                // Stepped, not lerped: the mode is a bit set, and sliding
+                // through it would sweep LP → LP+BP → BP → … which is not a
+                // continuous control. A host automating it is choosing a mode.
+                2 => *mode = lerp_param(value, 0, 7) as u8,
+                3 => *model_8580 = value.raw() > Q15::ONE.raw() / 2,
+                _ => {}
+            },
             Device::ParamEq {
                 center_hz,
                 bandwidth_semitones,
@@ -1414,6 +1469,10 @@ impl Device {
     pub fn prepare(&mut self, sample_rate: u32) {
         let _ = sample_rate;
         match self {
+            // Nothing to precompute until the audio path exists; the chip
+            // filter's coefficients derive from its own ~1 MHz clock, so what
+            // this will need is the oversampling ratio, not a biquad.
+            Device::SidFilter { .. } => {}
             Device::Gain(_) => {}
             // One-pole `cutoff` is already a per-sample coefficient, not
             // a frequency, so nothing to precompute yet.
@@ -1581,6 +1640,8 @@ impl Device {
     /// devices ignore it.
     pub fn reset(&mut self) {
         match self {
+            // No audio state yet — the parameters are the whole device for now.
+            Device::SidFilter { .. } => {}
             Device::Gain(_) => {}
             Device::LowPass { state, .. } => *state = (0, 0),
             Device::ParamEq { eq, .. } => eq.reset_history(),
@@ -1808,6 +1869,51 @@ mod tests {
         let after_reset = b.process(step);
 
         assert_eq!(after_reset, first, "reset did not restore initial state");
+    }
+
+    /// The SID filter's four parameters map onto the normalized automation
+    /// range in the chip's own units — cutoff on its 11-bit non-linear scale,
+    /// resonance as the nibble, the mode as a BIT SET (stepped, not swept), and
+    /// the chip revision.
+    #[test]
+    fn sid_filter_params_map_to_chip_units() {
+        let mut d = Device::SidFilter {
+            cutoff: 0,
+            resonance: 0,
+            mode: 1,
+            model_8580: false,
+        };
+        d.set_param(0, Q15::ONE);
+        d.set_param(1, Q15::ONE);
+        d.set_param(3, Q15::ONE);
+        let Device::SidFilter {
+            cutoff,
+            resonance,
+            model_8580,
+            ..
+        } = d
+        else {
+            panic!("still a SID filter");
+        };
+        assert_eq!(cutoff, 2047, "full scale is the 11-bit maximum");
+        assert_eq!(resonance, 15, "full scale is the resonance nibble maximum");
+        assert!(model_8580);
+    }
+
+    /// Until the audio path lands it must be an honest pass-through, not a
+    /// half-filter: silence-in silence-out, signal-in unchanged-out.
+    #[test]
+    fn sid_filter_is_an_explicit_passthrough_for_now() {
+        let mut d = Device::SidFilter {
+            cutoff: 1024,
+            resonance: 8,
+            mode: 1,
+            model_8580: false,
+        };
+        d.prepare(48_000);
+        let s = (Amp::from_q15(Q15::ONE), Amp::from_q15(Q15::ZERO));
+        assert_eq!(d.process(s), s, "inert until the chip filter is wired in");
+        d.reset();
     }
 
     #[test]

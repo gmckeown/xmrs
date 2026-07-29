@@ -9,8 +9,6 @@ use crate::core::pitch::Pitch;
 use crate::tracker::import::bin_reader::ImportError;
 use crate::tracker::import::patternslot::PatternSlot;
 
-use alloc::vec::Vec;
-
 impl PatternSlot {
     pub fn load_xm(src: &[u8]) -> Result<(&[u8], PatternSlot), ImportError> {
         let mut dst: [u8; 5] = [0; 5];
@@ -77,90 +75,5 @@ impl PatternSlot {
                 effect_parameter: dst[4],
             },
         ))
-    }
-
-    pub fn save_xm_unpack(&self) -> Vec<u8> {
-        let mut bytes: [u8; 5] = [0; 5];
-        bytes[0] = cell_note_to_xm_byte(&self.note);
-        bytes[1] = {
-            if let Some(instr) = self.instrument {
-                (instr + 1) as u8
-            } else {
-                0
-            }
-        };
-        bytes[2] = self.volume;
-        bytes[3] = self.effect_type;
-        bytes[4] = self.effect_parameter;
-        bytes.to_vec()
-    }
-
-    pub fn save_xm(&self) -> Vec<u8> {
-        let mut bytes: [u8; 5] = [0; 5];
-        bytes[0] = cell_note_to_xm_byte(&self.note);
-        bytes[1] = {
-            if let Some(instr) = self.instrument {
-                (instr + 1) as u8
-            } else {
-                0
-            }
-        };
-        bytes[2] = self.volume;
-        bytes[3] = self.effect_type;
-        bytes[4] = self.effect_parameter;
-
-        let mut dst: [u8; 5] = [0; 5];
-        let mut pack_bits = 0;
-        let mut i = 1;
-        if bytes[0] > 0 {
-            pack_bits |= 0b0001;
-            dst[i] = bytes[0];
-            i += 1;
-        } // note
-        if bytes[1] > 0 {
-            pack_bits |= 0b0010;
-            dst[i] = bytes[1];
-            i += 1;
-        } // instrument
-        if bytes[2] > 0 {
-            pack_bits |= 0b0100;
-            dst[i] = bytes[2];
-            i += 1;
-        } // volume
-        if bytes[3] > 0 {
-            pack_bits |= 0b1000;
-            dst[i] = bytes[3];
-            i += 1;
-        } // effect type
-
-        if pack_bits == 15 {
-            // first four bits set? no packing needed.
-            return bytes.to_vec();
-        }
-
-        if bytes[4] > 0 {
-            pack_bits |= 16;
-            dst[i] = bytes[4];
-            i += 1;
-        } // effect parameter
-        dst[0] = pack_bits | 0b1000_0000;
-        dst[0..i].to_vec()
-    }
-}
-
-/// Encode a `CellNote` to XM's note-byte convention.
-///
-/// XM's note byte uses `0` = empty, `1..=96` = pitch (one-based, so
-/// the byte is `pitch.value() + 1`), `97` = key-off. The format
-/// has no representation for note-cut or note-fade — those events
-/// can only enter the pattern via effects, so when encountered in
-/// a `CellNote::NoteCut` or `NoteFade` we emit `0` (empty note),
-/// preserving the rest of the cell unchanged.
-fn cell_note_to_xm_byte(n: &CellNote) -> u8 {
-    match n {
-        CellNote::Empty => 0,
-        CellNote::Play(p) => p.value() + 1,
-        CellNote::KeyOff => 97,
-        CellNote::NoteCut | CellNote::NoteFade => 0,
     }
 }

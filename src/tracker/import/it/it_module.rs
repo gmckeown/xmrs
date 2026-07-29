@@ -767,3 +767,121 @@ impl ItModule {
         module
     }
 }
+
+impl crate::tracker::import::raw::RawModule for ItModule {
+    fn raw_title(&self) -> &str {
+        &self.header.song_name
+    }
+
+    fn raw_message(&self) -> &str {
+        &self.message
+    }
+
+    fn raw_orders(&self) -> &[u8] {
+        // Read at exactly `header.order_number`. Retains IT's `0xFE`
+        // (`+++`, skip) and `0xFF` (`---`, end) sentinels.
+        &self.orders
+    }
+
+    fn raw_pattern_count(&self) -> usize {
+        self.patterns.len()
+    }
+
+    fn raw_pattern(&self, idx: usize) -> Option<&[Vec<PatternSlot>]> {
+        self.patterns.get(idx).map(|p| p.as_slice())
+    }
+
+    fn raw_sample_count(&self) -> usize {
+        self.samples_header.len()
+    }
+
+    fn raw_sample(&self, idx: usize) -> Option<crate::tracker::import::raw::RawSample<'_>> {
+        use crate::tracker::import::raw::{RawPcm, RawSample};
+
+        let hdr = self.samples_header.get(idx)?;
+        // Same fallback `ItSampleHeader::to_sample` uses: IT keeps a
+        // 26-byte name and a separate 12-byte DOS filename, and
+        // plenty of sample libraries only fill the latter.
+        let name = if hdr.sample_name.is_empty() {
+            hdr.dos_filename.as_str()
+        } else {
+            hdr.sample_name.as_str()
+        };
+        let pcm = match self.samples.get(idx) {
+            Some(Some(d)) => RawPcm::from(d),
+            _ => RawPcm::Empty,
+        };
+        Some(RawSample {
+            name,
+            pcm,
+            loop_start: hdr.loop_beginning,
+            // IT stores an end offset, not a length.
+            loop_length: hdr.loop_end.saturating_sub(hdr.loop_beginning),
+            sample_rate: Some(hdr.c5_speed),
+        })
+    }
+
+    fn raw_initial_speed(&self) -> Option<u8> {
+        Some(self.header.initial_speed)
+    }
+
+    fn raw_initial_bpm(&self) -> Option<u8> {
+        Some(self.header.initial_bpm)
+    }
+
+    fn raw_tracker(&self) -> crate::tracker::import::raw::RawTracker<'_> {
+        crate::tracker::import::raw::RawTracker {
+            tag: None,
+            version: Some(self.header.created_with_tracker),
+            compatible_with: Some(self.header.compatible_with_tracker),
+        }
+    }
+
+    fn raw_pattern_name(&self, idx: usize) -> Option<&str> {
+        // The `PNAM` chunk is optional and, when present, may cover
+        // fewer patterns than the song has. An unnamed slot is stored
+        // as an empty string; report it as absent rather than as a
+        // name that happens to be blank.
+        match self.pattern_names.get(idx) {
+            Some(n) if !n.is_empty() => Some(n),
+            _ => None,
+        }
+    }
+
+    fn raw_channel_name(&self, idx: usize) -> Option<&str> {
+        // Same, for `CNAM`.
+        match self.channel_names.get(idx) {
+            Some(n) if !n.is_empty() => Some(n),
+            _ => None,
+        }
+    }
+
+    fn raw_edit_history(&self) -> Vec<crate::tracker::import::raw::RawEditEntry> {
+        use crate::tracker::import::raw::RawEditEntry;
+
+        self.edit_history
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .map(|e| RawEditEntry {
+                date: e.date(),
+                time: e.time(),
+                run_time: e.duration(),
+            })
+            .collect()
+    }
+
+    fn raw_instrument_count(&self) -> usize {
+        self.instruments.len()
+    }
+
+    fn raw_instrument_name(&self, idx: usize) -> Option<&str> {
+        // IT's instrument layer is genuinely separate from its sample
+        // bank — an instrument maps 120 note slots onto samples and
+        // owns its own name, which is frequently *not* any sample's.
+        self.instruments.get(idx).map(|i| match i {
+            ItInstrument::Pre2(p) => p.instr.instrument_name.as_str(),
+            ItInstrument::Post2(p) => p.instr.instrument_name.as_str(),
+        })
+    }
+}

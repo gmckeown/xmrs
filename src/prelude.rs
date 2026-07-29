@@ -44,14 +44,9 @@ pub use crate::{
     tracker::period::{FrequencyType, PeriodHelper},
 };
 
-#[cfg(feature = "import_s3m")]
-pub use crate::tracker::instr_opl::{InstrOpl, MdiInstr, MdiOpl, OplRhythm};
-
-#[cfg(feature = "import_sid")]
-pub use crate::tracker::instr_sid::InstrSid;
-
-#[cfg(feature = "import_sid")]
-pub use crate::tracker::instr_robsid::InstrRobSid;
+pub use crate::core::instr_opl::{InstrOpl, MdiInstr, MdiOpl, OplRhythm};
+pub use crate::core::instr_robsid::InstrRobSid;
+pub use crate::core::instr_sid::InstrSid;
 
 #[cfg(feature = "import_it")]
 pub use crate::tracker::mix_plugin::{MixPlugin, MixPluginInfo, MixPlugins};

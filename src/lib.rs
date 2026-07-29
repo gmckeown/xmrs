@@ -16,8 +16,15 @@
 //! │   │    ├── timeline_map: TimelineMap
 //! │   │    └── quirks: PlaybackQuirks (default all-off)
 //! │   ├── compatibility::{PlaybackQuirks, PanResetPolicy}
+//! │   ├── instr_{opl, sid, robsid} ← chip-synth voices (cfg `synth_opl`/`synth_sid`)
 //! │   ├── daw/                     ← AutomationLane, Clip, Track, TimelineMap, Euclidean
 //! │   └── fixed/                   ← Q-format primitives
+//! │
+//! ├── format/                      ← Native `.xmr` project format (cfg `format`)
+//! │   ├── container                ← chunked byte grammar, PNG-style case bits
+//! │   ├── wire::v1                 ← frozen schema v1 payloads (CBOR)
+//! │   ├── pcm                      ← raw `PCM ` blob region, deduplicated
+//! │   └── document::{read, write}  ← Module ⇄ bytes, + LoadReport
 //! │
 //! └── tracker/                     ← Historical-format support
 //!     ├── format::ModuleFormat     ← (gated on any `import_*`)
@@ -25,7 +32,6 @@
 //!     ├── period::FrequencyType
 //!     ├── codepage                 ← CP437 / Latin-1
 //!     ├── mix_plugin               ← IT OpenMPT extension (cfg import_it)
-//!     ├── instr_{opl, sid, robsid} ← cfg-gated per importer
 //!     └── import/                  ← XM / IT / S3M / MOD / SID readers
 //!         ├── build/               ← Pattern → Tracks + Clips + TimelineMap
 //!         └── extract/             ← TrackImportUnit → AutomationLane
@@ -38,15 +44,29 @@
 //!
 //! ```toml
 //! [dependencies]
-//! xmrs = { version = "0.13", default-features = false, features = ["std"] }
+//! xmrs = { version = "0.15", default-features = false, features = ["std"] }
 //! ```
 //!
-//! In this mode `Module` carries only the universal fields; no
-//! `origin`, no `mix_plugins`, no `Opl/Sid/RobSid` instrument
-//! variants. The historical presets in `tracker::profiles` are
-//! absent — quirks are all-off by default.
+//! In this mode `Module` carries only the universal fields: no
+//! `origin`, no `mix_plugins`. The historical presets in
+//! `tracker::profiles` are absent — quirks are all-off by default.
 //!
-//! You can serialize your work using serde.
+//! `InstrumentType`'s variant set does **not** shrink: the chip
+//! instruments (`Opl` / `Sid` / `RobSid`) are format-agnostic,
+//! integer-only data and are compiled in every build. Only their
+//! render engines gate on `synth_opl` / `synth_sid`. That split is
+//! what lets a `.xmr` written by a full build be read, kept and
+//! re-saved by a build that cannot synthesise a note of it.
+//!
+//! ## Saving
+//!
+//! `Module` derives serde, so any codec will round-trip it — fine
+//! for a cache, wrong for an archive, since a derived repr carries
+//! no version. Enable `format` for the project's own archival
+//! format instead (module `format`, absent without it): a chunked
+//! container, a frozen
+//! per-schema wire layer, sample data kept out of CBOR, and a
+//! `LoadReport` that names anything a read had to skip.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -55,8 +75,9 @@ extern crate alloc;
 /// Core data model — format-agnostic.
 pub mod core;
 
-/// Format-tied items: presets, importers, format-specific instruments.
-/// Each sub-module is gated behind one or more `import_*` features.
+/// Format-tied items: presets, importers, format helpers. (Chip-synthesis
+/// instruments are format-agnostic and live in [`crate::core`], not here.)
+/// Most sub-modules are gated behind one or more `import_*` features.
 pub mod tracker;
 
 /// Signal / event generators (runtime synthesis & rhythm engines) — see
@@ -67,11 +88,34 @@ pub mod generators;
 /// Edit command API (atomic, undoable mutations of `Module`)
 pub mod edit;
 
+/// Native `.xmr` file format — chunked container + CBOR wire types
+/// (gated on the `format` feature). See `src/core/FORMAT_RFC.md`.
+#[cfg(feature = "format")]
+pub mod format;
+
 /// The Xmrs Prelude
 pub mod prelude;
 
 #[cfg(test)]
 mod tests {
+    /// A path under the developer's own corpus, which lives outside the
+    /// repository and is never shipped.
+    ///
+    /// Derived from `$HOME` rather than written out: a literal `/home/<name>`
+    /// resolves on one machine and silently turns every gate below into a
+    /// no-op everywhere else — and these gates report a missing corpus by
+    /// skipping, so the failure looks exactly like success. `$XMRS_CORPUS_DIR`
+    /// overrides the root for anyone who keeps their modules elsewhere.
+    #[cfg(feature = "std")]
+    fn corpus_path(rel: &str) -> std::path::PathBuf {
+        std::env::var_os("XMRS_CORPUS_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
+            })
+            .join(rel)
+    }
+
     #[test]
     fn it_works() {
         assert_eq!(42, 42);
@@ -111,7 +155,12 @@ mod tests {
     #[cfg(feature = "import_sid")]
     #[test]
     fn load_sid_commando_has_consistent_layer() {
-        let sid = crate::tracker::import::sid::sid_module::SidModule::get_sid_commando();
+        // The image is a test fixture, not something the library carries —
+        // reach for it the way any caller would, then apply its record.
+        const COMMANDO: &[u8] = include_bytes!("tracker/import/sid/songs/commando.sid");
+        let sid = crate::tracker::import::sid::sid_module::SidModule::for_image(COMMANDO)
+            .pop()
+            .expect("commando has a record");
         let modules = sid.to_modules();
         assert!(
             !modules.is_empty(),
@@ -162,9 +211,9 @@ mod tests {
     #[test]
     fn autodetect_dw_xenon2() {
         use crate::tracker::format::ModuleFormat;
-        let path = "/home/user/Downloads/xenon2 (title).dw";
-        let Ok(data) = std::fs::read(path) else {
-            eprintln!("skipped: {} not found", path);
+        let path = corpus_path("Downloads/xenon2 (title).dw");
+        let Ok(data) = std::fs::read(&path) else {
+            eprintln!("skipped: {} not found", path.display());
             return;
         };
         let module = crate::core::module::Module::load(&data)
@@ -199,9 +248,9 @@ mod tests {
     fn load_all_dw_modules_from_music_dir() {
         use crate::tracker::format::ModuleFormat;
         use crate::tracker::import::dw::dw_module::DwModule;
-        let dir = "/home/user/Music/dw";
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            eprintln!("skipped: {} not found", dir);
+        let dir = corpus_path("Music/dw");
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            eprintln!("skipped: {} not found", dir.display());
             return;
         };
 
@@ -364,11 +413,11 @@ mod tests {
             }
         }
 
-        let root = "/home/user/Music";
+        let root = corpus_path("Music");
         let mut paths = alloc::vec::Vec::new();
-        collect(std::path::Path::new(root), ext, &mut paths);
+        collect(&root, ext, &mut paths);
         if paths.is_empty() {
-            eprintln!("skipped: no .{} under {}", ext, root);
+            eprintln!("skipped: no .{} under {}", ext, root.display());
             return;
         }
         paths.sort();
@@ -486,9 +535,9 @@ mod tests {
     #[cfg(all(feature = "import_dw", feature = "std"))]
     #[test]
     fn load_dw_path_titles_from_filename() {
-        let dir = "/home/user/Music/dw";
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            eprintln!("skipped: {} not found", dir);
+        let dir = corpus_path("Music/dw");
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            eprintln!("skipped: {} not found", dir.display());
             return;
         };
         let Some(path) = entries
@@ -496,7 +545,7 @@ mod tests {
             .map(|e| e.path())
             .find(|p| p.extension().and_then(|e| e.to_str()) == Some("dw"))
         else {
-            eprintln!("skipped: no .dw under {}", dir);
+            eprintln!("skipped: no .dw under {}", dir.display());
             return;
         };
 
@@ -517,15 +566,15 @@ mod tests {
     #[test]
     fn load_dw_xenon2_from_home() {
         use crate::tracker::import::dw::dw_module::DwModule;
-        let path = "/home/user/Downloads/xenon2 (title).dw";
-        let Ok(data) = std::fs::read(path) else {
-            eprintln!("skipped: {} not found", path);
+        let path = corpus_path("Downloads/xenon2 (title).dw");
+        let Ok(data) = std::fs::read(&path) else {
+            eprintln!("skipped: {} not found", path.display());
             return;
         };
 
         let dw = match DwModule::load(&data) {
             Ok(m) => m,
-            Err(e) => panic!("DwModule::load({}) failed: {:?}", path, e),
+            Err(e) => panic!("DwModule::load({}) failed: {:?}", path.display(), e),
         };
 
         // First slice: detection + structural fields must be sound,

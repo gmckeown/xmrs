@@ -26,10 +26,10 @@ use crate::tracker::period::FrequencyType;
 
 #[derive(Default, Debug)]
 pub struct XmModule {
-    pub header: XmHeader,
-    pub pattern_order: Vec<u8>,
-    pub pattern: Vec<XmPattern>,
-    pub instrument: Vec<XmInstrument>,
+    header: XmHeader,
+    pattern_order: Vec<u8>,
+    pattern: Vec<XmPattern>,
+    instrument: Vec<XmInstrument>,
 }
 
 impl XmModule {
@@ -200,7 +200,11 @@ impl XmModule {
             // XM has no pattern-highlight metadata in its header —
             // inherit the editor-friendly default cadence (4/16).
             pattern_highlight: crate::core::module::PatternHighlight::default(),
-            // XM has no mix-plugin section.
+            // XM has no mix-plugin section. The field itself only exists when
+            // the IT importer is compiled in — it holds IT's opaque host-only
+            // VST chunks — so the gate has to be repeated here: `import_xm`
+            // alone must still build.
+            #[cfg(feature = "import_it")]
             mix_plugins: None,
             // XM doesn't carry a MIDI pitch-wheel-depth field. The
             // GM default of 2 semitones is what any MIDI receiver
@@ -265,5 +269,90 @@ impl XmModule {
         );
 
         module
+    }
+}
+
+impl crate::tracker::import::raw::RawModule for XmModule {
+    fn raw_title(&self) -> &str {
+        &self.header.name
+    }
+
+    fn raw_orders(&self) -> &[u8] {
+        // Already truncated to the header's `song_length` by
+        // `XmHeader::get_pattern_order`.
+        &self.pattern_order
+    }
+
+    fn raw_pattern_count(&self) -> usize {
+        self.pattern.len()
+    }
+
+    fn raw_pattern(&self, idx: usize) -> Option<&[Vec<PatternSlot>]> {
+        self.pattern.get(idx).map(|p| p.pattern.as_slice())
+    }
+
+    fn raw_sample_count(&self) -> usize {
+        self.instrument.iter().map(|i| i.sample.len()).sum()
+    }
+
+    fn raw_sample(&self, idx: usize) -> Option<crate::tracker::import::raw::RawSample<'_>> {
+        use crate::tracker::import::raw::{RawPcm, RawSample};
+
+        // XM nests samples inside instruments; flatten in file order
+        // so the index is stable and comparable with the flat formats.
+        let mut rest = idx;
+        for instr in &self.instrument {
+            match instr.sample.get(rest) {
+                Some(s) => {
+                    return Some(RawSample {
+                        name: s.name(),
+                        pcm: s.data().map(RawPcm::from).unwrap_or(RawPcm::Empty),
+                        loop_start: s.loop_start_frames(),
+                        loop_length: s.loop_length_frames(),
+                        // XM expresses pitch as relative-note +
+                        // finetune against a fixed reference, never
+                        // as an absolute rate.
+                        sample_rate: None,
+                    });
+                }
+                None => rest -= instr.sample.len(),
+            }
+        }
+        None
+    }
+
+    fn raw_initial_speed(&self) -> Option<u8> {
+        // XM calls it "tempo"; it is the ticks-per-row register that
+        // every other format calls speed. Stored as u16, but the
+        // meaningful range is a byte.
+        Some(self.header.default_tempo.min(u8::MAX as u16) as u8)
+    }
+
+    fn raw_initial_bpm(&self) -> Option<u8> {
+        Some(self.header.default_bpm.min(u8::MAX as u16) as u8)
+    }
+
+    fn raw_channel_count(&self) -> usize {
+        self.header.number_of_channels as usize
+    }
+
+    fn raw_tracker(&self) -> crate::tracker::import::raw::RawTracker<'_> {
+        crate::tracker::import::raw::RawTracker {
+            tag: if self.header.tracker_name.is_empty() {
+                None
+            } else {
+                Some(&self.header.tracker_name)
+            },
+            version: Some(self.header.version_number),
+            compatible_with: None,
+        }
+    }
+
+    fn raw_instrument_count(&self) -> usize {
+        self.instrument.len()
+    }
+
+    fn raw_instrument_name(&self, idx: usize) -> Option<&str> {
+        self.instrument.get(idx).map(|i| i.header.name.as_str())
     }
 }

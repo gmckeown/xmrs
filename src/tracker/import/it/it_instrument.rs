@@ -311,8 +311,31 @@ pub struct ItInstrumentHeaderPost2 {
     /// The formula used is 10^((-resonance*24.0)/(128.0f*20.0f)), but it's generally better to use a precalculated table.
     pub initial_filter_resonance: u8,
 
-    /// MIDI channel (0-16)
+    /// MIDI channel (0-16), `0` = none.
+    ///
+    /// The stored byte is **not** always a MIDI channel: values ≥ 128 carry
+    /// an instrument→plugin assignment instead (see [`Self::mix_plugin`]),
+    /// and are decoded away here rather than surfacing as a MIDI channel of
+    /// 131.
     pub midi_channel: u8,
+
+    /// Mix-plugin slot this instrument is routed through (1-based; `0` =
+    /// none), from a *MIDI channel* byte ≥ 128.
+    ///
+    /// One byte holds either a MIDI channel or a plugin index, never both
+    /// — a writer that has a MIDI channel to store keeps it and drops the
+    /// plugin. The encoding is MPT 1.16's, still written for XMPlay/BASS
+    /// compatibility.
+    ///
+    /// Read but **not yet routed**: unlike a per-channel assignment, an
+    /// instrument's plugin applies to that instrument's voices wherever
+    /// they play, which the per-mixer-channel `channel_inserts` model has
+    /// no place for. Such a plugin therefore still shows up as
+    /// `PluginSkip::Unrouted`.
+    ///
+    /// [`PluginSkip::Unrouted`]:
+    ///     crate::tracker::import::it::it_plugin_convert::PluginSkip::Unrouted
+    pub mix_plugin: u8,
 
     /// MIDI program (1-128)
     pub midi_program: u8,
@@ -350,7 +373,11 @@ impl ItInstrumentHeaderPost2 {
         let instrument_name_bytes: [u8; 26] = r.read_array()?;
         let initial_filter_cutoff = r.read_u8()?;
         let initial_filter_resonance = r.read_u8()?;
-        let midi_channel = r.read_u8()?;
+        // One byte, two meanings: ≥ 128 is a plugin index, not a channel.
+        // Splitting it at the parse keeps every later consumer honest —
+        // `midi_channel` is then always a MIDI channel.
+        let mch = r.read_u8()?;
+        let (midi_channel, mix_plugin) = if mch >= 128 { (0, mch - 128) } else { (mch, 0) };
         let midi_program = r.read_u8()?;
         let midi_bank = r.read_u16_le()?;
         let mut note_sample_keyboard_table = [(0u8, 0u8); 120];
@@ -379,6 +406,7 @@ impl ItInstrumentHeaderPost2 {
             initial_filter_cutoff,
             initial_filter_resonance,
             midi_channel,
+            mix_plugin,
             midi_program,
             midi_bank,
             note_sample_keyboard_table,
@@ -848,5 +876,40 @@ impl ItInstrument {
             instr_type: InstrumentType::Default(instr),
             muted,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::vec;
+
+    /// A minimal `IMPI` instrument header with `mch` at its documented
+    /// offset (0x20 + 26 name bytes + cutoff + resonance = 0x3C).
+    fn header_with_mch(mch: u8) -> Vec<u8> {
+        let mut b = vec![0u8; IT_INSTR_HEADER_POST2_SIZE];
+        b[0..4].copy_from_slice(b"IMPI");
+        b[0x3C] = mch;
+        b
+    }
+
+    #[test]
+    fn midi_channel_byte_below_128_is_a_midi_channel() {
+        let h = ItInstrumentHeaderPost2::read(&mut BinReader::new(&header_with_mch(5))).unwrap();
+        assert!(h.is_it_instrument());
+        assert_eq!(h.midi_channel, 5);
+        assert_eq!(h.mix_plugin, 0);
+    }
+
+    #[test]
+    fn midi_channel_byte_at_or_above_128_is_a_plugin_index() {
+        // 128 + 3 ⇒ plugin slot 3, and *no* MIDI channel — reading it as
+        // one would claim channel 131 on a 16-channel bus.
+        let h = ItInstrumentHeaderPost2::read(&mut BinReader::new(&header_with_mch(131))).unwrap();
+        assert_eq!(h.mix_plugin, 3);
+        assert_eq!(h.midi_channel, 0);
+        // 128 exactly is the "plugin 0" = no plugin case.
+        let h = ItInstrumentHeaderPost2::read(&mut BinReader::new(&header_with_mch(128))).unwrap();
+        assert_eq!((h.midi_channel, h.mix_plugin), (0, 0));
     }
 }

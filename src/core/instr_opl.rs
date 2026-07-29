@@ -1,11 +1,16 @@
-//! [`InstrOpl`] — Yamaha OPL FM instrument (AdLib / Sound Blaster).
+//! [`InstrOpl`](crate::core::instr_opl::InstrOpl) — Yamaha OPL FM
+//! instrument (AdLib / Sound Blaster).
 //!
 //! Opaque to the xmrs sample engine: the player skips voices whose
 //! `instr_type` is `InstrumentType::Opl`. Carries the OPL register
 //! layout (carrier + modulator operators, feedback, algorithm) that
 //! a downstream OPL emulator can consume directly. Populated by the
-//! S3M importer when the source file uses Adlib instruments; only
-//! compiled when `import_s3m` is enabled.
+//! S3M importer when the source file uses Adlib instruments.
+//!
+//! **Always compiled**, in every feature configuration — a data type with no
+//! emulator dependency; only its render engine (`generators::opl`)
+//! gates on `synth_opl`. See [`crate::core::instrument`] for why the file
+//! format depends on that.
 
 use serde::{Deserialize, Serialize};
 

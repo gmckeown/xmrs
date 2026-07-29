@@ -188,6 +188,7 @@ pub fn bytes_to_trimmed_string<const N: usize>(bytes: &[u8; N]) -> String {
 /// for invalid leading bytes (continuation / reserved); the writer
 /// uses this to avoid splitting a multi-byte codepoint when the
 /// fixed-size name field can only fit a partial sequence.
+#[cfg(test)]
 fn utf8_char_width(ch: u8) -> usize {
     match ch {
         0..=127 => 1,
@@ -202,7 +203,8 @@ fn utf8_char_width(ch: u8) -> usize {
 /// Encode `s` into a fixed-size byte array, truncating at the last
 /// complete UTF-8 codepoint that fits in `N`. NUL-padded on the
 /// right. Matches `serde_helper::serialize_string_*`.
-pub fn string_to_fixed_array<const N: usize>(s: &str) -> [u8; N] {
+#[cfg(test)]
+fn string_to_fixed_array<const N: usize>(s: &str) -> [u8; N] {
     let bytes = s.as_bytes();
     let mut count = 0usize;
     let mut i = 0usize;
@@ -220,23 +222,28 @@ pub fn string_to_fixed_array<const N: usize>(s: &str) -> [u8; N] {
 }
 
 /// Append the little-endian bytes of `v` to `out`.
-pub fn write_u8(out: &mut Vec<u8>, v: u8) {
+#[cfg(test)]
+fn write_u8(out: &mut Vec<u8>, v: u8) {
     out.push(v);
 }
 
-pub fn write_i8(out: &mut Vec<u8>, v: i8) {
+#[cfg(test)]
+fn write_i8(out: &mut Vec<u8>, v: i8) {
     out.push(v as u8);
 }
 
-pub fn write_u16_le(out: &mut Vec<u8>, v: u16) {
+#[cfg(test)]
+fn write_u16_le(out: &mut Vec<u8>, v: u16) {
     out.extend_from_slice(&v.to_le_bytes());
 }
 
-pub fn write_u32_le(out: &mut Vec<u8>, v: u32) {
+#[cfg(test)]
+fn write_u32_le(out: &mut Vec<u8>, v: u32) {
     out.extend_from_slice(&v.to_le_bytes());
 }
 
-pub fn write_bytes(out: &mut Vec<u8>, b: &[u8]) {
+#[cfg(test)]
+fn write_bytes(out: &mut Vec<u8>, b: &[u8]) {
     out.extend_from_slice(b);
 }
 

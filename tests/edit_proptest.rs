@@ -303,3 +303,45 @@ proptest! {
         }
     }
 }
+
+// ---- §7 enforcement: native `.xmr` round-trip -----------------------------
+//
+// Freeze-independent: it regenerates every case and pins no on-disk artifact,
+// so it stays valid while the model is still settling (e.g. a pending `RobSid`
+// revision). The frozen golden corpus and the cross-feature-config decode are
+// deferred until v1 is frozen — those pin bytes that model churn would break.
+#[cfg(feature = "format")]
+proptest! {
+    /// A module built by a random edit sequence survives a `.xmr` round-trip:
+    /// its structure is preserved (fingerprint) and the image is **byte-stable**
+    /// — writing the re-read module reproduces the exact bytes, so nothing that
+    /// was written can have been silently dropped or mis-decoded on read.
+    #[test]
+    fn xmrs_format_round_trip_is_stable(
+        commands in proptest::collection::vec(arb_edit_command(), 0..32)
+    ) {
+        use xmrs::format::document::{read, write};
+
+        let mut module = starter_module();
+        // Give the commands something to bite on (tracks + a lane).
+        let _ = module.apply(EditCommand::CreateTrack {
+            instrument: 0,
+            name: "a".to_string(),
+            length_rows: 8,
+        });
+        let _ = module.apply(EditCommand::CreateAutomationLane {
+            target: xmrs::core::daw::automation::AutomationTarget::Bpm,
+        });
+        for cmd in commands {
+            let _ = module.apply(cmd);
+        }
+
+        let bytes1 = write(&module).expect("write");
+        let (module2, report) = read(&bytes1).expect("read");
+        prop_assert!(report.is_clean(), "a self-written file must skip no chunk");
+        prop_assert_eq!(fingerprint(&module), fingerprint(&module2), "structure preserved");
+
+        let bytes2 = write(&module2).expect("rewrite");
+        prop_assert_eq!(bytes1, bytes2, "round-trip must be byte-stable");
+    }
+}

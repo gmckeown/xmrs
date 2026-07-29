@@ -3,7 +3,7 @@
 //! The chip core — 18 two-operator channels, the envelope/phase generators, the
 //! clean-room ROM tables, the register file, OPL3 4-op mode — lives in the
 //! standalone [`oplon`] crate (`Opl2`/`Opl3`), which this crate depends on. Only
-//! the **tracker-facing driver** lives here: [`OplDriver`](driver::OplDriver)
+//! the **tracker-facing driver** lives here: [`OplDriver`](crate::generators::opl::driver::OplDriver)
 //! translates tracker-channel gestures (note-on / pitch / volume / pan, the
 //! `OPL_Touch` volume law, rhythm-mode placement) into chip calls on an
 //! [`oplon::Opl2`], mirroring the documented AdLib programming procedure in

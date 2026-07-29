@@ -1,7 +1,11 @@
 [package]
 name = "xmrs"
-version = "0.14.7"
+version = "0.15.0"
 edition = "2021"
+# Verified by building the full feature set on this toolchain. The binding
+# constraint is `is_multiple_of` on the integer primitives (1.87), used by the
+# container's alignment checks and the PCM blob-length validation.
+rust-version = "1.88"
 description = "Read, edit and serialize SoundTracker music with pleasure — MOD/XM/S3M/IT/DW import plus SID & OPL chip synthesis, no_std."
 license = "MIT"
 authors = ["Sebastien Bechet"]
@@ -21,10 +25,25 @@ exclude = [
     # Integration tests + their fixtures are run from the repo, never by
     # downstream consumers of the published crate — don't bloat the tarball.
     "tests/",
+    # Rob Hubbard's `.sid` images. Third-party C64 binaries (HVSC), not this
+    # crate's work and not compatible with shipping them under MIT: the crate
+    # publishes the reverse-engineered *records*, and a user brings their own
+    # copy of the music. Only the `sid_songs` feature reads this folder, and
+    # that feature is off by default and repository-only. See
+    # `src/tracker/import/sid/songs.rs`.
+    "src/tracker/import/sid/songs/",
 ]
 
 keywords = ["soundtracker", "chiptune", "sid", "tracker", "music"]
 categories = ["multimedia::audio", "embedded", "no-std"]
+
+# docs.rs builds with default features unless told otherwise, which would hide
+# `crate::format` (the native `.xmr` format) and the `float-helpers`
+# conversions. Spelled out rather than `all-features = true`: that would turn on
+# `sid_songs`, whose `include_bytes!` targets are excluded from the published
+# tarball, and the docs build would fail outright.
+[package.metadata.docs.rs]
+features = ["std", "import", "format", "float-helpers"]
 
 [dependencies]
 clap = { version = "4.5", optional = true, features = ["cargo", "derive"] }
@@ -35,11 +54,13 @@ clap = { version = "4.5", optional = true, features = ["cargo", "derive"] }
 # to its own allocation (serde does not reconstruct shared identity),
 # which only costs the import-time dedup, never correctness.
 serde = { version = "1.0", default-features = false, features = ["derive", "alloc", "rc"] }
-# Cycle-accurate MOS 6581/8580 SID emulator, pulled in only by `import_sid`
-# (its `dep:sidera` gate below). `no_std`, integer-only, no transitive deps in
-# its default feature set — drives `generators::sid` (the runtime counterpart
-# of `InstrSid`), replacing the old static SID wavetables. 1.0.1 is the first
-# release carrying `Sid::clock_with_voices`, the per-voice routing hook.
+# Cycle-accurate MOS 6581/8580 SID emulator, pulled in by `synth_sid` (its
+# `dep:sidera` gate below; the `import_sid` importer depends on `synth_sid`,
+# never the reverse). `no_std`, integer-only, no transitive deps in its
+# default feature set — drives `generators::sid` (the runtime counterpart of
+# `InstrSid`), replacing the old static SID wavetables. Needs at least 1.0.1,
+# the first release carrying `Sid::clock_with_voices` (the per-voice routing
+# hook); tracking 1.1.0, the current release.
 sidera = { version = "1.1.0", optional = true, default-features = false }
 # Clean-room OPL2/OPL3 (Yamaha YM3812/YMF262) FM emulator, pulled in only by
 # `import_s3m` (its `dep:oplon` gate below). `no_std`, integer-only, no
@@ -47,6 +68,12 @@ sidera = { version = "1.1.0", optional = true, default-features = false }
 # `InstrOpl`), replacing the former inline OPL chip. Hardware-calibrated
 # (±4084 operator scale), validated against Nuked-OPL3.
 oplon = { version = "1.0.0", optional = true, default-features = false }
+# CBOR codec for the native `.xmr` file format (feature `format`; see
+# `src/core/FORMAT_RFC.md` §5). `no_std` + `alloc` with `default-features =
+# false`; self-describing and length-delimited, which is what the format's
+# forward/backward compat rests on. Only the structural chunk payloads go
+# through it — the `PCM ` blob region is raw bytes, never serde.
+ciborium = { version = "0.2", optional = true, default-features = false }
 
 [features]
 # `std` and `import` are on by default: the common case is a
@@ -66,12 +93,18 @@ default = ["std", "import"]
 # the corresponding feature flag to dependencies that have one
 # (and `bincode?/std` only fires if `bincode` was pulled in by
 # an importer feature).
-std = ["serde/std"]
+std = ["serde/std", "ciborium?/std"]
 
 # `demo` gates the example binaries/tools. It is a convenience feature
 # that also turns on `std` and all importers so that
 # `--no-default-features --features demo` still builds.
 demo = ["std", "clap", "import"]
+
+# `format` gates the native `.xmr` file format reader/writer
+# (`crate::format`): the chunked container (§2), the frozen `wire::vN`
+# types, the migration chain, and the CBOR codec. `no_std` + `alloc`;
+# independent of any importer. See `src/core/FORMAT_RFC.md`.
+format = ["dep:ciborium"]
 
 # Enable `f32 ↔ Q` conversions on every fixed-point and domain
 # type in `crate::fixed`. Intended for the editor / desktop
@@ -100,14 +133,45 @@ import = [
 import_mod = []
 # Fasttracker II XM.
 import_xm  = []
-# ScreamTracker 3 S3M. Pulls in `oplon`, the OPL2/OPL3 emulator that backs
-# `generators::opl` for AdLib/FM instruments.
-import_s3m = ["dep:oplon"]
+# ScreamTracker 3 S3M. Needs the OPL synthesiser to project AdLib/FM
+# instruments onto — hence `synth_opl`, not `dep:oplon` directly: an
+# importer depends on the synth it targets, never the reverse.
+import_s3m = ["synth_opl"]
 # Impulse Tracker IT.
 import_it  = []
-# Commodore 64 SID (MOS6581/8580). Pulls in `sidera`, the cycle-accurate
-# emulator that backs `generators::sid` at playback.
-import_sid = ["dep:sidera"]
+# Commodore 64 SID (MOS6581/8580). Needs the SID synthesiser to project
+# voices onto — hence `synth_sid` (see `import_s3m` above).
+#
+# It also needs `import_mod`, and always did: the decoder resolves each voice's
+# effect memory through `MemoryType::Mod`, whose dispatch arm only exists when
+# the ProTracker importer is compiled. Without it the build succeeded and then
+# panicked on the first `.sid` (`unreachable!("MemoryType dispatched to a
+# disabled format importer")`). Declaring the dependency is what the crate does
+# everywhere else — `import_s3m = ["synth_opl"]` — and a compile-time arrow
+# beats a runtime surprise.
+import_sid = ["synth_sid", "import_mod"]
+# Bundle the `.sid` images themselves (137 KB of Rob Hubbard's C64 tunes) and
+# the `get_sid_*` constructors that play them without a file. OFF BY DEFAULT,
+# and deliberately so: the crate's contribution is the reverse-engineered
+# *record* for each tune, which is compiled in unconditionally — the image is
+# third-party data a caller can supply, and `OneSid::records_for_image`
+# recognises a user's own copy by fingerprint. Convenience for tests, examples
+# and the demo player. The files are excluded from the published tarball, so
+# this feature builds from a repository checkout only.
+sid_songs = ["import_sid"]
+
+# ---- Chip synthesis engines (independent of any importer) ----
+# These gate only the RENDER ENGINES and their heavy emulator deps:
+# `synth_opl` → `generators::opl` (+ `oplon`), `synth_sid` → `generators::sid`
+# (+ `sidera`). The instrument *data types* (`core::instr_{opl,sid,robsid}`)
+# and their `InstrumentType` variants are NOT gated — they are format-agnostic,
+# integer-only, and compiled in every build, so `InstrumentType`'s variant set
+# is stable and a `.xmr` file round-trips a SID/OPL instrument regardless of
+# whether this build can synthesise it (§5.1/§5.2). A build without the engine
+# holds and re-saves the instrument's data; it just cannot play it. The
+# importers above pull the matching engine in; nothing here pulls an importer.
+synth_opl = ["dep:oplon"]
+synth_sid = ["dep:sidera"]
 # David Whittaker custom Amiga player format (`.dw`). The file is a
 # self-contained 68000 binary with embedded music data; detection
 # extracts a small set of init-time constants from the replayer code
@@ -136,6 +200,28 @@ proptest = { version = "1", default-features = false, features = ["std"] }
 name = "xmrs"
 path = "src/lib.rs"
 
+# Integration tests need `required-features` for the same reason the examples
+# below do. `cycle_exact_layer` and `edit_proptest` are internally `#[cfg]`-d
+# per format and degrade to zero cases; `raw_view` names the XM importer
+# directly and does not compile without it.
+[[test]]
+name = "raw_view"
+required-features = ["std", "import_xm"]
+
+# The v1 schema freeze (RFC §7). It builds its module in code, not from a
+# tracker file, precisely so the chunks no importer produces are frozen too.
+# `import_xm` is named only for `Module::origin`, the one field the importer
+# features gate — see the test's header.
+[[test]]
+name = "format_golden_v1"
+required-features = ["std", "format", "import_xm"]
+
+# Every example needs a `required-features` line, even when the features it
+# needs are on by default. Without one, cargo auto-discovers the file and
+# builds it in *every* configuration, so `--all-targets` under a reduced
+# feature set (`--no-default-features --features "std,format"`, say) fails on
+# an example rather than on the code under test.
+
 [[example]]
 name = "xmrs"
 required-features = ["demo"]
@@ -147,7 +233,8 @@ required-features = ["std", "import_xm"]
 
 [[example]]
 name = "sid"
-required-features = ["std", "import_sid"]
+# Builds every bundled tune, so it needs the images, not just the importer.
+required-features = ["std", "sid_songs"]
 
 [[example]]
 name = "inspect_dw"
@@ -158,8 +245,82 @@ name = "it_vst_census"
 required-features = ["std", "import_it"]
 
 [[example]]
+name = "g2_census"
+required-features = ["std", "import_sid"]
+
+[[example]]
 name = "it_dmo_probe"
 required-features = ["std", "import_it"]
+
+# ---- Read-only dumps over an autodetected module: `Module::load`, so `import`.
+[[example]]
+name = "celldump"
+required-features = ["std", "import"]
+
+[[example]]
+name = "envdump"
+required-features = ["std", "import"]
+
+[[example]]
+name = "instr_dump"
+required-features = ["std", "import"]
+
+[[example]]
+name = "nnadump"
+required-features = ["std", "import"]
+
+[[example]]
+name = "sampinfo"
+required-features = ["std", "import"]
+
+[[example]]
+name = "speedlane"
+required-features = ["std", "import"]
+
+[[example]]
+name = "tldump"
+required-features = ["std", "import"]
+
+[[example]]
+name = "feature_census"
+required-features = ["std", "import"]
+
+[[example]]
+name = "gvol_census"
+required-features = ["std", "import"]
+
+# ---- Per-format RE probes.
+[[example]]
+name = "dump_dw_pattern"
+required-features = ["std", "import_dw"]
+
+[[example]]
+name = "dw_oracle_args"
+required-features = ["std", "import_dw"]
+
+[[example]]
+name = "it_repair"
+required-features = ["std", "import_it"]
+
+[[example]]
+name = "g2_probe"
+required-features = ["std", "import_sid"]
+
+[[example]]
+name = "sid_corpus_scan"
+required-features = ["std", "import_sid"]
+
+[[example]]
+name = "sid_three_marker_decode"
+required-features = ["std", "import_sid"]
+
+[[example]]
+name = "sid_three_marker_probe"
+required-features = ["std", "import_sid"]
+
+[[example]]
+name = "sid_xref_probe"
+required-features = ["std", "import_sid"]
 
 [profile.release]
 strip = true

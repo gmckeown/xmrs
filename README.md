@@ -21,7 +21,7 @@ Historical module files — imported into xmrs's in-memory `Module` model:
 | IT     | Impulse Tracker (incl. OpenMPT extras)  | `import_it`   |
 | XI     | Fast Tracker II instrument file         | `import_xm`   |
 | DW     | David Whittaker custom Amiga player (`.dw`) | `import_dw` |
-| SID    | Commodore 64 / MOS6581 — cycle-accurate via *sidera*, bundled Rob Hubbard tunes | `import_sid`  |
+| SID    | Commodore 64 / MOS6581 — cycle-accurate via *sidera*, three Rob Hubbard player generations | `import_sid`  |
 
 The umbrella feature `import` enables all of them at once (and is on by
 default together with `std`).
@@ -275,17 +275,70 @@ println!("{} — {} tracks, {} clips", module.name, module.tracks.len(), module.
 ```
 
 Format-specific constructors are also available: `Module::load_mod`,
-`load_xm`, `load_s3m`, `load_it`, `load_dw`. DW is tried last by the
-auto-detect path: its detection is purely structural (no magic header),
-so running it after MOD avoids ever stealing a valid MOD parse. SID is
-imported via its own entry point,
-`xmrs::import::sid::sid_module::SidModule::load`, and is not part of the
-auto-detect path.
+`load_xm`, `load_s3m`, `load_it`, `load_dw`, `load_sid`. SID is settled
+first and exclusively, off its `PSID`/`RSID` magic — the one format here
+that says what it is. DW is tried last: its detection is purely
+structural (no magic header), so running it after MOD avoids ever
+stealing a valid MOD parse.
 
-## Serialization
+A `.sid` holding several tunes becomes **one module with several
+sub-songs**, the way `.dw` files already do. The crate ships the
+reverse-engineered *record* for each of the fifteen transcribed Rob
+Hubbard tunes and recognises your own copy of one by fingerprint, so it
+plays with the hand-tuned tempo and effect settings that no detector can
+recover. The tunes themselves are not shipped — see the `sid_songs`
+feature below.
+
+## Saving — the native `.xmr` format (v1)
 
 `Module` derives `serde::Serialize` / `Deserialize`, so you can round-trip
-it through any serde codec.
+it through any serde codec. That is fine for a cache and wrong for an
+archive: a derived repr has no version, so any refactor of the model
+silently invalidates every file already written.
+
+The `format` feature (off by default, `no_std` + `alloc`) adds the
+project's own archival format instead — a chunked container with a frozen
+per-schema wire layer:
+
+```rust
+use xmrs::format::document::{read, write};
+
+let bytes = write(&module)?;              // -> a `.xmr` image
+let (module, report) = read(&bytes)?;     // -> the module, plus what was skipped
+assert!(report.is_clean());
+```
+
+What it buys over `serde`-on-the-model:
+
+- **Versioned.** The header carries `schema_version` and a per-file
+  `min_reader_version` computed from the content, so an old reader refuses
+  a file it would misread instead of half-decoding it.
+- **Forward-compatible by construction.** PNG-style case bits on each
+  4-byte chunk id: an unknown *ancillary* chunk is skipped, an unknown
+  *critical* one is refused. No table to keep in sync.
+- **Sample data is not CBOR.** PCM lives in one raw `PCM ` region, 8-byte
+  aligned and deduplicated by `Arc` identity — so shared samples stay one
+  blob, and a host can `mmap` and cast in place.
+- **Chip instruments round-trip in every build.** The instrument *data*
+  types are never feature-gated, only the render engines, so a build
+  without `synth_sid` still loads, keeps and re-saves a SID instrument —
+  it just cannot play it.
+- **A tolerant reader that does not destroy.** Skipping a chunk you do not
+  understand is only tolerance if the writer puts it back. `read` returns a
+  `LoadReport` that *carries the bytes* of every unknown chunk marked safe to
+  copy; `write_preserving(&module, &report)` re-emits them verbatim. Chunks
+  whose id forbids copying are listed instead, so an editor can warn before a
+  save-in-place drops them — `rewrite_is_lossless()` is that question in one
+  call. The report also carries a layer-consistency verdict, since no single
+  chunk can tell that a clip names a track that is not there.
+
+The full specification and the reasoning behind it are in
+`src/core/FORMAT_RFC.md`.
+
+> `.xmr` is the *project* format — editor, DAW, archive. It is
+> deliberately not the embedded playback path: `Module::load` reads the
+> historical tracker formats, and a flash-resident runtime image
+> (`.xmo`) is sketched in §9 of the RFC, not implemented.
 
 ## Examples
 
@@ -298,8 +351,8 @@ cargo run --features=demo --example xmrs -- -f path/to/song.xm
 # Dump an XI (Fast Tracker II instrument) file:
 cargo run --example xmi
 
-# Exercise the bundled SID parsers (Rob Hubbard tunes):
-cargo run --example sid
+# Exercise the bundled SID parsers (needs the images — repository checkout):
+cargo run --features="std sid_songs" --example sid
 
 # Inspect a David Whittaker .dw file (detection + parsed tables):
 cargo run --features="std import_dw" --example inspect_dw -- path/to/song.dw
@@ -312,14 +365,18 @@ Defaults: `["std", "import"]`.
 | Feature           | Purpose                                                             |
 | ----------------- | ------------------------------------------------------------------- |
 | `std`             | Build against `std`. Only forwards `std` to `serde`; the crate itself does not need `std` for arithmetic — see below. |
+| `format`          | The native `.xmr` project format (schema **v1**) — chunked container, frozen `wire::v1` types, raw PCM region, CBOR payloads via `ciborium`. `no_std` + `alloc`, independent of every importer. See above and `src/core/FORMAT_RFC.md`. |
 | `float-helpers`   | Add `f32 ↔ Q` conversions on every fixed-point and domain type in `crate::fixed`. Intended for the editor / desktop side (level-meters, plotting, GUI numeric fields). Self-contained, uses only `core`-stable `f32` operations — no math backend pulled in. Never enable it on the embedded target. |
 | `import`          | Umbrella: enables every `import_*` format importer.                 |
 | `import_mod`      | Amiga ProTracker MOD.                                               |
 | `import_xm`       | Fast Tracker II XM (and XI instruments).                            |
-| `import_s3m`      | Scream Tracker 3 S3M.                                               |
+| `import_s3m`      | Scream Tracker 3 S3M. Pulls in `synth_opl` (S3M carries OPL instruments). |
 | `import_it`       | Impulse Tracker IT.                                                 |
 | `import_dw`       | David Whittaker custom Amiga player (`.dw`).                        |
-| `import_sid`      | Commodore 64 SID (bundled Rob Hubbard tunes).                       |
+| `import_sid`      | Commodore 64 SID. Pulls in `synth_sid` (the voice it targets) and `import_mod` (whose effect-memory model it decodes through). |
+| `sid_songs`       | **Off by default.** Bundle the `.sid` images themselves and the `get_sid_*` constructors that play them without a file. The crate's own contribution is the reverse-engineered *record* per tune, which `import_sid` always compiles; the images are third-party binaries, excluded from the published tarball, so this feature builds from a repository checkout only. |
+| `synth_opl`       | Yamaha OPL2/OPL3 FM voice — `generators::opl` + `core::instr_opl` + `InstrumentType::Opl`. Pulls in `oplon`. **Independent of any importer**: an editor can author or a `no_std` target can play OPL voices with no parser compiled in. |
+| `synth_sid`       | MOS6581/8580 SID voice — `generators::sid` + `core::instr_{sid,robsid}` + `InstrumentType::{Sid,RobSid}`. Pulls in `sidera`. Independent of any importer (see `synth_opl`). |
 | `demo`            | Pulls in `clap`, `std` and `import` for the CLI examples.           |
 | `rand8` / `rand16` / `rand64` | Extra xorshift widths (`rand32` is always on).          |
 
@@ -378,6 +435,12 @@ compact output; pair it with
 [`miniz_oxide`](https://crates.io/crates/miniz_oxide) if you need
 further compression. You end up with a much smaller binary that
 still manipulates the full `Module` model.
+
+Chip-synthesis instruments (OPL, SID) are **not** tied to the importers:
+a module carrying them plays on-device by enabling `synth_opl` /
+`synth_sid` alone — no parser compiled in. Both are verified building for
+a bare-metal `no_std` target (`thumbv7m-none-eabi`), with or without any
+importer.
 
 ## License
 

@@ -1,0 +1,20 @@
+# Binary payloads. Without these lines a `core.autocrlf` (or any client that
+# guesses "text" from the first few bytes) rewrites 0x0A/0x0D inside them on
+# checkout or commit, and the corruption is silent until a test fails for a
+# reason that has nothing to do with the code.
+#
+# Deliberately no `* text=auto` here: on a repository that already has history,
+# turning it on renormalises every tracked text file in one commit. The point
+# of this file is to protect the binaries, not to reformat the tree.
+
+# The v1 schema freeze (tests/fixtures/format_v1.xmr). A byte-exact reference
+# by construction — see tests/format_golden_v1.rs.
+*.xmr binary
+
+# Third-party C64 SID images (feature `sid_songs`, excluded from the published
+# tarball).
+*.sid binary
+
+# Bundled tracker modules and instruments used by examples and doctests.
+*.xm  binary
+*.xi  binary

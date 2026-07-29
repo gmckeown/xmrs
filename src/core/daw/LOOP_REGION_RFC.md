@@ -126,7 +126,7 @@ dead tiled clip in `[end_ch, span)`).
 
 | Area | Handling |
 |---|---|
-| serde / `.xmrs` | new `#[serde(default)]` field → back-compatible |
+| serde / `.xmr` | new `#[serde(default)]` field → back-compatible |
 | `verify_layers_consistent` | `start < end`, within the song's tick span, region ⊇ the lane's clips |
 | `xmrs::duration` | a song with `channel_loops` plays forever → return a capped representative duration, never loop infinitely |
 | `Module::song_length` | max `end_tick` of the looped lanes |

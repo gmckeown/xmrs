@@ -40,31 +40,31 @@ pub struct ItHeader {
     id: String,
 
     /// Song name
-    pub song_name: String,
+    pub(crate) song_name: String,
 
     /// Pattern information: Represents the number of rows per beat.
-    pub rows_per_beat: u8,
+    pub(crate) rows_per_beat: u8,
 
     /// Pattern information: Represents the number of rows per measure.
-    pub rows_per_measure: u8,
+    pub(crate) rows_per_measure: u8,
 
     /// Number of sequenced patterns in the song.
-    pub order_number: u16,
+    pub(crate) order_number: u16,
 
     /// Number of instruments in the song.
-    pub instrument_number: u16,
+    pub(crate) instrument_number: u16,
 
     /// Number of samples in the song.
-    pub sample_number: u16,
+    pub(crate) sample_number: u16,
 
     /// Number of patterns in the song.
-    pub pattern_number: u16,
+    pub(crate) pattern_number: u16,
 
     /// ID of the tracker that made this file (1.0 to 2.17, encoded as hexadecimal).
-    pub created_with_tracker: u16,
+    pub(crate) created_with_tracker: u16,
 
     /// Version of the tracker compatible with this file (1.0 to 2.17, encoded as hexadecimal).
-    pub compatible_with_tracker: u16,
+    pub(crate) compatible_with_tracker: u16,
 
     /// Configuration flags (16 bits).
     /// - Bit 0: Stereo if on, mono if off.
@@ -76,7 +76,7 @@ pub struct ItHeader {
     /// - Bit 6: MIDI pitch controlled if on.
     /// - Bit 7: Request Embedded MIDI Macros if on.
     /// - Bits 8-15 are reserved.
-    pub flags: u16,
+    pub(crate) flags: u16,
 
     /// Special configuration flags (16 bits).
     /// - Bit 0: Song message attached if on.
@@ -84,42 +84,42 @@ pub struct ItHeader {
     /// - Bit 2: Highlight embedded if on.
     /// - Bit 3: Embedded MIDI Macro.
     /// - Bits 4-15 are reserved.
-    pub special_flags: u16,
+    pub(crate) special_flags: u16,
 
     /// Global volume of the song (0-128).
-    pub global_volume: u8,
+    pub(crate) global_volume: u8,
 
     /// Mixing volume of the song (0-128).
-    pub mix_volume: u8,
+    pub(crate) mix_volume: u8,
 
     /// Starting tick speed of the song.
-    pub initial_speed: u8,
+    pub(crate) initial_speed: u8,
 
     /// Starting beats per minute of the song.
-    pub initial_bpm: u8,
+    pub(crate) initial_bpm: u8,
 
     /// Panning separation between channels (0-128).
-    pub pan_separation: u8,
+    pub(crate) pan_separation: u8,
 
     /// Pitch wheel depth for MIDI controllers.
-    pub pitch_wheel_depth: u8,
+    pub(crate) pitch_wheel_depth: u8,
 
     /// Length of the attached message.
-    pub message_length: u16,
+    pub(crate) message_length: u16,
 
     /// Offset of the message in the file.
-    pub message_offset: u32,
+    pub(crate) message_offset: u32,
 
     /// Reserved field ("OMPT" for interpreted Mod Plug files).
-    pub reserved: String,
+    pub(crate) reserved: String,
 
     /// Initial pan of the channels
     /// Each byte is a pan value (examples: 0 is left pan, 32 is center pan and 64 is right pan).
-    pub initial_channel_pan: [u8; 64],
+    pub(crate) initial_channel_pan: [u8; 64],
 
     /// Initial volume of the channels
     /// Each byte is a channel volume (0-64).
-    pub initial_channel_volume: [u8; 64],
+    pub(crate) initial_channel_volume: [u8; 64],
 }
 
 impl ItHeader {

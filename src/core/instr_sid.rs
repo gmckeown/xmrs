@@ -1,10 +1,16 @@
-//! [`InstrSid`] — Commodore 64 MOS6581 SID voice (one of three).
+//! [`InstrSid`](crate::core::instr_sid::InstrSid) — Commodore 64 MOS6581
+//! SID voice (one of three).
 //!
 //! Opaque to the xmrs sample engine: the player skips voices whose
 //! `instr_type` is `InstrumentType::Sid`. Models the SID's
 //! waveform/pulse-width/ADSR controls plus the filter routing and
 //! the sync / ring-modulation links to its neighbours. Populated by
-//! the SID importer; only compiled when `import_sid` is enabled.
+//! the SID importer.
+//!
+//! **Always compiled**, in every feature configuration — a data type with no
+//! emulator dependency; only its render engine (`generators::sid`)
+//! gates on `synth_sid`. See [`crate::core::instrument`] for why the file
+//! format depends on that.
 
 use serde::{Deserialize, Serialize};
 

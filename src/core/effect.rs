@@ -55,6 +55,29 @@ pub enum NoteRetrigOperator {
 /// player consults the lanes for those; the cell only carries the
 /// discrete / per-trigger effects below.
 #[repr(u8)]
+/// What happens to one of an instrument's modulators when a note starts.
+///
+/// A synth voice re-arms its modulators on every note by default — the sweep
+/// restarts, the envelope attacks. Some music wants otherwise on a PARTICULAR
+/// note: a filter that keeps opening across a phrase instead of snapping back,
+/// or one that starts from a chosen point. That is a property of the note, not
+/// of the patch, which is why it rides [`TrackEffect::NoteArming`].
+#[derive(Default, Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ArmMode {
+    /// Restart from the instrument's own value — what a note normally does.
+    #[default]
+    Reseed,
+    /// Leave the modulator running where the previous note left it, so a sweep
+    /// continues across the note boundary instead of snapping back.
+    Hold,
+    /// Start it at this value instead of the instrument's.
+    ///
+    /// The unit is the target modulator's OWN unit, deliberately not
+    /// normalised: a SID cutoff runs on an 11-bit non-linear scale, and
+    /// flattening it to a 0..1 range would misrepresent every value in it.
+    At(u16),
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum TrackEffect {
     /// Pitch effect
@@ -110,6 +133,54 @@ pub enum TrackEffect {
     /// `activate`, set the volume envelope on
     /// Volume effect
     InstrumentVolumeEnvelope(bool),
+
+    /// Per-note control over how the instrument's modulators are (re)armed
+    /// when this note starts — the general form of "tie / legato / don't
+    /// restart the sweep".
+    ///
+    /// None of this is chip-specific: "change the pitch without re-triggering"
+    /// is legato on any synth, and "re-arm this modulator or let it run" is the
+    /// retrigger/free-run choice every synth offers — only here it is made per
+    /// NOTE rather than once per patch. Rob Hubbard's last C64 player is simply
+    /// the first format we import that writes it per note (its `0x84`, `0x87`
+    /// and `0x88` markers, plus the tie bit of its length byte).
+    ///
+    /// Honoured today by the SID driver; the OPL and sample voices can adopt it
+    /// without any change here.
+    NoteArming {
+        /// Change the pitch without re-triggering the voice: the envelope and
+        /// the gate carry on untouched. A tie.
+        legato: bool,
+        /// The filter sweep.
+        filter: ArmMode,
+        /// The pulse-width sweep.
+        pulse_width: ArmMode,
+        /// The pitch LFO. [`ArmMode::At`] carries the modulator's own parameter
+        /// word rather than a starting value — for a SID voice, the byte that
+        /// packs the swing's amplitude and its per-step shift — so this note
+        /// vibrates differently from the way its instrument would.
+        vibrato: ArmMode,
+        /// The arpeggio. [`ArmMode::At`] carries the modulator's own parameter
+        /// word — for a SID voice the packed nibble pair, high nibble first —
+        /// so this note arpeggiates differently from the way its instrument
+        /// would.
+        ///
+        /// It rides the NOTE rather than the cell's [`TrackEffect::Arpeggio`]
+        /// because the two run on different clocks: a tracker arpeggio rotates
+        /// on the row's ticks and stops at the row boundary, whereas a chip
+        /// replayer keeps its phase in a per-voice slot armed at note-on and
+        /// steps it every frame for the whole note, however many rows that
+        /// spans. The cell effect stays the editor-facing representation.
+        arpeggio: ArmMode,
+        /// Frames from this note-on until its release envelope takes over, for
+        /// instruments whose release is a fixed ramp rather than the patch's own
+        /// (see `ReleaseMode::Ramp`). `0` = never, which is every note that does
+        /// not use one.
+        ///
+        /// It lives on the note because it depends on how long THIS note lasts,
+        /// which the instrument cannot know.
+        release_in: u16,
+    },
 
     /// `(tick, past)`, cut the note at the specified tick.
     /// if past is true, do it for past note too

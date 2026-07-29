@@ -43,7 +43,7 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```
 //! use xmrs::tracker::codepage::Codepage;
 //!
 //! // GURU.MOD sample-name bytes: 'guru' drawn in CP437 blocks.

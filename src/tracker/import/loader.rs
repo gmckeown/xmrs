@@ -1,9 +1,9 @@
 //! `Module::load_*` impls — auto-detect a tracker file's format
 //! from its header and dispatch to the matching format-specific
-//! loader (`load_mod`, `load_xm`, `load_s3m`, `load_it`, `load_dw`).
-//! SID files are loaded via `SidModule::load` directly and don't go
-//! through the autodetect path. DW *is* auto-detected even without
-//! a magic header — its probe quadruple is unique enough.
+//! loader (`load_mod`, `load_xm`, `load_s3m`, `load_it`, `load_dw`,
+//! `load_sid`). SID is settled first and exclusively, off its PSID/RSID
+//! magic; DW is auto-detected even without a magic header — its probe
+//! quadruple is unique enough — and so goes last.
 
 use crate::prelude::*;
 use crate::tracker::import::bin_reader::ImportError;
@@ -94,18 +94,115 @@ impl Module {
         Self::load_dw_named(&data, stem)
     }
 
+    /// Try to import a Commodore 64 `.sid` file (PSID / RSID container).
+    ///
+    /// Three Rob Hubbard player generations are recognised, and the answer is
+    /// only as good as what each one puts in the image:
+    ///
+    /// - The **last** generation needs nothing else — every table and every
+    ///   effect comes out of the bytes ([`super::sid::g2::to_module`]).
+    /// - The **three-marker** generation, its predecessor, goes through the
+    ///   same reader; its pitch is not finished (see
+    ///   `sid/THREE_MARKER_GENERATION.md`).
+    /// - The **fx-mask** family (v10..v30) has its layout recovered by
+    ///   [`super::sid::detect::SidLayout`], but its *behaviour* — row cadence,
+    ///   effect semantics — is not in the image. When the file is one of the
+    ///   fifteen tunes someone transcribed, it is recognised by fingerprint and
+    ///   gets those settings; otherwise they stay at neutral defaults, which
+    ///   means the right notes at the wrong tempo.
+    ///
+    /// Sub-songs become sub-songs of the returned module (`song` 0..n), the way
+    /// `.dw` files already work — a `.sid` holding several tunes is one module
+    /// with several songs, not several modules.
+    ///
+    /// One file can hold more than one replayer: Sanxion ships two, one per
+    /// song. Each contributes its own sub-songs, with its own instrument table
+    /// appended and rebased.
+    #[cfg(feature = "import_sid")]
+    pub fn load_sid(source: &[u8]) -> Result<Self, ImportError> {
+        use super::sid::sid_module::{append_sub_songs, song_count, SidModule};
+
+        if !matches!(source.get(..4), Some(b"PSID") | Some(b"RSID")) {
+            return Err(ImportError::Other("sid: not a PSID/RSID file"));
+        }
+
+        // The last generation first: it is fully readable, so when it claims a
+        // file there is nothing to be gained from the other paths.
+        if let Some(m) = super::sid::g2::to_module(source) {
+            return Ok(m);
+        }
+
+        // The importer holds the image for the module's lifetime and the caller
+        // only lent us a slice, so take a copy — a few kilobytes.
+        let image: alloc::borrow::Cow<'static, [u8]> = source.to_vec().into();
+
+        // Filter first, then fold: a replayer that decodes to nothing must not
+        // decide the outcome just by being listed first. Sanxion's two are
+        // independent, and so are a file's chances of yielding either.
+        let mut parts = SidModule::for_image(image)
+            .into_iter()
+            .filter_map(|p| p.to_module());
+        let mut merged = parts
+            .next()
+            .ok_or(ImportError::Other("sid: unrecognised replayer"))?;
+        for part in parts {
+            let (song_base, instr_base) = (song_count(&merged), merged.instrument.len());
+            merged.instrument.extend(part.instrument.iter().cloned());
+            append_sub_songs(&mut merged, part, song_base, instr_base);
+        }
+
+        // A transcribed record carries the tune's title; a detected one has
+        // nothing to offer and names every tune "SID". The PSID header has had
+        // the answer all along — three fixed 32-byte fields — so read it rather
+        // than hand a folder of rips back under one name.
+        if merged.name.is_empty() || merged.name == "SID" {
+            use alloc::string::String;
+            let text = |off: usize| -> String {
+                source
+                    .get(off..off + 32)
+                    .map(|b| {
+                        b.iter()
+                            .take_while(|&&c| c != 0)
+                            .map(|&c| c as char)
+                            .collect::<String>()
+                            .trim()
+                            .into()
+                    })
+                    .unwrap_or_default()
+            };
+            let title = text(0x16);
+            if !title.is_empty() {
+                merged.name = title;
+            }
+            merged.comment = alloc::format!("{} - {}", text(0x56), text(0x36));
+        }
+
+        Ok(merged)
+    }
+
     /// Try to auto-detect and import any supported historical module
-    /// file (MOD / XM / S3M / IT / DW). Formats are tried in the
-    /// order XM → S3M → IT → MOD → DW. The Amiga MOD format is
-    /// tried late because its detection accepts almost anything;
-    /// DW comes after MOD because its detection is structural
+    /// file (SID / MOD / XM / S3M / IT / DW). SID is settled first, off its
+    /// magic; the rest are tried in the order XM → S3M → IT → MOD → DW. The
+    /// Amiga MOD format is tried late because its detection accepts almost
+    /// anything; DW comes after MOD because its detection is structural
     /// (no magic header at all) — running it last avoids ever
     /// stealing a valid MOD parse. Only formats whose `import_*`
     /// feature is enabled are attempted.
     ///
-    /// SID is not auto-detected here — it has its own dedicated entry
-    /// point via `crate::tracker::import::sid::sid_module::SidModule::load`.
+    /// Every SID generation this crate reads goes through here now, sub-songs
+    /// included — see [`Self::load_sid`] for what each one is worth. Nothing
+    /// needs a dedicated entry point any more.
     pub fn load(source: &[u8]) -> Result<Self, ImportError> {
+        // `.sid` is settled first and exclusively, because it is the one format
+        // here that says what it is: a four-byte `PSID`/`RSID` magic no tracker
+        // module can carry. Trying it last instead would let MOD — whose
+        // detection "accepts almost anything" — claim a tune this crate cannot
+        // decode and hand back noise. Failing here is the honest answer.
+        #[cfg(feature = "import_sid")]
+        if matches!(source.get(..4), Some(b"PSID") | Some(b"RSID")) {
+            return Self::load_sid(source);
+        }
+
         #[cfg(feature = "import_xm")]
         if let Ok(m) = Self::load_xm(source) {
             return Ok(m);

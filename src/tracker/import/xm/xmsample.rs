@@ -5,16 +5,12 @@
 //! note number) into a [`crate::core::sample::Sample`].
 
 use alloc::string::String;
-use alloc::{vec, vec::Vec};
+use alloc::vec;
 
 use super::helper::*;
 use crate::core::fixed::units::{ChannelVolume, Finetune, Panning, Volume};
-use crate::core::instrument::{Instrument, InstrumentType};
 use crate::core::sample::{LoopType, Sample, SampleDataType};
-use crate::tracker::import::bin_reader::{
-    bytes_to_trimmed_string, string_to_fixed_array, write_bytes, write_i8, write_u32_le, write_u8,
-    BinReader, ImportError,
-};
+use crate::tracker::import::bin_reader::{bytes_to_trimmed_string, BinReader, ImportError};
 
 pub const XMSAMPLE_HEADER_SIZE: usize = 40;
 
@@ -59,19 +55,6 @@ impl XmSampleHeader {
             reserved,
             name: bytes_to_trimmed_string(&name_bytes),
         })
-    }
-
-    fn write(&self, out: &mut Vec<u8>) {
-        write_u32_le(out, self.length);
-        write_u32_le(out, self.loop_start);
-        write_u32_le(out, self.loop_length);
-        write_u8(out, self.volume);
-        write_i8(out, self.finetune);
-        write_u8(out, self.flags);
-        write_u8(out, self.panning);
-        write_i8(out, self.relative_pitch);
-        write_u8(out, self.reserved);
-        write_bytes(out, &string_to_fixed_array::<22>(&self.name));
     }
 }
 
@@ -118,32 +101,6 @@ impl XmSample {
         self.data = Some(d3);
 
         Ok(&data[data_len..])
-    }
-
-    pub fn save(&mut self) -> Vec<u8> {
-        self.header.length = match &self.data {
-            Some(SampleDataType::Mono8(d)) => d.len() as u32,
-            Some(SampleDataType::Mono16(d)) => {
-                self.header.flags |= 0b0001_0000;
-                2 * d.len() as u32
-            }
-            _ => 0,
-        };
-        let mut out = Vec::with_capacity(XMSAMPLE_HEADER_SIZE);
-        self.header.write(&mut out);
-        out
-    }
-
-    /// You must call save() before to save good length size to header
-    pub fn save_sample(&mut self) -> Vec<u8> {
-        match &self.data {
-            Some(SampleDataType::Mono8(d)) => sample8_to_delta(d),
-            Some(SampleDataType::Mono16(d)) => {
-                let d = sample16_to_delta(d);
-                vec_u16_to_u8_slice(d)
-            }
-            _ => vec![],
-        }
     }
 
     pub fn to_sample(&self) -> Sample {
@@ -201,45 +158,6 @@ impl XmSample {
         }
     }
 
-    pub fn from_instr(i: &Instrument) -> Vec<XmSample> {
-        let mut output: Vec<XmSample> = vec![];
-        if let InstrumentType::Default(id) = &i.instr_type {
-            for s in id.sample.iter().flatten() {
-                let mut loop_start = s.loop_start;
-                let mut loop_length = s.loop_length;
-
-                if let Some(SampleDataType::Mono16(_)) = &s.data {
-                    loop_start <<= 1;
-                    loop_length <<= 1;
-                }
-
-                let mut xms = XmSample::default();
-                xms.header.length = match &s.data {
-                    Some(SampleDataType::Mono8(d)) => d.len() as u32,
-                    Some(SampleDataType::Mono16(d)) => 2 * d.len() as u32,
-                    Some(SampleDataType::Stereo8(d)) => 2 * d.len() as u32,
-                    Some(SampleDataType::Stereo16(d)) => 2 * 2 * d.len() as u32,
-                    Some(SampleDataType::StereoFloat(d)) => 4 * 2 * d.len() as u32,
-                    None => 0,
-                };
-                xms.header.loop_start = loop_start;
-                xms.header.loop_length = loop_length;
-                xms.header.volume = s.volume.to_byte_64();
-                xms.header.finetune = s.finetune.to_signed_byte(127);
-                xms.header.flags = s.loop_flag.into();
-                if let Some(SampleDataType::Mono16(_)) = &s.data {
-                    xms.header.flags |= 0b0001_0000;
-                }
-                xms.header.panning = s.panning.to_byte_255();
-                xms.header.relative_pitch = s.relative_pitch;
-                xms.header.name = s.name.clone();
-                xms.data = s.data.clone();
-                output.push(xms);
-            }
-        }
-        output
-    }
-
     pub fn len(&self) -> u32 {
         match &self.data {
             Some(SampleDataType::Mono8(d)) => d.len() as u32,
@@ -250,5 +168,35 @@ impl XmSample {
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// Sample name as stored, for the pre-DAW
+    /// [`RawModule`](crate::tracker::import::raw::RawModule) view.
+    pub fn name(&self) -> &str {
+        &self.header.name
+    }
+
+    /// The decoded PCM, or `None` for a header with no body.
+    pub fn data(&self) -> Option<&SampleDataType> {
+        self.data.as_ref()
+    }
+
+    /// Loop start **in frames**. XM stores it in bytes, so a 16-bit
+    /// sample halves it — the same shift `to_sample()` applies,
+    /// without that method's out-of-range clamping.
+    pub fn loop_start_frames(&self) -> u32 {
+        match &self.data {
+            Some(SampleDataType::Mono16(_)) => self.header.loop_start >> 1,
+            _ => self.header.loop_start,
+        }
+    }
+
+    /// Loop length in frames. Same conversion as
+    /// [`Self::loop_start_frames`].
+    pub fn loop_length_frames(&self) -> u32 {
+        match &self.data {
+            Some(SampleDataType::Mono16(_)) => self.header.loop_length >> 1,
+            _ => self.header.loop_length,
+        }
     }
 }

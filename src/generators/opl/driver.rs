@@ -7,7 +7,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::tracker::instr_opl::{InstrOpl, MdiOpl, OplRhythm};
+use crate::core::instr_opl::{InstrOpl, MdiOpl, OplRhythm};
 
 use oplon::{ChannelPatch, OpPatch, Opl2, OPL_NATIVE_RATE};
 
@@ -281,7 +281,7 @@ impl OplDriver {
     }
 }
 
-/// Decode an [`InstrOpl`] into a [`ChannelPatch`]. The OPL connection bit
+/// Decode an [`InstrOpl`](crate::core::instr_opl::InstrOpl) into a [`ChannelPatch`]. The OPL connection bit
 /// (`con`) and feedback live in the modulator's register fields.
 fn channel_patch_from_instr(instr: &InstrOpl) -> ChannelPatch {
     let m = op_patch(
@@ -367,7 +367,7 @@ mod tests {
 
     #[test]
     fn rhythm_instrument_routes_to_percussion() {
-        use crate::tracker::instr_opl::{InstrOpl, MdiInstr, MdiOpl, OplRhythm};
+        use crate::core::instr_opl::{InstrOpl, MdiInstr, MdiOpl, OplRhythm};
         let mut drv = OplDriver::new(44100);
         // Percussive patch (fast attack, quick decay) as a bass-drum instrument.
         let op = MdiOpl {
@@ -410,7 +410,7 @@ mod tests {
     /// volume for rhythm voices and every hit played at full level.
     #[test]
     fn rhythm_note_volume_attenuates() {
-        use crate::tracker::instr_opl::{InstrOpl, MdiInstr, MdiOpl, OplRhythm};
+        use crate::core::instr_opl::{InstrOpl, MdiInstr, MdiOpl, OplRhythm};
         // Sustaining operator so the level is steady while we measure.
         let op = MdiOpl {
             multiple: 1,
@@ -458,7 +458,7 @@ mod tests {
     /// the melodic slot table, so the old `slot_of`-only path was a no-op for them).
     #[test]
     fn rhythm_set_volume_attenuates() {
-        use crate::tracker::instr_opl::{InstrOpl, MdiInstr, MdiOpl, OplRhythm};
+        use crate::core::instr_opl::{InstrOpl, MdiInstr, MdiOpl, OplRhythm};
         let op = MdiOpl {
             multiple: 1,
             attack: 15,

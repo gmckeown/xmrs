@@ -347,7 +347,6 @@ fn walk_one_song(
 #[cfg(test)]
 mod walker_wrap_tests {
     use super::*;
-    use crate::core::compatibility::PlaybackQuirks;
     use crate::core::effect::NavigationEffect;
     use crate::core::module::Module;
     use crate::tracker::import::unit::TrackImportUnit;
@@ -753,8 +752,24 @@ mod walker_wrap_tests {
     /// clear, and the IT break-suppression — all three dialect divergences.
     /// Both implementations are checked against the same documented
     /// sequence, so neither can silently drift.
+    ///
+    /// Gated on the importer features: it uses `tracker::profiles`, which is
+    /// itself `#[cfg]`-gated on them, so the test only compiles where the
+    /// quirk presets it exercises actually exist.
+    #[cfg(any(
+        feature = "import_mod",
+        feature = "import_xm",
+        feature = "import_s3m",
+        feature = "import_it",
+        feature = "import_sid",
+        feature = "import_dw",
+    ))]
     #[test]
     fn walker_matches_reference_replayer_oracle() {
+        // Imported here rather than at module scope: this is the only user, and
+        // it is gated on "any importer", so a `--features format`-only test
+        // build would flag the import as unused.
+        use crate::core::compatibility::PlaybackQuirks;
         use crate::tracker::profiles;
         let seq = |q: &PlaybackQuirks, order: Vec<usize>, pats: Vec<Pattern>| -> Vec<(u32, u32)> {
             let mut m = Module::default();

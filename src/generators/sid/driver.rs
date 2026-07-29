@@ -8,11 +8,14 @@
 //! sounds, so switching a channel to a different SID instrument releases the
 //! voice it held on the previous chip.
 
+use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::tracker::instr_robsid::{ArpMode, RobEffects, SkydiveMode};
-use crate::tracker::instr_sid::SidVoice;
+use crate::core::instr_robsid::{
+    ArpMode, ArpPhase, CutoffSweep, ReleaseMode, RobEffects, SkydiveMode, VibratoMode, VoiceProgram,
+};
+use crate::core::instr_sid::SidVoice;
 
 use super::{SidFx, SidModel, SidRegion, SidSynth, SidVoicePatch};
 
@@ -88,12 +91,18 @@ impl SidBank {
     /// Trigger a note: release any different instrument this channel held,
     /// then key-on `instr`'s chip with the patch + per-frame effects built
     /// from `voice` / `fx`.
+    // Seven parameters, deliberately flat: they are the key-on inputs the
+    // replayer itself carries in separate places, and bundling them into a
+    // struct would hide which ones the chip write actually consumes.
+    #[allow(clippy::too_many_arguments)]
     pub fn note_on(
         &mut self,
         channel: usize,
         instr: usize,
         voice: &SidVoice,
         fx: &RobEffects,
+        program: Option<&VoiceProgram>,
+        release_after: u16,
         milli_hz: u32,
     ) {
         if let Some(prev) = self.channel_instr.get(channel).copied().flatten() {
@@ -104,7 +113,8 @@ impl SidBank {
             }
         }
         let patch = patch_from_voice(voice);
-        let sfx = fx_from_robeffects(fx);
+        let mut sfx = fx_from_robeffects(fx, program);
+        sfx.release_after = release_after;
         // The driver honours `re.drum.enable` directly: the importer only sets it where
         // the drum has been verified register-exact (so it doubles as the gate).
         if let Some(s) = self.synth_mut(instr) {
@@ -241,6 +251,7 @@ thread_local! {
 #[doc(hidden)]
 pub fn capture_begin() {
     CAPTURE.with(|c| c.borrow_mut().clear());
+    STATE_CAPTURE.with(|c| c.borrow_mut().clear());
     CAPTURE_ON.with(|f| f.set(true));
 }
 
@@ -250,6 +261,36 @@ pub fn capture_begin() {
 pub fn capture_take() -> Vec<[u8; 0x19]> {
     CAPTURE_ON.with(|f| f.set(false));
     CAPTURE.with(|c| core::mem::take(&mut *c.borrow_mut()))
+}
+
+// Per-frame INTERNAL state, the counterpart of the register capture above. The
+// registers alone cannot show a modulator's phase — a counter's position has to
+// be inferred from the frequency it produced, which is ambiguous whenever the
+// window misses the swing's extremes. `sidplay --statedump` dumps the real
+// replayer's work-RAM the same way; this is our side of that comparison.
+#[cfg(feature = "std")]
+thread_local! {
+    static STATE_CAPTURE: core::cell::RefCell<Vec<[u8; 21]>> =
+        const { core::cell::RefCell::new(Vec::new()) };
+}
+
+/// Record this frame's per-voice ping-pong position (`[0..3]`), a flags byte
+/// per voice (`[3..6]`: bit0 active, bit1 gated, bit2 vibrato armed) and the
+/// frames-since-note-on counter (`[6..9]`, saturating) — enough to say WHY a
+/// frame did not advance the counter (diagnostic).
+#[cfg(feature = "std")]
+#[doc(hidden)]
+pub fn state_push(state: [u8; 21]) {
+    if CAPTURE_ON.with(|f| f.get()) {
+        STATE_CAPTURE.with(|c| c.borrow_mut().push(state));
+    }
+}
+
+/// Stop and return the captured per-frame internal state (current thread).
+#[cfg(feature = "std")]
+#[doc(hidden)]
+pub fn state_take() -> Vec<[u8; 21]> {
+    STATE_CAPTURE.with(|c| core::mem::take(&mut *c.borrow_mut()))
 }
 
 /// Bridge a decoded tracker [`SidVoice`] into the generator's neutral
@@ -275,8 +316,14 @@ pub(crate) fn patch_from_voice(v: &SidVoice) -> SidVoicePatch {
 /// The decoder never sets the `pw` flag (only `pw_speed` / `pw_delay`), so the
 /// sweep is activated by a non-zero speed — mirroring how `vibrato` is keyed on
 /// a non-zero depth.
-pub(crate) fn fx_from_robeffects(re: &RobEffects) -> SidFx {
+pub(crate) fn fx_from_robeffects(re: &RobEffects, program: Option<&VoiceProgram>) -> SidFx {
     SidFx {
+        // The voice program, flattened to the engine's fixed-capacity form. A
+        // program longer than the engine's cap is clamped; `dropped` says by how
+        // much so a caller can report it rather than lose steps in silence.
+        program: program
+            .map(|p| super::wave_program::ProgramSteps::from_model(p).0)
+            .unwrap_or_default(),
         pw_sweep: re.pulse_sweep.enable || re.pulse_sweep.speed != 0,
         pw_speed: re.pulse_sweep.speed,
         pw_delay: re.pulse_sweep.delay,
@@ -287,36 +334,84 @@ pub(crate) fn fx_from_robeffects(re: &RobEffects) -> SidFx {
         pw_lo_bound: re.pulse_sweep.bounce.map_or(0, |b| b.lo),
         pw_bounds_set: re.pulse_sweep.bounce.is_some(),
         pw_reseed_on_note: re.pulse_sweep.reseed_on_note,
-        vib_len_gate: re.vibrato.length_gate,
-        vibrato: re.vibrato.enable,
-        vib_depth: re.vibrato.depth,
-        vib_div: re.vibrato.speed_div,
-        vib_tempvdif_reg: re.compat.vib_overflow_reg,
+        // The three vibrato laws of `VibratoMode`, flattened into the engine's
+        // neutral fields (`vib_len_gate` doubles as the Bipolar law selector,
+        // `interp_vib` as the Semitone one — the engine's historical shape).
+        vib_len_gate: matches!(re.vibrato, VibratoMode::Bipolar { .. }),
+        vibrato: matches!(
+            re.vibrato,
+            VibratoMode::Upward { .. } | VibratoMode::Bipolar { .. }
+        ),
+        vib_depth: match re.vibrato {
+            VibratoMode::Upward { depth, .. } | VibratoMode::Bipolar { depth, .. } => depth,
+            _ => 0,
+        },
+        vib_div: if let VibratoMode::Bipolar { div, .. } = re.vibrato {
+            div
+        } else {
+            0
+        },
+        vib_tempvdif_reg: if let VibratoMode::Upward { reg_step, .. } = re.vibrato {
+            reg_step
+        } else {
+            0
+        },
         arp: matches!(re.arpeggio, ArpMode::Octave),
-        interp_vib: re.interp.enable,
-        interp_half_depth: re.interp.half_depth,
-        interp_shift: re.interp.shift,
-        wave_attack_ctrl: re.two_phase.attack_ctrl,
+        interp_vib: matches!(re.vibrato, VibratoMode::Semitone { .. }),
+        interp_half_depth: if let VibratoMode::Semitone { half_depth, .. } = re.vibrato {
+            half_depth
+        } else {
+            0
+        },
+        interp_shift: if let VibratoMode::Semitone { shift, .. } = re.vibrato {
+            shift
+        } else {
+            0
+        },
+        interp_delay: if let VibratoMode::Semitone { delay, .. } = re.vibrato {
+            delay
+        } else {
+            0
+        },
+        interp_flat: if let VibratoMode::Semitone { flat, .. } = re.vibrato {
+            flat
+        } else {
+            0
+        },
+        wave_attack_ctrl: re.two_phase.attack_shape.to_ctrl(),
         wave_attack_frames: re.two_phase.attack_frames,
         wave_attack_note: re.two_phase.attack_note.unwrap_or(0),
         wave_attack_note_set: re.two_phase.attack_note.is_some(),
-        wave_alt_ctrl: re.wave_alt.alt_ctrl,
+        wave_alt_ctrl: re.wave_alt.alt_shape.to_ctrl(),
         arp2_reg: if let ArpMode::TwoNoteFixed(r) = re.arpeggio {
             r
         } else {
             0
         },
-        arp3: matches!(re.arpeggio, ArpMode::ThreeNote { .. }),
-        arp3_off_a: if let ArpMode::ThreeNote { off_a, .. } = re.arpeggio {
-            off_a
+        arp_steps: if let ArpMode::Cycle { steps, .. } = re.arpeggio {
+            steps
+        } else {
+            [0; 3]
+        },
+        arp_len: if let ArpMode::Cycle { len, .. } = re.arpeggio {
+            len
         } else {
             0
         },
-        arp3_off_b: if let ArpMode::ThreeNote { off_b, .. } = re.arpeggio {
-            off_b
-        } else {
-            0
-        },
+        arp_per_note: matches!(
+            re.arpeggio,
+            ArpMode::Cycle {
+                phase: ArpPhase::PerNote,
+                ..
+            }
+        ),
+        arp_follow_climb: matches!(
+            re.arpeggio,
+            ArpMode::Cycle {
+                follow_climb: true,
+                ..
+            }
+        ),
         // Note-increment skydive: the skydive bit with a zero freq-add config
         // (the importer's signal that this engine sweeps by note number, e.g.
         // Thrust, rather than adding a constant to the freq register).
@@ -331,17 +426,49 @@ pub(crate) fn fx_from_robeffects(re: &RobEffects) -> SidFx {
         skydive_when: re.skydive.length_gate,
         drum: re.drum.enable,
         filter: re.filter.enable,
-        filter_resfilt: (re.filter.resonance << 4) | re.filter.routing,
-        filter_step: re.filter.cutoff_step,
-        filter_seed: re.filter.cutoff_seed,
-        filter_reseed_each_note: re.filter.reseed_each_note,
-        alt_arp_semitones: if let ArpMode::TwoNoteInterval(n) = re.arpeggio {
-            n
+        filter_resfilt: (re.filter.resonance << 4) | re.filter.routing.to_bits(),
+        // The two cutoff laws, flattened: `filter_bounce` selects, the other
+        // law's fields stay at 0 (same shape as `Option<BounceRange>` above).
+        filter_step: if let CutoffSweep::Wrap { step } = re.filter.sweep {
+            step
         } else {
             0
         },
+        filter_seed: re.filter.cutoff_seed,
+        filter_bounce: matches!(re.filter.sweep, CutoffSweep::Bounce { .. }),
+        filter_bounce_step: if let CutoffSweep::Bounce { step, .. } = re.filter.sweep {
+            step
+        } else {
+            0
+        },
+        filter_bounce_min: if let CutoffSweep::Bounce { min, .. } = re.filter.sweep {
+            min
+        } else {
+            0
+        },
+        filter_bounce_max: if let CutoffSweep::Bounce { max, .. } = re.filter.sweep {
+            max
+        } else {
+            0
+        },
+        filter_bounce_up: matches!(re.filter.sweep, CutoffSweep::Bounce { up: true, .. }),
+        filter_mode: re.filter.mode.to_bits(),
+        filter_reseed_each_note: re.filter.reseed_each_note,
         drum_no_freq_slide: re.drum.no_freq_slide,
-        zero_adsr_on_note_off: re.hard_cut_release,
+        zero_adsr_on_note_off: matches!(re.release, ReleaseMode::HardCut),
+        release_ramp: matches!(re.release, ReleaseMode::Ramp { .. }),
+        release_ad: if let ReleaseMode::Ramp { ad, .. } = re.release {
+            ad
+        } else {
+            0
+        },
+        release_sr: if let ReleaseMode::Ramp { sr, .. } = re.release {
+            sr
+        } else {
+            0
+        },
+        // Per-note, filled in by the caller from the cell.
+        release_after: 0,
     }
 }
 
@@ -363,23 +490,54 @@ impl SidDriver {
         }
     }
 
+    // Mirrors the inherent `note_on` above, parameter for parameter.
+    #[allow(clippy::too_many_arguments)]
     pub fn note_on(
         &mut self,
         channel: usize,
         instr: usize,
         voice: &SidVoice,
         fx: &RobEffects,
+        program: Option<&VoiceProgram>,
+        release_after: u16,
         milli_hz: u32,
     ) {
         match self {
-            Self::PerInstrument(b) => b.note_on(channel, instr, voice, fx, milli_hz),
+            Self::PerInstrument(b) => {
+                b.note_on(channel, instr, voice, fx, program, release_after, milli_hz)
+            }
             Self::Coupled(c) => {
                 let patch = patch_from_voice(voice);
                 // The driver honours `re.drum.enable` directly (the importer only sets
                 // it where the drum is register-exact, so it is its own gate).
-                let sfx = fx_from_robeffects(fx);
+                let mut sfx = fx_from_robeffects(fx, program);
+                sfx.release_after = release_after;
                 c.note_on(channel, instr, &patch, &sfx, milli_hz);
             }
+        }
+    }
+
+    /// A tie that changes the instrument: swap the record-derived half of the
+    /// voice's state without re-triggering. See
+    /// [`CoupledSid::retie`](super::coupled::CoupledSid::retie) for exactly what
+    /// the replayer re-reads and what it leaves alone.
+    ///
+    /// Only the coupled driver has this. Ties reach the player through
+    /// `TrackEffect::NoteArming`, which only the last-player import emits, and
+    /// that generation always drives one shared chip — so the per-instrument
+    /// bank cannot receive one, and silently ignoring it there is not a gap.
+    pub fn retie(
+        &mut self,
+        channel: usize,
+        instr: usize,
+        voice: &SidVoice,
+        fx: &RobEffects,
+        program: Option<&VoiceProgram>,
+    ) {
+        if let Self::Coupled(c) = self {
+            let patch = patch_from_voice(voice);
+            let sfx = fx_from_robeffects(fx, program);
+            c.retie(channel, instr, &patch, &sfx);
         }
     }
 
@@ -426,16 +584,17 @@ impl SidDriver {
     }
 
     pub fn capture_frame(&self) {
+        // Diagnostic register capture is a std-only facility (thread-local
+        // buffer, see below). On `no_std` the whole hook is a no-op — the
+        // `SidBank` / `CoupledSid` capture methods do not exist there.
+        #[cfg(feature = "std")]
         match self {
             Self::PerInstrument(b) => b.capture_frame(),
-            #[cfg(feature = "std")]
             Self::Coupled(c) => {
                 if CAPTURE_ON.with(|f| f.get()) {
                     push_capture(c.snapshot());
                 }
             }
-            #[cfg(not(feature = "std"))]
-            Self::Coupled(_) => {}
         }
     }
 }

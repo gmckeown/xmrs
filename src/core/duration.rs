@@ -17,11 +17,13 @@
 //!
 //! # Example
 //!
-//! ```ignore
-//! use xmrs::prelude::*;
+//! ```
 //! use xmrs::core::duration::ModuleDuration;
+//! use xmrs::core::module::Module;
 //!
-//! let module = Module::load(&bytes)?;
+//! // In a real program: `let module = Module::load(&bytes)?;` — spelled out
+//! // this way so the example compiles in a build with no importer at all.
+//! let module = Module::default();
 //! let d = module.duration(0);
 //! println!("{:>2}:{:02}", d.as_secs() / 60, d.as_secs() % 60);
 //! ```
@@ -32,11 +34,11 @@ use crate::core::module::Module;
 
 /// Extension trait adding duration estimates to [`Module`].
 ///
-/// ```ignore
-/// use xmrs::prelude::*;
+/// ```
 /// use xmrs::core::duration::ModuleDuration;
+/// use xmrs::core::module::Module;
 ///
-/// let module = Module::load(&bytes)?;
+/// let module = Module::default();      // or `Module::load(&bytes)?`
 /// let secs = module.duration(0).as_secs_f64();
 /// ```
 pub trait ModuleDuration {

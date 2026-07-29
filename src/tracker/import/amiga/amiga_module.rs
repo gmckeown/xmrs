@@ -964,6 +964,87 @@ impl AmigaModule {
         module
     }
 }
+
+impl crate::tracker::import::raw::RawModule for AmigaModule {
+    fn raw_title(&self) -> &str {
+        &self.title
+    }
+
+    fn raw_orders(&self) -> &[u8] {
+        // `positions` is the fixed 128-byte on-disk table; only the
+        // first `song_length` entries are the song. The rest is
+        // whatever the tracker left there — frequently the tail of a
+        // longer earlier arrangement, which is interesting but is
+        // not the order list.
+        let len = (self.song_length as usize).min(self.positions.len());
+        &self.positions[..len]
+    }
+
+    fn raw_pattern_count(&self) -> usize {
+        self.patterns.len()
+    }
+
+    fn raw_pattern(&self, idx: usize) -> Option<&[Vec<PatternSlot>]> {
+        self.patterns.get(idx).map(|p| p.as_slice())
+    }
+
+    fn raw_sample_count(&self) -> usize {
+        self.samples.len()
+    }
+
+    fn raw_sample(&self, idx: usize) -> Option<crate::tracker::import::raw::RawSample<'_>> {
+        use crate::tracker::import::raw::{RawPcm, RawSample};
+
+        let meta = self.samples.get(idx)?;
+        // The sample bank and the PCM payloads are filled in the same
+        // order, but a truncated file can leave the audio short.
+        let pcm = match self.audio.get(idx) {
+            Some(v) if !v.is_empty() => RawPcm::Mono8(v),
+            _ => RawPcm::Empty,
+        };
+        Some(RawSample {
+            name: &meta.name,
+            pcm,
+            // MOD stores these in words; MOD samples are 8-bit mono,
+            // so one frame is one byte and the conversion is ×2.
+            loop_start: (meta.repeat_offset_div2 as u32) * 2,
+            loop_length: (meta.repeat_length_div2 as u32) * 2,
+            // MOD pitches samples through the Amiga period table and
+            // a finetune nibble; there is no rate in the file.
+            sample_rate: None,
+        })
+    }
+
+    fn raw_channel_count(&self) -> usize {
+        // The format tag states it (`M.K.` = 4, `6CHN` = 6, `FLT8` =
+        // 8, …). 15-sample Soundtracker MODs have no tag at all, so
+        // fall back to what the patterns are actually shaped like.
+        match self.get_number_of_tracks() {
+            Some(n) => n as usize,
+            None => self
+                .patterns
+                .first()
+                .and_then(|p| p.first())
+                .map(|row| row.len())
+                .unwrap_or(0),
+        }
+    }
+
+    fn raw_tracker(&self) -> crate::tracker::import::raw::RawTracker<'_> {
+        crate::tracker::import::raw::RawTracker {
+            // The four-character tag at offset 0x438. Empty on
+            // 15-sample Soundtracker files, which predate it.
+            tag: if self.tag.is_empty() {
+                None
+            } else {
+                Some(&self.tag)
+            },
+            version: None,
+            compatible_with: None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

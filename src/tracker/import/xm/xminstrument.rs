@@ -33,13 +33,9 @@ use crate::core::fixed::fixed::Q8_8;
 use crate::core::fixed::units::{EnvValue, PitchDelta, Volume};
 use crate::core::instr_default::InstrDefault;
 use crate::core::instrument::{Instrument, InstrumentType};
-use crate::core::module::Module;
 use crate::core::sample::Sample;
 use crate::core::waveform::Waveform;
-use crate::tracker::import::bin_reader::{
-    bytes_to_trimmed_string, string_to_fixed_array, write_bytes, write_u16_le, write_u32_le,
-    write_u8, BinReader, ImportError,
-};
+use crate::tracker::import::bin_reader::{bytes_to_trimmed_string, BinReader, ImportError};
 
 use super::xmsample::{XmSample, XMSAMPLE_HEADER_SIZE};
 
@@ -47,19 +43,6 @@ use super::xmsample::{XmSample, XMSAMPLE_HEADER_SIZE};
 pub enum XmInstrumentType {
     Empty,
     Default(Box<XmInstrDefault>),
-}
-
-impl XmInstrumentType {
-    pub fn save(&self) -> Vec<u8> {
-        match self {
-            XmInstrumentType::Default(xmid) => {
-                let mut out = Vec::with_capacity(XMINSTRDEFAULT_SIZE);
-                xmid.write(&mut out);
-                out
-            }
-            _ => vec![],
-        }
-    }
 }
 
 pub const XMINSTRDEFAULT_SIZE: usize = 96 + 4 * 12 + 4 * 12 + 14 + 2 + 2 + 2 + 2 + 1;
@@ -179,119 +162,6 @@ impl XmInstrDefault {
             midi_mute_computer,
         })
     }
-
-    fn write(&self, out: &mut Vec<u8>) {
-        write_bytes(out, &self.sample_for_pitchs);
-        write_bytes(out, &self.volume_envelope);
-        write_bytes(out, &self.panning_envelope);
-        write_u8(out, self.number_of_volume_points);
-        write_u8(out, self.number_of_panning_points);
-        write_u8(out, self.volume_sustain_point);
-        write_u8(out, self.volume_loop_start_point);
-        write_u8(out, self.volume_loop_end_point);
-        write_u8(out, self.panning_sustain_point);
-        write_u8(out, self.panning_loop_start_point);
-        write_u8(out, self.panning_loop_end_point);
-        write_u8(out, self.volume_flag);
-        write_u8(out, self.panning_flag);
-        write_u8(out, self.vibrato_type);
-        write_u8(out, self.vibrato_sweep);
-        write_u8(out, self.vibrato_depth);
-        write_u8(out, self.vibrato_rate);
-        write_u16_le(out, self.volume_fadeout);
-        write_u8(out, self.midi_on);
-        write_u8(out, self.midi_channel);
-        write_u16_le(out, self.midi_program);
-        write_u16_le(out, self.midi_bend);
-        write_u8(out, self.midi_mute_computer);
-    }
-
-    fn from_envelope(e: &Envelope) -> [u8; 48] {
-        let mut dst: [u8; 48] = [0; 48];
-        let mut i = 0;
-        for ep in &e.point {
-            let f = ep.frame.to_le_bytes();
-            // Inverse of `EnvValue::from_byte_64`: get back the
-            // tracker byte in `0..=64`. Round-trip is exact for
-            // every byte that came in through the importer; see
-            // [`EnvValue::to_byte_64`] for the rounding rule.
-            let v = (ep.value.to_byte_64() as u16).to_le_bytes();
-            dst[i] = f[0];
-            dst[i + 1] = f[1];
-            dst[i + 2] = v[0];
-            dst[i + 3] = v[1];
-            i += 4;
-        }
-        dst
-    }
-
-    pub fn from_instr(i: &Instrument) -> XmInstrumentType {
-        let mut xmid: Box<Self> = Box::default();
-        match &i.instr_type {
-            InstrumentType::Default(id) => {
-                for i in 0..96 {
-                    xmid.sample_for_pitchs[i] = match id.keyboard.sample_for_pitch[i] {
-                        Some(sample) => sample as u8,
-                        None => 0,
-                    };
-                }
-                xmid.volume_envelope = Self::from_envelope(&id.voice.volume_envelope);
-                xmid.number_of_volume_points = id.voice.volume_envelope.point.len() as u8;
-                xmid.volume_sustain_point = id.voice.volume_envelope.sustain_start_point as u8;
-                xmid.volume_loop_start_point = id.voice.volume_envelope.loop_start_point as u8;
-                xmid.volume_loop_end_point = id.voice.volume_envelope.loop_end_point as u8;
-                if id.voice.volume_envelope.enabled {
-                    xmid.volume_flag |= 0b0001;
-                }
-                if id.voice.volume_envelope.sustain_enabled {
-                    xmid.volume_flag |= 0b0010;
-                }
-                if id.voice.volume_envelope.loop_enabled {
-                    xmid.volume_flag |= 0b0100;
-                }
-
-                xmid.panning_envelope = Self::from_envelope(&id.voice.pan_envelope);
-                xmid.number_of_panning_points = id.voice.pan_envelope.point.len() as u8;
-                xmid.panning_sustain_point = id.voice.pan_envelope.sustain_start_point as u8;
-                xmid.panning_loop_start_point = id.voice.pan_envelope.loop_start_point as u8;
-                xmid.panning_loop_end_point = id.voice.pan_envelope.loop_end_point as u8;
-                if id.voice.pan_envelope.enabled {
-                    xmid.panning_flag |= 0b0001;
-                }
-                if id.voice.pan_envelope.sustain_enabled {
-                    xmid.panning_flag |= 0b0010;
-                }
-                if id.voice.pan_envelope.loop_enabled {
-                    xmid.panning_flag |= 0b0100;
-                }
-
-                xmid.vibrato_type = match id.voice.vibrato.waveform {
-                    // FT2 auto-vibrato types: 1 = square, 2 = ramp up
-                    // (pitch ramps down → mid-cycle discontinuity,
-                    // `BipolarRampDown`), 3 = ramp down (`BipolarRampUp`),
-                    // 0 = sine.
-                    Waveform::AutoVibSquare => 1,
-                    Waveform::BipolarRampDown => 2,
-                    Waveform::BipolarRampUp => 3,
-                    _ => 0,
-                };
-                xmid.vibrato_sweep = id.voice.vibrato.sweep.to_ratio_byte(255);
-                xmid.vibrato_depth = id.voice.vibrato.depth.to_ratio_byte(64);
-                xmid.vibrato_rate = id.voice.vibrato.speed.to_ratio_byte(63 * 4);
-
-                xmid.volume_fadeout = id.voice.volume_fadeout.to_ratio_u16(4095 * 4 * 2);
-
-                xmid.midi_on = if id.midi.muted { 0 } else { 1 };
-                xmid.midi_channel = id.midi.channel;
-                xmid.midi_program = id.midi.program;
-                xmid.midi_bend = id.midi.bend;
-                xmid.midi_mute_computer = if id.midi_mute_computer { 1 } else { 0 };
-
-                XmInstrumentType::Default(xmid)
-            }
-            _ => XmInstrumentType::Empty,
-        }
-    }
 }
 
 pub const XMINSTRUMENT_HEADER_SIZE: usize = 25;
@@ -313,29 +183,6 @@ impl XmInstrumentHeader {
             instr_type,
             num_samples,
         })
-    }
-
-    fn write(&self, out: &mut Vec<u8>) {
-        write_bytes(out, &string_to_fixed_array::<22>(&self.name));
-        write_u8(out, self.instr_type);
-        write_u16_le(out, self.num_samples);
-    }
-
-    pub fn save(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(XMINSTRUMENT_HEADER_SIZE);
-        self.write(&mut out);
-        out
-    }
-
-    pub fn from_instr(i: &Instrument) -> Self {
-        XmInstrumentHeader {
-            name: i.name.clone(),
-            num_samples: match &i.instr_type {
-                InstrumentType::Default(it) => it.sample.len() as u16,
-                _ => 0,
-            },
-            ..Default::default()
-        }
     }
 }
 
@@ -431,32 +278,6 @@ impl XmInstrument {
             sample,
         };
         Ok((d3, xmi))
-    }
-
-    pub fn save(&mut self) -> Vec<u8> {
-        let i = self.instr.save();
-        let mut vs: Vec<u8> = vec![];
-
-        // all sample headers, then all sample bodies
-        for s in &mut self.sample {
-            vs.append(&mut s.save());
-        }
-        for s in &mut self.sample {
-            vs.append(&mut s.save_sample());
-        }
-
-        self.instrument_header_len = 4 + XMINSTRUMENT_HEADER_SIZE as u32 + 4 + i.len() as u32;
-
-        self.header.num_samples = self.sample.len() as u16;
-
-        let mut all: Vec<u8> =
-            Vec::with_capacity(4 + XMINSTRUMENT_HEADER_SIZE + 4 + i.len() + vs.len());
-        write_u32_le(&mut all, self.instrument_header_len);
-        self.header.write(&mut all);
-        write_u32_le(&mut all, XMSAMPLE_HEADER_SIZE as u32);
-        all.extend_from_slice(&i);
-        all.extend_from_slice(&vs);
-        all
     }
 
     fn envelope_from_slice(src: &[u8]) -> Option<Envelope> {
@@ -639,20 +460,5 @@ impl XmInstrument {
             instr_type: it,
             muted: false,
         }
-    }
-
-    // All instr
-    pub fn from_module(module: &Module) -> Vec<Self> {
-        let mut all: Vec<XmInstrument> = vec![];
-        for i in &module.instrument {
-            all.push(XmInstrument {
-                instrument_header_len: 4 + XMINSTRUMENT_HEADER_SIZE as u32,
-                header: XmInstrumentHeader::from_instr(i),
-                sample_header_size: XMSAMPLE_HEADER_SIZE as u32,
-                instr: XmInstrDefault::from_instr(i),
-                sample: XmSample::from_instr(i),
-            });
-        }
-        all
     }
 }

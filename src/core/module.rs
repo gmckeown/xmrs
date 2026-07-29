@@ -283,8 +283,9 @@ pub struct Module {
     /// missing or empty entry is a pass-through. **Empty for every
     /// tracker import** — the importers never author inserts, so the
     /// mixer skips the chain and the render stays bit-identical.
-    /// Distinct from [`Self::mix_plugins`], which holds opaque,
-    /// host-only VST chunks the player cannot execute.
+    /// Distinct from `mix_plugins` (a field that only exists under
+    /// `import_it`, hence no link), which holds opaque, host-only VST
+    /// chunks the player cannot execute.
     #[serde(default)]
     pub channel_inserts: Vec<crate::core::daw::device::DeviceChain>,
 

@@ -1,5 +1,14 @@
 # Rob Hubbard "v40" player — study + plan to add it
 
+> ⚠️ **The instrument system of this player has since been re-reversed in depth:**
+> see [`ROBSID2_INSTRUMENT_MODEL.md`](ROBSID2_INSTRUMENT_MODEL.md), which **supersedes §3
+> (the instrument record), §4 (markers) and §6 (the filter) of this document** — several
+> statements below are wrong (record fields +2/+5/+10/+11/+14, the flags of +7, the operand
+> order of markers `0x82`/`0x87`, the meaning of `0x88`, the filter slot byte +6, and the
+> claim that `Lakers_vs_Celtics` is a distinct variant). That document lists every correction
+> in its §10. §2 (song/order/pattern), §7 (comparison), §8 (design decision) and §9 (phased
+> plan) below remain valid.
+
 A complete reverse-engineering of Rob Hubbard's late / EA-era C64 player (the next
 generation after v30/Delta in our empirical version scheme), and a phased plan to import it.
 

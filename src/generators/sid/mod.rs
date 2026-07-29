@@ -1,5 +1,5 @@
 //! Cycle-accurate SID (MOS 6581/8580) synthesis core — the runtime
-//! counterpart of [`crate::tracker::instr_sid::InstrSid`], mirroring the OPL
+//! counterpart of [`crate::core::instr_sid::InstrSid`], mirroring the OPL
 //! generator's role.
 //!
 //! ## Model: one chip per instrument
@@ -36,6 +36,7 @@
 pub mod coupled;
 pub mod driver;
 pub(crate) mod fx_engine;
+pub mod wave_program;
 
 use sidera::registers::{
     CTRL_GATE, CTRL_RING, CTRL_SYNC, CTRL_TEST, MODE_VOL, V1_ATTACK_DECAY, V1_CONTROL, V1_FREQ_HI,
@@ -188,7 +189,7 @@ pub struct SidFx {
     pub pw_delay: u16,
     /// PW low-byte-only increment mode (v10 `instrfx & 8`): add `pw_speed` (the
     /// full byte) to the pulse-width LOW byte each frame, 8-bit wrap, high byte
-    /// untouched, no delay/bounce. See [`crate::tracker::instr_robsid::PulseSweep::low_byte_mode`].
+    /// untouched, no delay/bounce. See [`crate::core::instr_robsid::PulseSweep::low_byte_mode`].
     pub pw_low_byte_inc: bool,
     /// Pulse-width bounce bounds on the PW **high byte**: the sweep reverses
     /// direction when `pw_cur >> 8` reaches `pw_hi_bound` (climbing) or
@@ -200,12 +201,12 @@ pub struct SidFx {
     /// The bounce bounds are explicit (`pw_hi_bound`/`pw_lo_bound` are the real
     /// values, including 0) rather than the legacy fixed 0x0E/0x08. The flat
     /// engine carries presence here; the musical model expresses it as
-    /// [`crate::tracker::instr_robsid::PulseSweep::bounce`]
+    /// [`crate::core::instr_robsid::PulseSweep::bounce`]
     /// (`Some` ⇒ `true`, `None` ⇒ `false`).
     pub pw_bounds_set: bool,
     /// Restart the sweep from the patch base PW on every note-on (v20/v25/v30)
     /// instead of free-running across notes (v10). See
-    /// [`crate::tracker::instr_robsid::PulseSweep::reseed_on_note`]. Only the
+    /// [`crate::core::instr_robsid::PulseSweep::reseed_on_note`]. Only the
     /// coupled driver honours this; the per-instrument [`driver::SidBank`] always
     /// reseeds.
     pub pw_reseed_on_note: bool,
@@ -234,6 +235,11 @@ pub struct SidFx {
     pub interp_vib: bool,
     pub interp_half_depth: u8,
     pub interp_shift: u8,
+    /// Frames after note-on before the swing runs at all (the ping-pong counter
+    /// stays put meanwhile), and frames during which only the centring applies.
+    /// Both 0 on the replayers that lack them.
+    pub interp_delay: u8,
+    pub interp_flat: u8,
     /// Two-phase waveform (v20 player effect 0x4): the raw attack control byte
     /// (waveform + sync/ring/test bits, e.g. pulse+sync 0x43) played for
     /// `wave_attack_frames` frames after note-on, then the patch's sustain
@@ -254,13 +260,16 @@ pub struct SidFx {
     /// Two-note arpeggio (v30 effect 0x8): toggle pitch between the struck note
     /// and this fixed SID frequency register each frame. 0 ⇒ disabled.
     pub arp2_reg: u16,
-    /// Three-note arpeggio (fxmask bit4, `0x10`): a global 3-frame loop shifting
-    /// the struck note by `0, arp3_off_a, arp3_off_b` SIGNED semitones. Phase is
-    /// the global frame counter (shared across voices, like the octave arp).
-    /// `arp3 == false` ⇒ disabled. See [`crate::tracker::instr_robsid::ArpMode::ThreeNote`].
-    pub arp3: bool,
-    pub arp3_off_a: i8,
-    pub arp3_off_b: i8,
+    /// Cyclic semitone-offset arpeggio — the flattened
+    /// [`crate::core::instr_robsid::ArpMode::Cycle`]. `arp_len == 0` ⇒ disabled;
+    /// otherwise the note is shifted by `arp_steps[phase % arp_len]` SIGNED
+    /// semitones each frame. `arp_per_note` selects the phase source (frames
+    /// since note-on vs the global frame counter), and `arp_follow_climb` makes
+    /// the offsets ride the note-increment skydive's climbed pitch (v15).
+    pub arp_steps: [i8; 3],
+    pub arp_len: u8,
+    pub arp_per_note: bool,
+    pub arp_follow_climb: bool,
     /// Note-increment skydive (`instrfx & 2` with a note-step replayer, e.g.
     /// Thrust): climb the pitch by one semitone every 4th frame, sweeping up
     /// from the note's base (the replayer's `notenum++; freq = table[notenum]`).
@@ -282,25 +291,34 @@ pub struct SidFx {
     pub filter: bool,
     /// `$D417` resonance | routing written while this voice drives the filter.
     pub filter_resfilt: u8,
-    /// `$D416` per-frame signed cutoff-hi increment (0 = static).
+    /// WRAP law (v10–v30): `$D416` per-frame signed cutoff-hi increment
+    /// (0 = static). Ignored when `filter_bounce` is set.
     pub filter_step: i8,
-    /// Cutoff-hi seed loaded on note-on.
-    pub filter_seed: u8,
+    /// Cutoff seed loaded on note-on, 16-bit. v10–v30 only use the high byte.
+    pub filter_seed: u16,
+    /// BOUNCE law (last player): the cutoff is a 16-bit accumulator that
+    /// reverses at `filter_bounce_min` / `filter_bounce_max` (compared on the
+    /// high byte) instead of wrapping. Selects the law; `filter_step` is unused.
+    pub filter_bounce: bool,
+    pub filter_bounce_step: u16,
+    pub filter_bounce_min: u8,
+    pub filter_bounce_max: u8,
+    /// Direction the bounce starts in (`true` = climbing).
+    pub filter_bounce_up: bool,
+    /// `$D418` high-nibble mode bits: 1 = LP, 2 = BP, 4 = HP (combinable).
+    /// v10–v30 hardwire 1; 0 means "no filter mode" (the master-volume default).
+    pub filter_mode: u8,
+    /// The instrument's per-frame waveform + pitch program, flattened for the
+    /// engine (see [`crate::core::instr_robsid::VoiceProgram`]). Empty ⇒ the
+    /// voice runs the ordinary effect chain; non-empty ⇒ the program owns the
+    /// waveform and pitch.
+    pub program: super::sid::wave_program::ProgramSteps,
     /// Re-seed the cutoff sweep accumulator to `filter_seed` on **every**
     /// note-on, rather than continuing it across same-instrument notes. The v30
     /// replayer (Delta) zeroes the accumulator (`$c34e`) unconditionally in its
     /// note-setup (`$beaf`), so its cutoff pulses per note; older replayers let
     /// it run legato. Set by the importer per replayer version.
     pub filter_reseed_each_note: bool,
-    /// v15 (Spellbound) two-note arpeggio: on alternate frames drop the (possibly
-    /// climbing) note by this many **semitones**. The interval is the fx byte's
-    /// HIGH NIBBLE — the replayer self-modifies the `SBC #imm` operand at $e349
-    /// from `DAT_00be >> 4` (`$e332 STA $e34a`), so e.g. instr fx 0x56 → −5 (a
-    /// fourth), 0x25 → −2 (a tone), 0x35 → −3. (Ghidra's decompiler shows the
-    /// stale static `- 5`; only the disassembly reveals the self-mod.) Combined
-    /// with the bit-1 note-rise (`skydive_climb`) this gives the lead's arp.
-    /// 0 = no alternate-note arp. Set by the importer for v15 fx bit 2.
-    pub alt_arp_semitones: u8,
     /// Suppress the drum's freq-register-HIGH slide (the `drum_hi--` per-frame
     /// decrement). The v10 drum DOES slide the freq-hi down (register-exact vs
     /// commando — see the `drum` field), but the v15 routine (`$e2c6`) keeps the
@@ -309,8 +327,15 @@ pub struct SidFx {
     /// owns only the control register (noise + gate-off), not the pitch.
     pub drum_no_freq_slide: bool,
     /// Zero AD+SR at note-off (v15 `$e198`) so the note cuts sharp rather than
-    /// ringing out on its release nibble. See [`crate::tracker::instr_robsid::RobEffects::hard_cut_release`].
+    /// ringing out on its release nibble. See [`crate::core::instr_robsid::ReleaseMode::HardCut`].
     pub zero_adsr_on_note_off: bool,
+    /// `ReleaseMode::Ramp` — the fixed envelope written a few frames before the
+    /// note ends, while it is still gated. `release_after` is the per-NOTE
+    /// countdown in frames (0 = this note has no ramp).
+    pub release_ramp: bool,
+    pub release_ad: u8,
+    pub release_sr: u8,
+    pub release_after: u16,
 }
 
 /// One hardware voice's allocation + per-frame-effect state within a chip.
@@ -341,6 +366,9 @@ struct VoiceSlot {
     /// sync / ring / test, the replayer's `voice_ctrl & 0xfe`) — what the drum
     /// re-asserts on the chip each slide frame.
     gate_off_ctrl: u8,
+    /// Voice-program cursor + running pitch bend. Reset at every trigger, so a
+    /// program always restarts at step 0 on a new note.
+    prog: super::sid::wave_program::ProgramState,
 }
 
 /// One SID chip (one instrument) with its three voices used as a polyphony
@@ -543,6 +571,8 @@ impl SidSynth {
         };
         self.wr(b + V1_CONTROL, ctrl);
         self.slots[slot] = VoiceSlot {
+            // A program always restarts at step 0 on a new note.
+            prog: Default::default(),
             owner: Some(owner),
             gated: has_waveform,
             release_nibble: patch.sustain_release & 0x0F,
@@ -669,18 +699,31 @@ impl SidSynth {
             base_milli_hz: base,
             gated,
             note_frame,
+            // Per-instrument tunes drive their arpeggio off the GLOBAL frame
+            // counter, never the per-note phase (`arp_per_note` is a last-player
+            // trait), so this is never read on this path.
+            arp_phase: 0,
             drum_hi: drum_hi0,
             gate_off_ctrl,
             skydive_semis,
             interp_ctr: 0,
             interp_up: false,
+            // The interp vibrato is a last-player / v15 trait; this driver's
+            // generations never arm it, so its start delay never runs.
+            vib_delay: 0,
+            prog: self.slots[slot].prog,
         };
-        let (reg, ctrl_override) =
-            fx_engine::modulate(&mut st, &fx, frame, speed, self.chip_clock_hz);
+        let m = fx_engine::modulate(&mut st, &fx, frame, speed, self.chip_clock_hz);
+        let (reg, ctrl_override) = (m.reg, m.ctrl);
         self.slots[slot].drum_hi = st.drum_hi;
+        self.slots[slot].prog = st.prog;
 
         let b = Self::base(slot);
-        self.wr(b + V1_FREQ_LO, (reg & 0xFF) as u8);
+        // A `Fixed` program step writes `$d401` alone and leaves `$d400` as the
+        // last full write left it (replayer `$16cb`).
+        if !m.freq_hi_only {
+            self.wr(b + V1_FREQ_LO, (reg & 0xFF) as u8);
+        }
         self.wr(b + V1_FREQ_HI, (reg >> 8) as u8);
         if let Some(c) = ctrl_override {
             self.wr(b + V1_CONTROL, c);
@@ -925,5 +968,126 @@ mod tests {
         let b = s.note_on(1, &saw(), &SidFx::default(), 440_000);
         assert_eq!(a, b, "a hard-cut voice is reused by the next note");
         assert_eq!(s.voice_owner(b), Some(1));
+    }
+
+    /// The last player's BOUNCE cutoff law (`CutoffSweep::Bounce`): a 16-bit
+    /// accumulator that reverses at the slot's bounds instead of wrapping like
+    /// the v10–v30 law. No shipped tune uses it yet — the SID oracle gate cannot
+    /// cover it, so it is pinned here directly.
+    #[test]
+    fn filter_bounce_law_reverses_at_both_bounds() {
+        use super::coupled::CoupledSid;
+        use sidera::registers::{FC_HI, FC_LO};
+
+        let mut s = CoupledSid::new(44100, SidModel::Mos8580, SidRegion::Pal, 6);
+        let fx = SidFx {
+            filter: true,
+            filter_mode: 2, // band-pass
+            filter_seed: 0x2000,
+            filter_bounce: true,
+            filter_bounce_step: 0x0600,
+            filter_bounce_min: 0x1D,
+            filter_bounce_max: 0x30,
+            filter_bounce_up: true,
+            ..Default::default()
+        };
+        s.note_on(0, 0, &saw(), &fx, 220_000);
+        let regs = s.snapshot();
+        assert_eq!(
+            regs[FC_HI as usize], 0x20,
+            "note-on seeds the cutoff high byte"
+        );
+        assert_eq!(
+            regs[MODE_VOL as usize], 0x2F,
+            "the slot's mode nibble reaches $D418 (band-pass + volume 15)"
+        );
+
+        // Climb: 0x2000 → 0x2600 → clamped to max<<8 with the low byte zeroed.
+        let mut seen_max = false;
+        for _ in 0..4 {
+            s.begin_frame();
+            s.advance_fx(0);
+            let r = s.snapshot();
+            if r[FC_HI as usize] == 0x30 {
+                seen_max = true;
+                assert_eq!(
+                    r[FC_LO as usize], 0,
+                    "clamping to a bound zeroes the low byte"
+                );
+                break;
+            }
+        }
+        assert!(seen_max, "the sweep should climb to its upper bound");
+
+        // Having reversed, it must now fall to the lower bound, not wrap past it.
+        let mut seen_min = false;
+        for _ in 0..8 {
+            s.begin_frame();
+            s.advance_fx(0);
+            let r = s.snapshot();
+            assert!(
+                r[FC_HI as usize] >= 0x1D && r[FC_HI as usize] <= 0x30,
+                "the bounce must stay inside its bounds, got {:#04x}",
+                r[FC_HI as usize]
+            );
+            if r[FC_HI as usize] == 0x1D {
+                seen_min = true;
+                break;
+            }
+        }
+        assert!(
+            seen_min,
+            "the sweep should reverse and reach its lower bound"
+        );
+    }
+
+    /// End-to-end: a `VoiceProgram` reaches the chip through the coupled driver
+    /// and drives the control register frame by frame. No shipped tune carries a
+    /// program yet, so the SID oracle gate cannot see this path — it is pinned
+    /// here, like the filter bounce law.
+    #[test]
+    fn voice_program_drives_the_control_register_frame_by_frame() {
+        use super::coupled::CoupledSid;
+        use crate::core::instr_robsid::{
+            PitchAction, ProgramEnd, VoiceProgram, WaveShape, WaveStep,
+        };
+        use alloc::vec;
+        use sidera::registers::V1_CONTROL;
+
+        let step_of = |ctrl: u8, pitch: PitchAction| WaveStep {
+            shape: WaveShape::from_ctrl(ctrl),
+            pitch,
+        };
+        // Noise burst → bending pulse → triangle, then freeze on the triangle.
+        let prog = VoiceProgram {
+            steps: vec![
+                step_of(0x81, PitchAction::Fixed(0x30)),
+                step_of(0x41, PitchAction::Bend(0x0400)),
+                step_of(0x11, PitchAction::Bend(0x0100)),
+            ],
+            end: ProgramEnd::Hold,
+        };
+        let (flat, dropped) = wave_program::ProgramSteps::from_model(&prog);
+        assert_eq!(dropped, 0);
+
+        let mut s = CoupledSid::new(44100, SidModel::Mos8580, SidRegion::Pal, 6);
+        let fx = SidFx {
+            program: flat,
+            ..Default::default()
+        };
+        s.note_on(0, 0, &saw(), &fx, 440_000);
+
+        let ctrl_of = |s: &CoupledSid| s.snapshot()[V1_CONTROL as usize];
+        let mut ctrls = alloc::vec::Vec::new();
+        for _ in 0..5 {
+            s.begin_frame();
+            s.advance_fx(0);
+            ctrls.push(ctrl_of(&s));
+        }
+        assert_eq!(
+            ctrls,
+            vec![0x81, 0x41, 0x11, 0x11, 0x11],
+            "the program owns the waveform, then freezes on its last step"
+        );
     }
 }

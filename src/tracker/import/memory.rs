@@ -143,7 +143,8 @@ const SAMPLE_OFFSET_ADD_HIGH: usize = 24;
 const ARRAY_SIZE: usize = 25;
 
 /// S3M masterflag-derived import flags, resolved at import time and
-/// stored on [`ImportMemory`].
+/// stored on `ImportMemory` (this module is `pub(crate)`; the type is
+/// re-exported as `tracker::import::s3m::S3mImportFlags`).
 ///
 /// This lives here — rather than under `import::s3m` — so the type is
 /// compiled in every build that enables any importer, not just `import_s3m`.

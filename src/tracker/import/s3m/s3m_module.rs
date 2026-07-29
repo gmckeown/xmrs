@@ -1206,12 +1206,12 @@ impl S3mModule {
                     // Adlib instrument type byte (discriminator): 2 = melody, 3 = bass drum,
                     // 4 = snare, 5 = tom-tom, 6 = cymbal, 7 = hi-hat (ScreamTracker 3 rhythm mode).
                     i_opl.rhythm = match s3m_meta_instr.discriminator {
-                        3 => crate::tracker::instr_opl::OplRhythm::BassDrum,
-                        4 => crate::tracker::instr_opl::OplRhythm::Snare,
-                        5 => crate::tracker::instr_opl::OplRhythm::TomTom,
-                        6 => crate::tracker::instr_opl::OplRhythm::Cymbal,
-                        7 => crate::tracker::instr_opl::OplRhythm::HiHat,
-                        _ => crate::tracker::instr_opl::OplRhythm::Melodic,
+                        3 => crate::core::instr_opl::OplRhythm::BassDrum,
+                        4 => crate::core::instr_opl::OplRhythm::Snare,
+                        5 => crate::core::instr_opl::OplRhythm::TomTom,
+                        6 => crate::core::instr_opl::OplRhythm::Cymbal,
+                        7 => crate::core::instr_opl::OplRhythm::HiHat,
+                        _ => crate::core::instr_opl::OplRhythm::Melodic,
                     };
                     instr.instr_type = InstrumentType::Opl(i_opl);
 
@@ -1224,5 +1224,99 @@ impl S3mModule {
         crate::tracker::import::build::build_timeline_layer(&mut module, &pattern_order, &pattern);
 
         module
+    }
+}
+
+impl S3mMetaInstrument {
+    /// The name to report at the raw layer: the instrument's own
+    /// title when it has one, else the DOS filename. S3M authors
+    /// routinely leave the title blank and let the filename carry the
+    /// identity, so falling back keeps a usable signal.
+    fn raw_name(&self) -> &str {
+        let title = match &self.value {
+            S3mInstrument::PcmInstrument(i) => i.title.as_str(),
+            S3mInstrument::OplInstrument(i) => i.title.as_str(),
+        };
+        if title.is_empty() {
+            &self.filename
+        } else {
+            title
+        }
+    }
+}
+
+impl crate::tracker::import::raw::RawModule for S3mModule {
+    fn raw_title(&self) -> &str {
+        &self.header.title
+    }
+
+    fn raw_message(&self) -> &str {
+        &self.message
+    }
+
+    fn raw_orders(&self) -> &[u8] {
+        // Read at exactly `header.order_count`, so already the song.
+        // Retains S3M's `0xFE` (marker) and `0xFF` (end) sentinels.
+        &self.positions
+    }
+
+    fn raw_pattern_count(&self) -> usize {
+        self.patterns.len()
+    }
+
+    fn raw_pattern(&self, idx: usize) -> Option<&[Vec<PatternSlot>]> {
+        self.patterns.get(idx).map(|p| p.as_slice())
+    }
+
+    fn raw_sample_count(&self) -> usize {
+        self.instruments.len()
+    }
+
+    fn raw_sample(&self, idx: usize) -> Option<crate::tracker::import::raw::RawSample<'_>> {
+        use crate::tracker::import::raw::{RawPcm, RawSample};
+
+        let meta = self.instruments.get(idx)?;
+        // OPL instruments are FM register sets with no PCM at all;
+        // they surface as a named slot with `RawPcm::Empty`.
+        let (loop_start, loop_end, c2spd) = match &meta.value {
+            S3mInstrument::PcmInstrument(i) => (i.loop_start, i.loop_end, i.c2spd),
+            // OPL instruments carry a c2spd too, though with no PCM
+            // for it to apply to.
+            S3mInstrument::OplInstrument(i) => (0, 0, i.c2spd),
+        };
+        Some(RawSample {
+            name: meta.raw_name(),
+            pcm: meta
+                .sample
+                .as_ref()
+                .map(RawPcm::from)
+                .unwrap_or(RawPcm::Empty),
+            loop_start,
+            // S3M stores an end offset, not a length. Saturating: a
+            // malformed `loop_end < loop_start` yields 0 rather than
+            // wrapping to 4 GB.
+            loop_length: loop_end.saturating_sub(loop_start),
+            sample_rate: Some(c2spd),
+        })
+    }
+
+    fn raw_initial_speed(&self) -> Option<u8> {
+        Some(self.header.speed)
+    }
+
+    fn raw_initial_bpm(&self) -> Option<u8> {
+        Some(self.header.tempo)
+    }
+
+    fn raw_tracker(&self) -> crate::tracker::import::raw::RawTracker<'_> {
+        crate::tracker::import::raw::RawTracker {
+            // S3M identifies its tool numerically: the high nibble of
+            // `version` is the tracker id (1 = ST3, 4 = OpenMPT, …),
+            // the low twelve bits its version. Left packed — decoding
+            // it is a decision for the caller, not for this layer.
+            tag: None,
+            version: Some(self.header.version),
+            compatible_with: None,
+        }
     }
 }

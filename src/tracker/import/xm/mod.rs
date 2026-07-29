@@ -31,7 +31,3 @@ pub mod xmsample;
 
 #[cfg(feature = "import_xm")]
 pub mod xi_instrument;
-#[cfg(feature = "import_xm")]
-pub mod xp_pattern;
-#[cfg(feature = "import_xm")]
-pub mod xt_track;
