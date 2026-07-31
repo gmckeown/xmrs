@@ -99,6 +99,12 @@ impl XiInstrument {
         let mut sample = vec![];
         let mut d3 = data_after_header;
         for _ in 0..num_samples {
+            // Same rule as the XM path: `num_samples` is file
+            // data, so stop at EOF instead of minting up to 65535
+            // zeroed headers from nothing (see `XmSample::load`).
+            if d3.is_empty() {
+                break;
+            }
             let (d, s) = XmSample::load(d3)?;
             sample.push(s);
             d3 = d;

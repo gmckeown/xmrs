@@ -14,6 +14,13 @@ use crate::tracker::import::bin_reader::{bytes_to_trimmed_string, BinReader, Imp
 
 pub const XMSAMPLE_HEADER_SIZE: usize = 40;
 
+/// Floor on the zero-padding [`XmSample::add_sample`] will
+/// synthesize for a sample whose declared length runs past EOF.
+/// The budget is otherwise relative (a pad may not exceed the
+/// bytes actually present); this keeps a small sample from being
+/// held to a proportionally tiny — and therefore useless — one.
+const MIN_TAIL_PAD: usize = 64 * 1024;
+
 /// On-disk XM sample header (40 bytes):
 /// `length:u32 loop_start:u32 loop_length:u32 volume:u8 finetune:i8
 ///  flags:u8 panning:u8 relative_pitch:i8 reserved:u8 name:[u8;22]`.
@@ -65,7 +72,33 @@ pub struct XmSample {
 }
 
 impl XmSample {
+    /// Parse one 40-byte sample header.
+    ///
+    /// A cut landing *inside* the header is tolerated the way FT2
+    /// tolerates it: FT2 reads the record over a pre-cleared
+    /// struct, so the bytes past the end read back as zeros — a
+    /// zeroed header is simply a zero-length, unlooped, unnamed
+    /// sample. Erroring here instead would reject a file FT2
+    /// plays, for a header whose every meaningful field we can
+    /// already infer.
+    ///
+    /// Callers MUST stop their sample loop on an empty `data`
+    /// rather than lean on an error from here: `num_samples` is a
+    /// `u16` read from the file, so a loop that kept going past
+    /// EOF would mint up to 65535 zeroed headers out of no input
+    /// at all. Tolerating a *partial* record is FT2 parity;
+    /// inventing whole records from nothing is an allocation
+    /// vector.
     pub fn load(data: &[u8]) -> Result<(&[u8], XmSample), ImportError> {
+        if data.len() < XMSAMPLE_HEADER_SIZE {
+            let mut padded = [0u8; XMSAMPLE_HEADER_SIZE];
+            padded[..data.len()].copy_from_slice(data);
+            let header = XmSampleHeader::read(&mut BinReader::new(&padded))?;
+            // Nothing left: the body loop that follows finds an
+            // empty slice and decodes an empty sample.
+            return Ok((&data[data.len()..], XmSample { header, data: None }));
+        }
+
         let mut r = BinReader::new(data);
         let header = XmSampleHeader::read(&mut r)?;
         let xms = XmSample { header, data: None };
@@ -82,25 +115,69 @@ impl XmSample {
 
     pub fn add_sample<'a>(&mut self, data: &'a [u8]) -> Result<&'a [u8], ImportError> {
         let data_len: usize = self.header.length as usize;
-        if data.len() < data_len {
-            return Err(ImportError::Other("Sample data too short"));
-        }
-        let slice = &data[..data_len];
+        let avail = data_len.min(data.len());
+        let missing = data_len - avail;
+
+        // Truncated tail. Crunchers (BoobieSqueezer and friends)
+        // and rippers drop the sample bytes past the loop end, so
+        // the last sample of a perfectly playable XM routinely
+        // runs past EOF. FT2 reads into a pre-zeroed buffer and
+        // ignores the short read, so it loads these files without
+        // a murmur; rejecting them here would be stricter than the
+        // format's own reference implementation — and stricter
+        // than our own MOD loader, which already tolerates exactly
+        // this (see `amiga_module.rs`).
+        //
+        // Rebuilding the declared length is what matters for a
+        // LOOPED sample: `to_sample` clamps the loop window to the
+        // bytes really present, so a loop whose end fell past the
+        // cut would come back shorter — a sustained note at the
+        // wrong pitch, not merely a sample that stops early.
+        // Padding keeps the loop period exact.
+        //
+        // The padding goes on the RAW DELTA bytes, before
+        // decoding: a zero delta holds the previous value, which
+        // is both what FT2 ends up playing and click-free —
+        // zero-filling the decoded PCM would jump to silence at
+        // the cut.
+        //
+        // Budget: `length` is a `u32` unconstrained by the file,
+        // so padding to it blindly turns a 100-byte input into a
+        // 4 GiB allocation. Two bounds keep the synthesized
+        // silence proportional to real input. Only the one sample
+        // straddling EOF pads at all — once past the end, later
+        // samples decode empty instead of each minting a tail of
+        // their own (audibly identical: an absent sample and a
+        // silent one both play nothing). And that pad may not
+        // exceed the bytes actually present, plus `MIN_TAIL_PAD`
+        // so a small sample is not held to a proportionally tiny
+        // budget. A shortfall past those is not a crunched tail
+        // but a corrupt header, and falls back to the plain clamp.
+        let pad = if avail == 0 || missing > avail + MIN_TAIL_PAD {
+            0
+        } else {
+            missing
+        };
+
+        let slice = &data[..avail];
+        let target_len = avail + pad;
 
         let d3 = if self.header.flags & 0b0001_0000 != 0 {
             // 16 bits data
-            let sample = u8_slice_to_vec_u16(slice);
+            let mut sample = u8_slice_to_vec_u16(slice);
+            sample.resize(target_len / 2, 0);
             let sample2 = delta16_to_sample(sample);
             SampleDataType::Mono16(sample2.into())
         } else {
             // 8 bits data
-            let sample = slice.to_vec();
+            let mut sample = slice.to_vec();
+            sample.resize(target_len, 0);
             let sample2 = delta8_to_sample(sample);
             SampleDataType::Mono8(sample2.into())
         };
         self.data = Some(d3);
 
-        Ok(&data[data_len..])
+        Ok(&data[avail..])
     }
 
     pub fn to_sample(&self) -> Sample {

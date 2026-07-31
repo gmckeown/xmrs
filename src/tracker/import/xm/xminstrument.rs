@@ -211,29 +211,58 @@ impl XmInstrument {
     pub fn load(data: &[u8]) -> Result<(&[u8], XmInstrument), ImportError> {
         let mut sample: Vec<XmSample> = vec![];
 
-        let mut r = BinReader::new(data);
         // instrument_header_len. Some files truncate before this
         // field — yield an empty record and don't advance.
-        let Ok(xmih_len_raw) = r.read_u32_le() else {
+        if data.len() < 4 {
             return Ok((data, XmInstrument::default()));
-        };
-        let xmih_len = xmih_len_raw as usize;
+        }
+        let xmih_len = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
 
         if xmih_len == 4 {
             // no data: just the length tag
             return Ok((&data[4..], XmInstrument::default()));
         }
 
+        // `instrument_header_len` is the record's true extent, and
+        // reading is confined to it. Two real cases need that:
+        //
+        //  * XM optimizers write *short* instrument records —
+        //    BoobieSqueezer's "Destroy Instrument" turns an unused
+        //    instrument into an 8-byte header, and its output is
+        //    plain XM that FT2 loads. Reading a full 25-byte
+        //    header there would take `num_samples` out of the NEXT
+        //    record and then parse that record as sample headers.
+        //  * a file cut mid-record stops early.
+        //
+        // Both are the same operation: read what the record
+        // actually holds, treat the rest as zeros. That is FT2's
+        // own behaviour — it reads into a pre-cleared struct and
+        // then seeks to `start + instrument_header_len`, so a
+        // short record leaves `num_samples` at 0 and yields an
+        // empty instrument. `.max(4)` keeps the walk moving
+        // forward on a nonsense length rather than re-reading the
+        // same bytes.
+        const FIXED_LEN: usize = 4 + XMINSTRUMENT_HEADER_SIZE + 4 + XMINSTRDEFAULT_SIZE;
+        let record_len = xmih_len.max(4).min(data.len());
+        let record = &data[..record_len];
+        let padded: Vec<u8>;
+        let view: &[u8] = if record.len() < FIXED_LEN {
+            let mut v = record.to_vec();
+            v.resize(FIXED_LEN, 0);
+            padded = v;
+            &padded
+        } else {
+            record
+        };
+
+        let mut r = BinReader::new(view);
+        let _length_tag: u32 = r.read_u32_le()?;
+
         // XmInstrumentHeader (immediately follows the length tag).
         let xmih = XmInstrumentHeader::read(&mut r)?;
 
         if xmih.num_samples == 0 {
-            if xmih_len > data.len() {
-                return Err(ImportError::OutOfRange(
-                    "XmInstrument.instrument_header_len overshoots input",
-                ));
-            }
-            let data = &data[xmih_len..];
+            let data = &data[record_len..];
             let xmi = XmInstrument {
                 instrument_header_len: 4 + XMINSTRUMENT_HEADER_SIZE as u32,
                 header: xmih,
@@ -249,18 +278,20 @@ impl XmInstrument {
         let _sample_header_size: u32 = r.read_u32_le()?;
         let xmid = Box::new(XmInstrDefault::read(&mut r)?);
 
-        // After the (variable-length) instrument header, sample
-        // headers and bodies are positioned at the offset declared
-        // by `instrument_header_len`. The previous implementation
-        // honoured that even when we had read fewer bytes than the
-        // declared length.
-        if xmih_len > data.len() {
-            return Err(ImportError::OutOfRange(
-                "XmInstrument.instrument_header_len overshoots input",
-            ));
-        }
-        let mut d3 = &data[xmih_len..];
+        // Sample headers and bodies begin where the instrument
+        // record ends — at the declared `instrument_header_len`,
+        // whatever we actually consumed above. Past EOF that
+        // offset is clamped, and the sample loop below then finds
+        // nothing and stops.
+        let mut d3 = &data[record_len..];
         for _ in 0..xmih.num_samples {
+            // `num_samples` comes from the file, so the loop must
+            // stop at EOF on its own — `XmSample::load` tolerates
+            // a *partial* header, but nothing may be minted out of
+            // zero remaining bytes.
+            if d3.is_empty() {
+                break;
+            }
             let (d, s) = XmSample::load(d3)?;
             sample.push(s);
             d3 = d;

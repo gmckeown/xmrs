@@ -405,6 +405,180 @@ mod tests {
         b
     }
 
+    /// An XM whose single 8-bit looped sample declares
+    /// `sample_len` bytes but stops after `present` — the shape a
+    /// cruncher leaves behind. The body is a run of `1` deltas, so
+    /// the decoded PCM is `1, 2, 3, …` and any padded tail shows
+    /// up as a hold on the last real value.
+    fn xm_truncated_sample(
+        sample_len: u32,
+        loop_start: u32,
+        loop_length: u32,
+        present: usize,
+    ) -> Vec<u8> {
+        let mut b = xm_bytes(0, 0, 4);
+        // instruments count: 60-byte preamble + song_length,
+        // restart, channels, patterns (2 bytes each).
+        b[72..74].copy_from_slice(&1u16.to_le_bytes());
+        b.extend_from_slice(&instr_full(0, sample_len, loop_start, loop_length, present));
+        b
+    }
+
+    /// One 248-byte instrument record (4 + 25 + 4 +
+    /// `XMINSTRDEFAULT_SIZE`) carrying a single 8-bit looped
+    /// sample, followed by `present` bytes of body.
+    fn instr_full(
+        name_byte: u8,
+        sample_len: u32,
+        loop_start: u32,
+        loop_length: u32,
+        present: usize,
+    ) -> Vec<u8> {
+        let mut b: Vec<u8> = Vec::new();
+        b.extend_from_slice(&248u32.to_le_bytes()); // instrument_header_len
+        b.extend_from_slice(&[name_byte; 22]); // name
+        b.push(0); // instr_type
+        b.extend_from_slice(&1u16.to_le_bytes()); // num_samples
+        b.extend_from_slice(&40u32.to_le_bytes()); // sample_header_size
+        b.extend_from_slice(&[0u8; 215]); // XmInstrDefault
+
+        // XmSampleHeader
+        b.extend_from_slice(&sample_len.to_le_bytes());
+        b.extend_from_slice(&loop_start.to_le_bytes());
+        b.extend_from_slice(&loop_length.to_le_bytes());
+        b.push(64); // volume
+        b.push(0); // finetune
+        b.push(1); // flags: forward loop, 8-bit
+        b.push(128); // panning
+        b.push(0); // relative_pitch
+        b.push(0); // reserved
+        b.extend_from_slice(&[0u8; 22]); // name
+
+        // Body, cut short.
+        b.extend_from_slice(&vec![1u8; present]);
+        b
+    }
+
+    fn pcm8(xm: &XmModule) -> Vec<i8> {
+        match xm.instrument[0].sample[0].to_sample().data {
+            Some(crate::core::sample::SampleDataType::Mono8(d)) => d.to_vec(),
+            _ => panic!("expected 8-bit PCM"),
+        }
+    }
+
+    #[test]
+    fn a_tail_cut_after_the_loop_end_still_loads() {
+        // 16 bytes declared, loop 4..12, file stops at 12: the
+        // loop is intact, only the one-shot tail is gone. FT2
+        // loads this; so must we.
+        let xm = XmModule::load(&xm_truncated_sample(16, 4, 8, 12)).unwrap();
+        let s = xm.instrument[0].sample[0].to_sample();
+        assert_eq!(s.loop_start, 4);
+        assert_eq!(s.loop_length, 8);
+
+        let pcm = pcm8(&xm);
+        assert_eq!(pcm.len(), 16, "declared length must be rebuilt");
+        assert_eq!(&pcm[..12], &(1..=12).collect::<Vec<i8>>()[..]);
+        // Padded tail holds the last real value — no click.
+        assert!(pcm[12..].iter().all(|&v| v == 12), "{:?}", pcm);
+    }
+
+    #[test]
+    fn a_tail_cut_inside_the_loop_keeps_the_loop_period() {
+        // 16 bytes declared, loop 4..14, file stops at 6. Without
+        // the pad, `to_sample` would shrink the loop to 4..6 and
+        // the sustained note would come out at the wrong pitch.
+        let xm = XmModule::load(&xm_truncated_sample(16, 4, 10, 6)).unwrap();
+        let s = xm.instrument[0].sample[0].to_sample();
+        assert_eq!(s.loop_start, 4);
+        assert_eq!(s.loop_length, 10, "loop period must survive the cut");
+
+        let pcm = pcm8(&xm);
+        assert_eq!(pcm.len(), 16);
+        assert_eq!(&pcm[..6], &[1, 2, 3, 4, 5, 6]);
+        assert!(pcm[6..].iter().all(|&v| v == 6), "{:?}", pcm);
+    }
+
+    /// Byte offsets inside `xm_truncated_sample`: a 60-byte
+    /// header, no order table (`header_size` = 20), then the
+    /// instrument record (248 bytes of fixed header) and its one
+    /// 40-byte sample header.
+    const INSTR_AT: usize = 80;
+    const SAMPLE_HDR_AT: usize = INSTR_AT + 248;
+
+    fn cut(mut b: Vec<u8>, at: usize) -> Vec<u8> {
+        b.truncate(at);
+        b
+    }
+
+    #[test]
+    fn an_eight_byte_destroyed_instrument_does_not_eat_the_next_one() {
+        // BoobieSqueezer's "Destroy Instrument" rewrites an unused
+        // instrument as an 8-byte header. FT2 loads the result, so
+        // the record's declared length — not a fixed 25-byte read
+        // — must bound the parse: otherwise `num_samples` is taken
+        // from the NEXT instrument's name bytes (0x4141 here) and
+        // that instrument is parsed as sample headers and lost.
+        let mut b = xm_bytes(0, 0, 4);
+        b[72..74].copy_from_slice(&2u16.to_le_bytes()); // 2 instruments
+        b.extend_from_slice(&[8, 0, 0, 0, 0xAA, 0xAA, 0xAA, 0xAA]); // destroyed
+        b.extend_from_slice(&instr_full(b'A', 8, 0, 0, 8)); // intact
+
+        let xm = XmModule::load(&b).unwrap();
+        assert_eq!(xm.instrument.len(), 2);
+        assert!(xm.instrument[0].sample.is_empty(), "stub must stay empty");
+        assert_eq!(xm.instrument[1].sample.len(), 1, "second must survive");
+        assert_eq!(
+            xm.instrument[1].sample[0].to_sample().data.unwrap().len(),
+            8
+        );
+    }
+
+    #[test]
+    fn a_cut_inside_a_sample_header_still_loads() {
+        // The 40-byte sample header itself is severed halfway.
+        // FT2 reads the missing half as zeros; so do we.
+        let b = cut(xm_truncated_sample(16, 4, 8, 16), SAMPLE_HDR_AT + 20);
+        let xm = XmModule::load(&b).unwrap();
+        assert_eq!(xm.instrument.len(), 1);
+        assert_eq!(xm.instrument[0].sample.len(), 1);
+        // Nothing was left for a body, and nothing is minted from
+        // zero bytes — the sample is simply empty.
+        assert!(xm.instrument[0].sample[0].is_empty());
+    }
+
+    #[test]
+    fn a_cut_inside_the_instrument_header_still_loads() {
+        // Ten bytes into the instrument record: past the length
+        // tag, inside the name. A zeroed remainder means
+        // `num_samples == 0`, i.e. an empty instrument.
+        let b = cut(xm_truncated_sample(16, 4, 8, 16), INSTR_AT + 10);
+        let xm = XmModule::load(&b).unwrap();
+        assert_eq!(xm.instrument.len(), 1);
+        assert!(xm.instrument[0].sample.is_empty());
+    }
+
+    #[test]
+    fn sample_headers_are_never_minted_past_eof() {
+        // `num_samples` is file data: 64 declared, file ends right
+        // after the instrument header. Tolerating a *partial*
+        // record is FT2 parity; conjuring 64 whole ones out of
+        // zero remaining bytes is an allocation vector.
+        let mut b = xm_truncated_sample(16, 4, 8, 16);
+        b[INSTR_AT + 27..INSTR_AT + 29].copy_from_slice(&64u16.to_le_bytes());
+        let xm = XmModule::load(&cut(b, SAMPLE_HDR_AT)).unwrap();
+        assert!(xm.instrument[0].sample.is_empty());
+    }
+
+    #[test]
+    fn an_implausible_declared_length_is_clamped_not_allocated() {
+        // 2 GiB declared out of 8 bytes present: a corrupt header,
+        // not a crunched tail. The pad budget refuses it and we
+        // keep what is there rather than minting the difference.
+        let xm = XmModule::load(&xm_truncated_sample(0x8000_0000, 0, 0, 8)).unwrap();
+        assert_eq!(pcm8(&xm).len(), 8);
+    }
+
     #[test]
     fn patterns_longer_than_256_rows_load() {
         // FT2 stops at 256 rows, other trackers do not, and their
