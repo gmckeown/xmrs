@@ -335,9 +335,9 @@ dependencies = [
 
 [[package]]
 name = "sidera"
-version = "1.1.0"
+version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4d4c1c386a7bc7db85473243515f33e3cf14836c93c11f52ed1dd20b51e01f90"
+checksum = "b043512b891bdb03ad21b0205723dabb88ada23e3043c21f6a7f88b26defba35"
 
 [[package]]
 name = "strsim"
@@ -417,7 +417,7 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "xmrs"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "ciborium",
  "clap",

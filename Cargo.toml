@@ -1,6 +1,6 @@
 [package]
 name = "xmrs"
-version = "0.15.0"
+version = "0.15.1"
 edition = "2021"
 # Verified by building the full feature set on this toolchain. The binding
 # constraint is `is_multiple_of` on the integer primitives (1.87), used by the

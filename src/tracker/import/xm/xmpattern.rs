@@ -11,6 +11,11 @@ use alloc::{vec, vec::Vec};
 use crate::tracker::import::bin_reader::{BinReader, ImportError};
 use crate::tracker::import::patternslot::PatternSlot;
 
+/// Largest row count accepted for one pattern. FT2 stops at 256;
+/// this is OpenMPT's `MAX_PATTERN_ROWS`, i.e. the widest value any
+/// mainstream player will read back.
+pub(crate) const XM_MAX_PATTERN_ROWS: u16 = 4096;
+
 #[derive(Debug, Clone)]
 pub struct XmPatternHeader {
     pattern_header_len: u32,
@@ -44,16 +49,25 @@ impl XmPatternHeader {
         let packing_type = r.read_u8()?;
         let num_rows = r.read_u16_le()?;
         let pattern_data_size = r.read_u16_le()?;
-        // XM patterns are hard-limited to 256 rows (FT2 / OpenMPT).
-        // `num_rows` is `u16` on disk; an out-of-range value drives
-        // the empty-row padding in `get_slots` (which pads up to
-        // `num_rows` rows of `number_of_channels` slots) into an
-        // unbounded allocation. >256 is definitionally corrupt.
-        if num_rows > 256 {
-            return Err(ImportError::OutOfRange(
-                "XmPatternHeader: num_rows exceeds XM maximum of 256",
-            ));
-        }
+        // FT2 itself never writes more than 256 rows, but the XM
+        // field is a `u16` and several trackers (the ModPlug /
+        // OpenMPT lineage) do write longer patterns — those files
+        // play everywhere except in FT2, so rejecting them loses
+        // real music. OpenMPT clamps instead of rejecting
+        // (`Load_xm.cpp:263`, `MAX_PATTERN_ROWS`); do the same.
+        // The clamp still bounds the empty-row padding in
+        // `get_slots` (which pads up to `num_rows` rows of
+        // `number_of_channels` slots) — and `XmModule::load` adds a
+        // whole-module slot budget on top, because a declared row
+        // count costs only 9 header bytes in the file.
+        let num_rows = num_rows.min(XM_MAX_PATTERN_ROWS);
+        // FT2 has no zero-row pattern: one that declares 0 rows is
+        // loaded as an empty 64-row pattern (ft2-clone
+        // `ft2_load_xm.c:481` gives *any* empty pattern 64 rows;
+        // OpenMPT `Load_xm.cpp:261` does it for the 0 case).
+        // Keeping 0 gives the player a pattern it steps through in
+        // no time at all — an audible skip where FT2 plays a bar.
+        let num_rows = if num_rows == 0 { 64 } else { num_rows };
         let xmph = XmPatternHeader {
             pattern_header_len,
             packing_type,

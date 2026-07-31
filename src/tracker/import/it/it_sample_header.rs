@@ -256,28 +256,53 @@ impl ItSampleHeader {
         self.convert_flags & 0b0010_0000 != 0
     }
 
+    /// ModPlug 4-bit ADPCM: signalled by the whole `convert_flags`
+    /// byte being `0xFF` on an uncompressed 8-bit mono sample —
+    /// a sentinel value, not a combination of the bits above
+    /// (OpenMPT `ITTools.cpp:611`).
+    pub fn is_adpcm(&self) -> bool {
+        self.convert_flags == 0xFF
+            && !self.is_compressed()
+            && !self.is_16bits()
+            && !self.is_stereo()
+    }
+
+    /// IT 2.14 / 2.15 compressed sample data.
+    ///
+    /// A stereo compressed sample is **two independent block
+    /// streams** laid end to end: the left channel is unpacked to
+    /// completion, then the right one starts with a fresh block
+    /// header and fresh integrators (schism `csndfile.c:1267`
+    /// calls the decompressor twice; OpenMPT
+    /// `ITCompression.cpp:322` loops over channels). Decoding the
+    /// pair as one `2 * length` stream only happens to work while
+    /// every block boundary falls where the encoder put it — so
+    /// unpack per channel and hand the split layout (left block
+    /// then right block) to `convert_*_sample`, which interleaves
+    /// it.
     fn get_sample_data_from_compressed_values(
         &self,
         data: &[u8],
     ) -> Result<SampleDataType, ImportError> {
+        let sample_len = self.sample_length as usize;
         let dst = if self.is_16bits() {
             if self.is_stereo() {
-                let sample_len = 2 * self.sample_length as usize;
-                let output = self.it_unpack_16bit(data, sample_len)?;
+                let (mut output, rest) = self.it_unpack_16bit(data, sample_len);
+                let (right, _) = self.it_unpack_16bit(rest, sample_len);
+                output.extend_from_slice(&right);
                 SampleDataType::Stereo16(self.convert_16bit_sample(output.as_slice()).into())
             } else {
-                let sample_len = self.sample_length as usize;
-                let output = self.it_unpack_16bit(data, sample_len)?;
+                let (output, _) = self.it_unpack_16bit(data, sample_len);
                 SampleDataType::Mono16(self.convert_16bit_sample(output.as_slice()).into())
             }
         } else {
             if self.is_stereo() {
-                let sample_len = 2 * self.sample_length as usize;
-                let output = self.it_unpack_8bit(data, sample_len)?;
+                let (mut output, rest) = self.it_unpack_8bit(data, sample_len);
+                let (right, _) = self.it_unpack_8bit(rest, sample_len);
+                output.extend_from_slice(&right);
                 SampleDataType::Stereo8(self.convert_8bit_sample(output.as_slice()).into())
             } else {
-                let sample_len = self.sample_length as usize;
-                let output = self.it_unpack_8bit(data, sample_len)?;
+                let (output, _) = self.it_unpack_8bit(data, sample_len);
                 SampleDataType::Mono8(self.convert_8bit_sample(output.as_slice()).into())
             }
         };
@@ -348,6 +373,15 @@ impl ItSampleHeader {
             return self.get_sample_data_from_compressed_values(data);
         }
 
+        if self.is_adpcm() {
+            // `convert_flags == 0xFF` on an uncompressed 8-bit mono
+            // sample is not a bit field at all: it is ModPlug's
+            // marker for 4-bit ADPCM. It has to be tested before
+            // the bit-wise flags below, which would otherwise read
+            // it as "byte-delta + 12-bit + …" and reject the file.
+            return Ok(self.get_sample_data_from_adpcm(data));
+        }
+
         if self.is_byte_delta_encoded() {
             // PTM byte-delta. Schism only supports the 16-bit-
             // mono form (`csndfile.c:1281`, `SF(16,M,LE,PTM)`);
@@ -370,6 +404,40 @@ impl ItSampleHeader {
         }
 
         self.get_sample_data_from_values(data)
+    }
+
+    /// ModPlug 4-bit ADPCM decoder (see [`Self::is_adpcm`]).
+    /// Layout: a 16-entry table of signed deltas, then one nibble
+    /// per sample — low nibble first — each nibble indexing the
+    /// table into a wrapping signed 8-bit integrator. Reference:
+    /// OpenMPT `SampleIO.cpp:142`.
+    ///
+    /// Nothing here can fail the way a bit-packed stream can: a
+    /// short payload simply leaves the tail of the sample silent,
+    /// which is what OpenMPT ends up with too (it clamps its read
+    /// length to the bytes left and never touches the rest of the
+    /// zeroed buffer).
+    fn get_sample_data_from_adpcm(&self, data: &[u8]) -> SampleDataType {
+        let frame_count = self.sample_length as usize;
+        let mut out: Vec<i8> = Vec::with_capacity(frame_count.min(data.len().saturating_mul(2)));
+        if data.len() >= 16 {
+            let (table, packed) = data.split_at(16);
+            let mut delta: i8 = 0;
+            for &byte in packed.iter().take(frame_count.div_ceil(2)) {
+                delta = delta.wrapping_add(table[(byte & 0x0F) as usize] as i8);
+                out.push(delta);
+                if out.len() == frame_count {
+                    break;
+                }
+                delta = delta.wrapping_add(table[(byte >> 4) as usize] as i8);
+                out.push(delta);
+                if out.len() == frame_count {
+                    break;
+                }
+            }
+        }
+        out.resize(frame_count, 0);
+        SampleDataType::Mono8(out.into())
     }
 
     /// PTM byte-delta decoder (IT `convert_flags` bit 3, schism
@@ -546,56 +614,65 @@ impl ItSampleHeader {
         dst
     }
 
-    fn it_unpack_8bit(&self, input: &[u8], output_len: usize) -> Result<Vec<i8>, ImportError> {
-        let mut output = Vec::new();
+    /// Unpack one IT-compressed 8-bit stream of `output_len`
+    /// samples; returns the decoded samples and the input left
+    /// over (the next channel's stream, for a stereo sample).
+    ///
+    /// Two properties of the format drive the loop shape:
+    ///
+    /// * a block decodes a **fixed sample count** — `min(0x8000,
+    ///   samples still owed)` — not "as many samples as its bits
+    ///   happen to yield". The trailing bits of a block's last byte
+    ///   are padding, and reading them as one more value both
+    ///   invents a sample and shifts everything after it.
+    /// * running out of bits, or landing on an illegal bit width,
+    ///   ends *that block*, not the file. Both reference decoders
+    ///   are tolerant here (OpenMPT `ITCompression.cpp:337` catches
+    ///   its reader's eof per block, schism `compression.c:101`
+    ///   abandons the sample and keeps what it decoded), and real
+    ///   archives contain truncated samples in otherwise perfectly
+    ///   playable modules. Whatever is missing stays silent.
+    fn it_unpack_8bit<'a>(&self, input: &'a [u8], output_len: usize) -> (Vec<i8>, &'a [u8]) {
+        let mut output: Vec<i8> = Vec::new();
         let mut p_src = input;
         while output.len() < output_len {
             if p_src.len() < 2 {
-                return Err(ImportError::Other("IT sample decoder bit budget exceeded"));
+                break;
             }
 
             let block_len = u16::from_le_bytes([p_src[0], p_src[1]]) as usize;
             p_src = &p_src[2..];
+            // A block announcing more bytes than remain is a
+            // truncated tail: decode what is there.
+            let avail = block_len.min(p_src.len());
+            let mut bit_reader = BitReader::new(&p_src[..avail]);
+            p_src = &p_src[avail..];
+
+            let block_samples = (output_len - output.len()).min(0x8000);
             let mut block_output_len = 0;
             let mut left: u8 = 9;
             let mut temp: u8 = 0;
             let mut temp2: u8 = 0;
 
-            if p_src.len() < block_len {
-                return Err(ImportError::Other("IT sample decoder bit budget exceeded"));
-            }
-
-            let mut bit_reader = BitReader::new(&p_src[..block_len]);
-            p_src = &p_src[block_len..];
-
-            loop {
-                if bit_reader.is_empty() {
-                    // first exit case: no more input data
+            while block_output_len < block_samples {
+                if left > 9 {
+                    // Illegal bit width: this block is unusable.
                     break;
                 }
 
-                if block_output_len == 0x8000 {
-                    // second exit case: maximum block size
+                let Some(read) = bit_reader.read_bits(left) else {
+                    // Out of bits mid-value: end of this block.
                     break;
-                }
-
-                if output.len() >= output_len {
-                    // last exit case: we have all output data
-                    break;
-                }
-
-                let mut bits: u16 = bit_reader
-                    .read_bits(left)
-                    .ok_or(ImportError::Other("IT sample decoder bit budget exceeded"))?
-                    as u16;
+                };
+                let mut bits: u16 = read as u16;
 
                 if (1..7).contains(&left) {
                     // Type A
                     if 1_u16 << (left - 1) == bits {
-                        bits = bit_reader
-                            .read_bits(3)
-                            .ok_or(ImportError::Other("IT sample decoder bit budget exceeded"))?
-                            as u16;
+                        let Some(read) = bit_reader.read_bits(3) else {
+                            break;
+                        };
+                        bits = read as u16;
                         left = if bits as u8 + 1 < left {
                             bits as u8 + 1
                         } else {
@@ -616,11 +693,8 @@ impl ItSampleHeader {
                         };
                         continue;
                     }
-                } else if left >= 10 {
-                    output.push(0);
-                    block_output_len += 1;
-                    continue;
                 } else if bits >= 256 {
+                    // Type C, width 9: bit 8 set announces a new width
                     left = (bits + 1) as u8;
                     continue;
                 }
@@ -646,57 +720,52 @@ impl ItSampleHeader {
             }
         }
 
-        Ok(output)
+        // Samples no block delivered stay silent.
+        output.resize(output_len, 0);
+        (output, p_src)
     }
 
-    fn it_unpack_16bit(&self, input: &[u8], output_len: usize) -> Result<Vec<i16>, ImportError> {
-        let mut output = Vec::new();
+    /// 16-bit twin of [`Self::it_unpack_8bit`] — same block
+    /// discipline, 0x4000 samples per block (still 0x8000 bytes)
+    /// and a 17-bit starting width.
+    fn it_unpack_16bit<'a>(&self, input: &'a [u8], output_len: usize) -> (Vec<i16>, &'a [u8]) {
+        let mut output: Vec<i16> = Vec::new();
         let mut p_src = input;
         while output.len() < output_len {
             if p_src.len() < 2 {
-                return Err(ImportError::Other("IT sample decoder bit budget exceeded"));
+                break;
             }
 
             let block_len = u16::from_le_bytes([p_src[0], p_src[1]]) as usize;
             p_src = &p_src[2..];
+            let avail = block_len.min(p_src.len());
+            let mut bit_reader = BitReader::new(&p_src[..avail]);
+            p_src = &p_src[avail..];
+
+            let block_samples = (output_len - output.len()).min(0x4000);
             let mut block_output_len = 0;
             let mut left: u8 = 17;
             let mut temp: i16 = 0;
             let mut temp2: i16 = 0;
 
-            if p_src.len() < block_len {
-                return Err(ImportError::Other("IT sample decoder bit budget exceeded"));
-            }
-
-            let mut bit_reader = BitReader::new(&p_src[..block_len]);
-            p_src = &p_src[block_len..];
-
-            loop {
-                if bit_reader.is_empty() {
-                    // first exit case: no more input data
+            while block_output_len < block_samples {
+                if left > 17 {
+                    // Illegal bit width: this block is unusable.
                     break;
                 }
 
-                if block_output_len == 0x4000 {
-                    // second exit case: maximum block size
+                let Some(mut bits) = bit_reader.read_bits(left) else {
+                    // Out of bits mid-value: end of this block.
                     break;
-                }
-
-                if output.len() >= output_len {
-                    // last exit case: we have all output data
-                    break;
-                }
-
-                let mut bits = bit_reader
-                    .read_bits(left)
-                    .ok_or(ImportError::Other("IT sample decoder bit budget exceeded"))?;
+                };
 
                 if (1..7).contains(&left) {
                     // Type A
                     if 1_u32 << (left - 1) == bits {
-                        bits = bit_reader
-                            .read_bits(4)
-                            .ok_or(ImportError::Other("IT sample decoder bit budget exceeded"))?;
+                        let Some(read) = bit_reader.read_bits(4) else {
+                            break;
+                        };
+                        bits = read;
                         left = if bits as u8 + 1 < left {
                             bits as u8 + 1
                         } else {
@@ -717,11 +786,8 @@ impl ItSampleHeader {
                         };
                         continue;
                     }
-                } else if left >= 18 {
-                    output.push(0);
-                    block_output_len += 1;
-                    continue;
                 } else if bits >= 0x10000 {
+                    // Type C, width 17: bit 16 set announces a new width
                     left = (bits + 1) as u8;
                     continue;
                 }
@@ -747,7 +813,9 @@ impl ItSampleHeader {
             }
         }
 
-        Ok(output)
+        // Samples no block delivered stay silent.
+        output.resize(output_len, 0);
+        (output, p_src)
     }
 
     fn c5_speed_to_finetune(&self) -> (i8, Finetune) {
@@ -908,5 +976,87 @@ impl ItSampleHeader {
             depth: PitchDelta::from_ratio(self.vibrato_depth as i16, 64),
             sweep: xmrs_sweep,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 8-bit mono sample header with the given flags / convert flags.
+    fn header(flags: u8, convert_flags: u8, sample_length: u32) -> ItSampleHeader {
+        ItSampleHeader {
+            flags,
+            convert_flags,
+            sample_length,
+            ..Default::default()
+        }
+    }
+
+    fn mono8(d: &SampleDataType) -> Vec<i8> {
+        match d {
+            SampleDataType::Mono8(v) => v.to_vec(),
+            other => panic!("expected Mono8, got {:?}", core::mem::discriminant(other)),
+        }
+    }
+
+    #[test]
+    fn adpcm_marker_is_not_read_as_a_bit_field() {
+        // cvt == 0xFF on an uncompressed 8-bit mono sample means
+        // ModPlug ADPCM. Read bit by bit it would say "byte-delta",
+        // which used to reject the whole module.
+        let h = header(0x01, 0xFF, 5);
+        assert!(h.is_adpcm());
+
+        let mut data = vec![0u8; 16];
+        data[1] = 10; // table[1] = +10
+        data[2] = 0xFB; // table[2] = -5
+                        // nibbles, low first: 1, 2, 1, 1, 2 → +10 −5 +10 +10 −5
+        data.extend_from_slice(&[0x21, 0x11, 0x02]);
+        assert_eq!(
+            mono8(&h.get_sample_data(&data).unwrap()),
+            [10, 5, 15, 25, 20]
+        );
+    }
+
+    #[test]
+    fn adpcm_without_its_table_is_silence_not_an_error() {
+        let h = header(0x01, 0xFF, 4);
+        assert_eq!(mono8(&h.get_sample_data(&[0u8; 3]).unwrap()), [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn adpcm_marker_needs_an_uncompressed_8bit_mono_sample() {
+        // Same cvt byte on a compressed / 16-bit / stereo sample is
+        // an ordinary bit field again.
+        assert!(!header(0x0B, 0xFF, 4).is_adpcm()); // compressed
+        assert!(!header(0x03, 0xFF, 4).is_adpcm()); // 16-bit
+        assert!(!header(0x05, 0xFF, 4).is_adpcm()); // stereo
+    }
+
+    #[test]
+    fn truncated_compressed_sample_keeps_what_it_decoded() {
+        // A block header announcing 0x4000 bytes with three bytes
+        // behind it: the reference decoders keep the samples the
+        // available bits yield and leave the rest silent. Rejecting
+        // the file instead loses a module that plays everywhere else.
+        // cvt 0x05 = signed + IT215, what every compressed sample
+        // carries in practice.
+        let h = header(0x09, 0x05, 64);
+        let mut data = vec![0x00, 0x40];
+        data.extend_from_slice(&[0x12, 0x34, 0x56]);
+        let decoded = mono8(&h.get_sample_data(&data).unwrap());
+        assert_eq!(decoded.len(), 64);
+        // Three bytes cannot feed 64 samples of 9-bit-wide values;
+        // whatever they do not reach stays silent instead of
+        // failing the load.
+        assert!(decoded[32..].iter().all(|&v| v == 0));
+    }
+
+    #[test]
+    fn compressed_sample_with_no_data_at_all_is_silence() {
+        let h = header(0x09, 0x05, 32);
+        let decoded = mono8(&h.get_sample_data(&[]).unwrap());
+        assert_eq!(decoded, vec![0i8; 32]);
     }
 }

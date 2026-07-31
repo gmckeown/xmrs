@@ -46,9 +46,26 @@ impl XmModule {
         let mut data = data_after_header;
 
         // Create patterns from xm
+        //
+        // Whole-module allocation budget: a pattern's row count is
+        // declared in a 9-byte header, so a few KB of input can ask
+        // for 256 patterns of `XM_MAX_PATTERN_ROWS` rows each and
+        // turn the empty-row padding into gigabytes of
+        // `PatternSlot` (OOM DoS). Cap the module at the slot
+        // envelope of a maximal *format-conformant* file — 256
+        // patterns x 256 rows x 64 channels — which no genuine
+        // module reaches, whatever the shape of its patterns.
+        const MAX_TOTAL_SLOTS: usize = 256 * 256 * 64;
+        let mut total_slots: usize = 0;
         let mut pattern: Vec<XmPattern> = vec![];
         for _i in 0..header.number_of_patterns {
             let (d2, xmp) = XmPattern::load(data, header.number_of_channels)?;
+            total_slots += xmp.pattern.len() * header.number_of_channels as usize;
+            if total_slots > MAX_TOTAL_SLOTS {
+                return Err(ImportError::OutOfRange(
+                    "XmModule: total pattern rows exceed the XM allocation budget",
+                ));
+            }
             cursor += data.len() - d2.len();
             data = d2;
             pattern.push(xmp);
@@ -354,5 +371,67 @@ impl crate::tracker::import::raw::RawModule for XmModule {
 
     fn raw_instrument_name(&self, idx: usize) -> Option<&str> {
         self.instrument.get(idx).map(|i| i.header.name.as_str())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Smallest XM that parses: a header, then `patterns` empty
+    /// pattern headers declaring `rows` rows each.
+    fn xm_bytes(patterns: u16, rows: u16, channels: u16) -> Vec<u8> {
+        let mut b: Vec<u8> = Vec::new();
+        b.extend_from_slice(b"Extended Module: ");
+        b.extend_from_slice(&[b' '; 20]); // module name
+        b.push(0x1a);
+        b.extend_from_slice(&[b' '; 20]); // tracker name
+        b.extend_from_slice(&0x0104u16.to_le_bytes());
+        b.extend_from_slice(&20u32.to_le_bytes()); // header_size
+        b.extend_from_slice(&0u16.to_le_bytes()); // song_length
+        b.extend_from_slice(&0u16.to_le_bytes()); // restart_position
+        b.extend_from_slice(&channels.to_le_bytes());
+        b.extend_from_slice(&patterns.to_le_bytes());
+        b.extend_from_slice(&0u16.to_le_bytes()); // instruments
+        b.extend_from_slice(&1u16.to_le_bytes()); // linear frequencies
+        b.extend_from_slice(&6u16.to_le_bytes()); // tempo
+        b.extend_from_slice(&125u16.to_le_bytes()); // bpm
+        for _ in 0..patterns {
+            b.extend_from_slice(&9u32.to_le_bytes()); // pattern_header_len
+            b.push(0); // packing type
+            b.extend_from_slice(&rows.to_le_bytes());
+            b.extend_from_slice(&0u16.to_le_bytes()); // empty body
+        }
+        b
+    }
+
+    #[test]
+    fn patterns_longer_than_256_rows_load() {
+        // FT2 stops at 256 rows, other trackers do not, and their
+        // files play everywhere else — so they must load here too.
+        let xm = XmModule::load(&xm_bytes(1, 1024, 8)).unwrap();
+        assert_eq!(xm.pattern[0].pattern.len(), 1024);
+        assert_eq!(xm.pattern[0].pattern[1023].len(), 8);
+    }
+
+    #[test]
+    fn row_count_past_the_ceiling_is_clamped_not_rejected() {
+        let xm = XmModule::load(&xm_bytes(1, 5000, 4)).unwrap();
+        assert_eq!(xm.pattern[0].pattern.len(), 4096);
+    }
+
+    #[test]
+    fn a_zero_row_pattern_is_the_64_row_pattern_ft2_loads() {
+        let xm = XmModule::load(&xm_bytes(1, 0, 4)).unwrap();
+        assert_eq!(xm.pattern[0].pattern.len(), 64);
+    }
+
+    #[test]
+    fn declared_rows_cannot_outgrow_the_module_budget() {
+        // 32 x 4096 rows x 64 channels asks for ~8M slots out of a
+        // few hundred header bytes: the padding, not the file, is
+        // what allocates.
+        let err = XmModule::load(&xm_bytes(32, 4096, 64)).unwrap_err();
+        assert!(matches!(err, ImportError::OutOfRange(_)), "{:?}", err);
     }
 }
