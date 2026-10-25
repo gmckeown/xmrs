@@ -1027,7 +1027,9 @@ impl<'a> TfmxSimulator<'a> {
             // Per-tick envelope update
             let v = &mut self.voices[v_idx];
             if v.env_reset > 0 && !v.triggered_this_tick {
-                if v.env_time <= 1 {
+                if v.env_time > 0 {
+                    v.env_time -= 1;
+                } else {
                     v.env_time = v.env_reset;
                     match v.cur_vol.cmp(&v.env_end_vol) {
                         Ordering::Less => v.cur_vol = (v.cur_vol + v.env_rate).min(v.env_end_vol),
@@ -1037,8 +1039,6 @@ impl<'a> TfmxSimulator<'a> {
                     if v.cur_vol == v.env_end_vol {
                         v.env_reset = 0;
                     }
-                } else {
-                    v.env_time -= 1;
                 }
             }
 
