@@ -148,3 +148,6 @@ pub mod sid;
 /// as `import_sid`.
 #[cfg(feature = "import_dw")]
 pub mod dw;
+
+/// Load Chris Hülsbeck / Jochen Hippel TFMX modules (`mdat.*` / `smpl.*` or `.tfx` / `.sam`).
+pub mod tfmx;
