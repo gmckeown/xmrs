@@ -295,8 +295,15 @@ impl<'a> TfmxSimulator<'a> {
 
     #[inline]
     pub fn tick_rate_hz(&self) -> f64 {
-        let e_clocks = (14318 + ((self.speed_finetune as i32) << 7)).max(4096);
-        50.0 * 14318.0 / (e_clocks as f64)
+        if self.is_7v {
+            // In 7-voice TFMX, the sequencer is clocked by the Paula Channel 3 audio buffer interrupt (AUD3INT).
+            // Channel 3 loops through a 328-byte buffer (164 words) at AUD3PER = 179:
+            // 3546895.0 / (164 * 2 * 179) = 3546895.0 / 58712.0 ≈ 60.4172 Hz.
+            3546895.0 / 58712.0
+        } else {
+            let e_clocks = (14318 + ((self.speed_finetune as i32) << 7)).max(4096);
+            50.0 * 14318.0 / (e_clocks as f64)
+        }
     }
 
     fn start_dma_event(&mut self, v_idx: usize) {
