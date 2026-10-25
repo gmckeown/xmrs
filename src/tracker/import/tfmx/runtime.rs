@@ -296,10 +296,14 @@ impl<'a> TfmxSimulator<'a> {
     #[inline]
     pub fn tick_rate_hz(&self) -> f64 {
         if self.is_7v {
-            // In 7-voice TFMX, the sequencer is clocked by the Paula Channel 3 audio buffer interrupt (AUD3INT).
-            // Channel 3 loops through a 328-byte buffer (164 words) at AUD3PER = 179:
-            // 3546895.0 / (164 * 2 * 179) = 3546895.0 / 58712.0 ≈ 60.4172 Hz.
-            3546895.0 / 58712.0
+            // In 7-voice TFMX, Paula Channel 3 streams the software-mixed audio buffer.
+            // AUD3PER is fixed at 179. The buffer length in 16-bit words is:
+            // len_words = 200 + 2 * speed_finetune (clamped >= -32).
+            // Each word is 2 bytes/samples, each sample lasts 179 Paula PAL color clocks.
+            // cycles_per_tick = len_words * 2 * 179 = len_words * 358.
+            let x = (self.speed_finetune as i32).max(-32);
+            let len_words = 200 + 2 * x;
+            3546895.0 / (len_words as f64 * 358.0)
         } else {
             let e_clocks = (14318 + ((self.speed_finetune as i32) << 7)).max(4096);
             50.0 * 14318.0 / (e_clocks as f64)
