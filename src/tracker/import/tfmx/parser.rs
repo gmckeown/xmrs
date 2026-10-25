@@ -2,7 +2,7 @@
 
 //! TFMX binary parser for `mdat.*` (or `.tfx`) and `smpl.*` (or `.sam`).
 
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use super::header::{
@@ -11,7 +11,7 @@ use super::header::{
 };
 use crate::tracker::import::bin_reader::ImportError;
 
-/// Binary reader helper for big-endian TFMX data streams.
+/// Binary reader helper for TFMX data streams.
 pub struct TfmxReader<'a> {
     data: &'a [u8],
 }
@@ -33,32 +33,27 @@ impl<'a> TfmxReader<'a> {
     }
 
     #[inline]
+    pub fn slice(&self, offset: usize, len: usize) -> Result<&'a [u8], ImportError> {
+        let end = offset.checked_add(len).ok_or(ImportError::UnexpectedEof)?;
+        self.data.get(offset..end).ok_or(ImportError::UnexpectedEof)
+    }
+
+    #[inline]
     pub fn u16_be(&self, offset: usize) -> Result<u16, ImportError> {
-        if offset + 2 > self.data.len() {
-            return Err(ImportError::UnexpectedEof);
-        }
-        Ok(u16::from_be_bytes([self.data[offset], self.data[offset + 1]]))
+        let bytes: [u8; 2] = self.slice(offset, 2)?.try_into().unwrap();
+        Ok(u16::from_be_bytes(bytes))
     }
 
     #[inline]
     pub fn u32_be(&self, offset: usize) -> Result<u32, ImportError> {
-        if offset + 4 > self.data.len() {
-            return Err(ImportError::UnexpectedEof);
-        }
-        Ok(u32::from_be_bytes([
-            self.data[offset],
-            self.data[offset + 1],
-            self.data[offset + 2],
-            self.data[offset + 3],
-        ]))
+        let bytes: [u8; 4] = self.slice(offset, 4)?.try_into().unwrap();
+        Ok(u32::from_be_bytes(bytes))
     }
 
     #[inline]
-    pub fn slice(&self, offset: usize, len: usize) -> Result<&'a [u8], ImportError> {
-        if offset + len > self.data.len() {
-            return Err(ImportError::UnexpectedEof);
-        }
-        Ok(&self.data[offset..offset + len])
+    pub fn u32_le(&self, offset: usize) -> Result<u32, ImportError> {
+        let bytes: [u8; 4] = self.slice(offset, 4)?.try_into().unwrap();
+        Ok(u32::from_le_bytes(bytes))
     }
 }
 
@@ -66,14 +61,16 @@ impl TfmxModule {
     /// Ingests a paired TFMX module from `mdat` and `smpl` byte slices,
     /// or automatically unpacks single-file containers (TFHD, TFMX-MOD).
     pub fn parse(mdat: &[u8], smpl: &[u8]) -> Result<Self, ImportError> {
+        let reader = TfmxReader::new(mdat);
+
         // Transparent single-file container unpacking: TFHD
         if mdat.starts_with(MAGIC_TFHD) {
             if mdat.len() < 18 {
                 return Err(ImportError::UnexpectedEof);
             }
-            let mdat_off = u32::from_be_bytes([mdat[4], mdat[5], mdat[6], mdat[7]]) as usize;
-            let mdat_len = u32::from_be_bytes([mdat[10], mdat[11], mdat[12], mdat[13]]) as usize;
-            let smpl_off = mdat_off + mdat_len;
+            let mdat_off = reader.u32_be(4)? as usize;
+            let mdat_len = reader.u32_be(10)? as usize;
+            let smpl_off = mdat_off.checked_add(mdat_len).ok_or(ImportError::OutOfRange("TFHD header offsets"))?;
             if mdat_off < 14 || smpl_off > mdat.len() {
                 return Err(ImportError::OutOfRange("TFHD header offsets"));
             }
@@ -85,7 +82,7 @@ impl TfmxModule {
             if mdat.len() < 20 {
                 return Err(ImportError::UnexpectedEof);
             }
-            let smpl_off = u32::from_le_bytes([mdat[8], mdat[9], mdat[10], mdat[11]]) as usize;
+            let smpl_off = reader.u32_le(8)? as usize;
             let mdat_off = 20;
             if smpl_off <= mdat_off || smpl_off > mdat.len() {
                 return Err(ImportError::OutOfRange("TFMX-MOD header offsets"));
@@ -98,22 +95,16 @@ impl TfmxModule {
         }
 
         // Validate magic identifier
-        let magic = &mdat[0..10.min(mdat.len())];
-        if magic != MAGIC_TFMX_SONG
-            && magic != MAGIC_TFMX_SONG_CR
-            && magic != MAGIC_TFMXSONG
-        {
+        let magic: &[u8; 10] = mdat[..10].try_into().unwrap();
+        if !matches!(magic, MAGIC_TFMX_SONG | MAGIC_TFMX_SONG_CR | MAGIC_TFMXSONG) {
             return Err(ImportError::InvalidMagic("TFMX magic header"));
         }
-
-        let reader = TfmxReader::new(mdat);
 
         // Read module text lines from header (0x10..0x100: 6 lines of 40 bytes)
         let mut text_lines = Vec::new();
         for l in 0..6 {
             let start = 0x10 + l * 40;
-            if start + 40 <= mdat.len() {
-                let slice = &mdat[start..start + 40];
+            if let Some(slice) = mdat.get(start..start + 40) {
                 let line_str = String::from_utf8_lossy(slice).trim().to_string();
                 if !line_str.is_empty() {
                     text_lines.push(line_str);
@@ -160,7 +151,7 @@ impl TfmxModule {
         }
 
         // Parse tracksteps (from ts_ptr up to pat_ptr, 16 bytes per step)
-        let ts_bytes = if pat_ptr > ts_ptr { pat_ptr - ts_ptr } else { 0 };
+        let ts_bytes = pat_ptr.saturating_sub(ts_ptr);
         let num_steps = ts_bytes / 16;
         let mut tracksteps = Vec::with_capacity(num_steps);
         let mut is_7voice = false;
@@ -168,8 +159,8 @@ impl TfmxModule {
         for step_idx in 0..num_steps {
             let step_off = ts_ptr + step_idx * 16;
             let mut words = [0u16; 8];
-            for w in 0..8 {
-                words[w] = reader.u16_be(step_off + w * 2)?;
+            for (w, word) in words.iter_mut().enumerate() {
+                *word = reader.u16_be(step_off + w * 2)?;
             }
             let step = TfmxTrackStep { words };
 
@@ -182,7 +173,7 @@ impl TfmxModule {
         }
 
         // Parse pattern offsets (from pat_ptr up to mac_ptr, 4 bytes per pointer)
-        let pat_table_len = if mac_ptr > pat_ptr { mac_ptr - pat_ptr } else { 0 };
+        let pat_table_len = mac_ptr.saturating_sub(pat_ptr);
         let num_pats = pat_table_len / 4;
         let mut pat_offsets = Vec::with_capacity(num_pats);
         for p in 0..num_pats {
@@ -233,13 +224,8 @@ impl TfmxModule {
             let mut steps = Vec::new();
             let mut cursor = off as usize;
 
-            while cursor + 4 <= mdat.len() {
-                let step = TfmxMacroStep::from_bytes([
-                    mdat[cursor],
-                    mdat[cursor + 1],
-                    mdat[cursor + 2],
-                    mdat[cursor + 3],
-                ]);
+            while let Some(chunk) = mdat.get(cursor..cursor + 4) {
+                let step = TfmxMacroStep::from_bytes(chunk.try_into().unwrap());
                 steps.push(step);
                 cursor += 4;
                 if (step.op & 0x3F) == 0x07 {

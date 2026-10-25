@@ -3,6 +3,7 @@
 //! TFMX sound macro interpreter, pattern sequencer, and per-frame state machine.
 
 use alloc::vec::Vec;
+use core::cmp::Ordering;
 
 use super::header::TfmxModule;
 use super::tables::NOTEVALS;
@@ -15,6 +16,27 @@ fn s8(v: u8) -> i8 {
 #[inline]
 fn s16(v: u16) -> i16 {
     v as i16
+}
+
+/// Advances a TFMX loop counter (`None` = inactive, `Some(rem)` = remaining iterations).
+/// Returns `true` if the loop branch should be taken.
+#[inline]
+fn step_loop(slot: &mut Option<u16>, count: u16) -> bool {
+    match (count, *slot) {
+        (0, _) => true,
+        (c, None) => {
+            *slot = Some(c - 1);
+            true
+        }
+        (_, Some(n)) if n > 0 => {
+            *slot = Some(n - 1);
+            true
+        }
+        (_, Some(_)) => {
+            *slot = None;
+            false
+        }
+    }
 }
 
 /// An active DMA sample playback event, tracking its dynamic modulation evolution.
@@ -48,31 +70,16 @@ pub struct VoiceTickSnapshot {
 }
 
 /// Pattern sequencer track state (up to 8 tracks).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct TrackState {
     pub enabled: bool,
     pub pat_num: u8,
     pub transpose: i8,
     pub step: usize,
     pub wait: u8,
-    pub loop_cnt: u16,
+    pub loop_cnt: Option<u16>,
     pub saved_pat: u8,
     pub saved_step: usize,
-}
-
-impl Default for TrackState {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            pat_num: 0,
-            transpose: 0,
-            step: 0,
-            wait: 0,
-            loop_cnt: 0xFFFF,
-            saved_pat: 0,
-            saved_step: 0,
-        }
-    }
 }
 
 /// Sound macro interpreter voice state.
@@ -83,7 +90,7 @@ pub struct VoiceState {
     pub macro_num: u8,
     pub macro_step: usize,
     pub macro_wait: usize,
-    pub macro_loop: u16,
+    pub macro_loop: Option<u16>,
     pub saved_macro: u8,
     pub saved_step: usize,
     pub new_style_macro: bool,
@@ -141,7 +148,7 @@ impl VoiceState {
             macro_num: 0,
             macro_step: 0,
             macro_wait: 0,
-            macro_loop: 0xFFFF,
+            macro_loop: None,
             saved_macro: 0,
             saved_step: 0,
             new_style_macro: false,
@@ -222,7 +229,7 @@ pub struct TfmxSimulator<'a> {
     curr_pos: u16,
     last_pos: u16,
     prescale: u16,
-    ts_loop_count: i32,
+    ts_loop_count: Option<u16>,
     song_ended: bool,
     loop_target_pos: Option<u16>,
     is_7v: bool,
@@ -239,19 +246,7 @@ pub struct TfmxSimulator<'a> {
 impl<'a> TfmxSimulator<'a> {
     pub fn new(module: &'a TfmxModule, subsong_idx: usize) -> Option<Self> {
         let subsong = module.subsongs.iter().find(|s| s.index == subsong_idx)?;
-        let mut voices = [
-            VoiceState::new(0),
-            VoiceState::new(1),
-            VoiceState::new(2),
-            VoiceState::new(3),
-            VoiceState::new(4),
-            VoiceState::new(5),
-            VoiceState::new(6),
-            VoiceState::new(7),
-        ];
-        for i in 0..8 {
-            voices[i] = VoiceState::new(i);
-        }
+        let voices = core::array::from_fn(VoiceState::new);
 
         let mut sim = Self {
             module,
@@ -263,7 +258,7 @@ impl<'a> TfmxSimulator<'a> {
             curr_pos: subsong.start_pos,
             last_pos: subsong.end_pos,
             prescale: subsong.tempo,
-            ts_loop_count: -1,
+            ts_loop_count: None,
             song_ended: false,
             loop_target_pos: None,
             is_7v: module.is_7voice,
@@ -278,6 +273,24 @@ impl<'a> TfmxSimulator<'a> {
         };
         sim.load_trackstep();
         Some(sim)
+    }
+
+    #[inline]
+    fn init_fade(&mut self, slope: u8, target: u8) {
+        let targ = target.min(0x40);
+        self.fade_target = targ;
+        if slope == 0 {
+            self.master_vol = targ;
+            self.fade_dir = 0;
+        } else {
+            self.fade_slope = slope;
+            self.fade_timer = slope;
+            self.fade_dir = match targ.cmp(&self.master_vol) {
+                Ordering::Greater => 1,
+                Ordering::Less => -1,
+                Ordering::Equal => 0,
+            };
+        }
     }
 
     #[inline]
@@ -333,7 +346,7 @@ impl<'a> TfmxSimulator<'a> {
         let smpl_len = self.module.sample_data.len();
 
         if smpl_len > 0 {
-            for i in 0..length {
+            for slot in &mut buf {
                 v.sid_op1_pos = v.sid_op1_pos.wrapping_add(v.sid_op1);
                 let idx = ((v.sid_op1_pos >> 16) as u16 & v.sid_src_mask) as usize;
                 let src_pos = ((v.sid_src as usize) + idx) % smpl_len;
@@ -341,20 +354,24 @@ impl<'a> TfmxSimulator<'a> {
 
                 v.sid_op3_pos = v.sid_op3_pos.wrapping_add(v.sid_op3);
                 let delta = ((v.sid_op3_pos >> 16) & 0xFF) as u8;
-                if sample_b > val {
-                    val = if delta < 128 {
-                        (val as i16 + delta as i8 as i16).min(127) as i8
-                    } else {
-                        sample_b
-                    };
-                } else if sample_b < val {
-                    val = if delta < 128 {
-                        (val as i16 - delta as i8 as i16).max(-128) as i8
-                    } else {
-                        sample_b
-                    };
+                match sample_b.cmp(&val) {
+                    Ordering::Greater => {
+                        val = if delta < 128 {
+                            (val as i16 + delta as i8 as i16).min(127) as i8
+                        } else {
+                            sample_b
+                        };
+                    }
+                    Ordering::Less => {
+                        val = if delta < 128 {
+                            (val as i16 - delta as i8 as i16).max(-128) as i8
+                        } else {
+                            sample_b
+                        };
+                    }
+                    Ordering::Equal => {}
                 }
-                buf[i] = val as u8;
+                *slot = val as u8;
             }
         }
         v.sid_last_val = val;
@@ -387,14 +404,9 @@ impl<'a> TfmxSimulator<'a> {
                             self.loop_target_pos = Some(dest);
                             self.song_ended = true;
                             return;
-                        } else if self.ts_loop_count < 0 {
-                            self.ts_loop_count = (cnt - 1) as i32;
-                            self.curr_pos = dest;
-                        } else if self.ts_loop_count > 0 {
-                            self.ts_loop_count -= 1;
+                        } else if step_loop(&mut self.ts_loop_count, cnt) {
                             self.curr_pos = dest;
                         } else {
-                            self.ts_loop_count = -1;
                             self.curr_pos += 1;
                         }
                     }
@@ -409,22 +421,8 @@ impl<'a> TfmxSimulator<'a> {
                     }
                     4 => {
                         let slope = (step.words[2] & 0xFF) as u8;
-                        let targ = ((step.words[3] & 0xFF) as u8).min(0x40);
-                        self.fade_target = targ;
-                        if slope == 0 {
-                            self.master_vol = targ;
-                            self.fade_dir = 0;
-                        } else {
-                            self.fade_slope = slope;
-                            self.fade_timer = slope;
-                            self.fade_dir = if targ > self.master_vol {
-                                1
-                            } else if targ < self.master_vol {
-                                -1
-                            } else {
-                                0
-                            };
-                        }
+                        let targ = (step.words[3] & 0xFF) as u8;
+                        self.init_fade(slope, targ);
                         self.curr_pos += 1;
                     }
                     _ => {
@@ -436,24 +434,29 @@ impl<'a> TfmxSimulator<'a> {
                     let w = step.words[t];
                     let hi = (w >> 8) as u8;
                     let lo = (w & 0xFF) as u8;
-                    if hi < 0x80 {
-                        self.tracks[t].enabled = true;
-                        self.tracks[t].pat_num = hi;
-                        self.tracks[t].transpose = s8(lo);
-                        self.tracks[t].step = 0;
-                        self.tracks[t].wait = 0;
-                        self.tracks[t].loop_cnt = 0xFFFF;
-                    } else if hi == 0x80 {
-                        // Keep current track pattern playing
-                    } else if hi == 0xFE {
-                        self.tracks[t].enabled = false;
-                        let v = (lo & 0x07) as usize;
-                        self.voices[v].macro_running = false;
-                        self.voices[v].dma_on = false;
-                        self.voices[v].cur_vol = 0;
-                        self.voices[v].active_event_id = None;
-                    } else {
-                        self.tracks[t].enabled = false;
+                    match hi {
+                        0x00..=0x7F => {
+                            self.tracks[t].enabled = true;
+                            self.tracks[t].pat_num = hi;
+                            self.tracks[t].transpose = s8(lo);
+                            self.tracks[t].step = 0;
+                            self.tracks[t].wait = 0;
+                            self.tracks[t].loop_cnt = None;
+                        }
+                        0x80 => {
+                            // Keep current track pattern playing
+                        }
+                        0xFE => {
+                            self.tracks[t].enabled = false;
+                            let v = (lo & 0x07) as usize;
+                            self.voices[v].macro_running = false;
+                            self.voices[v].dma_on = false;
+                            self.voices[v].cur_vol = 0;
+                            self.voices[v].active_event_id = None;
+                        }
+                        _ => {
+                            self.tracks[t].enabled = false;
+                        }
                     }
                 }
                 return;
@@ -498,120 +501,112 @@ impl<'a> TfmxSimulator<'a> {
                         };
                         self.tracks[t].step += 1;
 
-                        if b0 < 0xC0 {
-                            let note = ((b0 as i16 + self.tracks[t].transpose as i16) & 0x3F) as u8;
-                            let mac = b1;
-                            let vol = (b2 >> 4) & 0x0F;
-                            let v_idx = (b2 & 0x07) as usize;
-                            let v = &mut self.voices[v_idx];
-                            v.prev_note = v.curr_note;
-                            v.curr_note = note;
-                            v.rel_vol = vol;
-                            v.finetune = if b0 < 0x80 { s8(b3) } else { 0 };
-                            v.key_up = false;
-                            v.macro_num = mac;
-                            v.macro_step = 0;
-                            v.macro_wait = 0;
-                            v.macro_loop = 0xFFFF;
-                            v.macro_running = true;
-                            v.new_style_macro = false;
-                            if b0 >= 0x80 {
-                                self.tracks[t].wait = b3;
+                        match b0 {
+                            0x00..=0xBF => {
+                                let note = ((b0 as i16 + self.tracks[t].transpose as i16) & 0x3F) as u8;
+                                let mac = b1;
+                                let vol = (b2 >> 4) & 0x0F;
+                                let v_idx = (b2 & 0x07) as usize;
+                                let v = &mut self.voices[v_idx];
+                                v.prev_note = v.curr_note;
+                                v.curr_note = note;
+                                v.rel_vol = vol;
+                                v.finetune = if b0 < 0x80 { s8(b3) } else { 0 };
+                                v.key_up = false;
+                                v.macro_num = mac;
+                                v.macro_step = 0;
+                                v.macro_wait = 0;
+                                v.macro_loop = None;
+                                v.macro_running = true;
+                                v.new_style_macro = false;
+                                if b0 >= 0x80 {
+                                    self.tracks[t].wait = b3;
+                                    break;
+                                }
+                            }
+                            0xC0..=0xEF => {
+                                let note = ((b0 as i16 + self.tracks[t].transpose as i16) & 0x3F) as u8;
+                                let v_idx = (b2 & 0x07) as usize;
+                                let v = &mut self.voices[v_idx];
+                                v.porta_reset = b1;
+                                v.porta_time = 1;
+                                if v.porta_rate == 0 {
+                                    v.porta_period = v.base_period;
+                                }
+                                v.porta_rate = b3 as u16;
+                                v.dest_period = NOTEVALS[(note & 0x3F) as usize];
+                            }
+                            0xF0 => {
+                                self.curr_pos += 1;
+                                if self.curr_pos > self.last_pos && self.loop_target_pos.is_none() {
+                                    self.song_ended = true;
+                                } else {
+                                    self.load_trackstep();
+                                }
+                                advanced_ts = true;
                                 break;
                             }
-                        } else if b0 < 0xF0 {
-                            let note = ((b0 as i16 + self.tracks[t].transpose as i16) & 0x3F) as u8;
-                            let v_idx = (b2 & 0x07) as usize;
-                            let v = &mut self.voices[v_idx];
-                            v.porta_reset = b1;
-                            v.porta_time = 1;
-                            if v.porta_rate == 0 {
-                                v.porta_period = v.base_period;
+                            0xF1 => {
+                                let dest = ((b2 as usize) << 8) | (b3 as usize);
+                                if step_loop(&mut self.tracks[t].loop_cnt, b1 as u16) {
+                                    self.tracks[t].step = dest;
+                                }
                             }
-                            v.porta_rate = b3 as u16;
-                            v.dest_period = NOTEVALS[(note & 0x3F) as usize];
-                        } else if b0 == 0xF0 {
-                            self.curr_pos += 1;
-                            if self.curr_pos > self.last_pos && self.loop_target_pos.is_none() {
-                                self.song_ended = true;
-                            } else {
-                                self.load_trackstep();
+                            0xF2 => {
+                                self.tracks[t].pat_num = b1;
+                                self.tracks[t].step = ((b2 as usize) << 8) | (b3 as usize);
                             }
-                            advanced_ts = true;
-                            break;
-                        } else if b0 == 0xF1 {
-                            let dest = ((b2 as usize) << 8) | (b3 as usize);
-                            if b1 == 0 {
-                                self.tracks[t].step = dest;
-                            } else if self.tracks[t].loop_cnt == 0xFFFF {
-                                self.tracks[t].loop_cnt = (b1 - 1) as u16;
-                                self.tracks[t].step = dest;
-                            } else if self.tracks[t].loop_cnt > 0 {
-                                self.tracks[t].loop_cnt -= 1;
-                                self.tracks[t].step = dest;
-                            } else {
-                                self.tracks[t].loop_cnt = 0xFFFF;
+                            0xF3 => {
+                                self.tracks[t].wait = b1;
+                                break;
                             }
-                        } else if b0 == 0xF2 {
-                            self.tracks[t].pat_num = b1;
-                            self.tracks[t].step = ((b2 as usize) << 8) | (b3 as usize);
-                        } else if b0 == 0xF3 {
-                            self.tracks[t].wait = b1;
-                            break;
-                        } else if b0 == 0xF4 {
-                            self.tracks[t].enabled = false;
-                            break;
-                        } else if b0 == 0xF5 {
-                            let v_idx = (b2 & 0x07) as usize;
-                            self.voices[v_idx].key_up = true;
-                        } else if b0 == 0xF6 {
-                            let v_idx = (b2 & 0x07) as usize;
-                            let v = &mut self.voices[v_idx];
-                            v.vib_reset = b1 & 0xFE;
-                            v.vib_time = v.vib_reset >> 1;
-                            v.vib_width = s8(b3);
-                            v.vib_offset = 0;
-                        } else if b0 == 0xF7 {
-                            let v_idx = (b2 & 0x07) as usize;
-                            let v = &mut self.voices[v_idx];
-                            v.env_rate = b1;
-                            v.env_reset = ((b2 >> 4) & 0x0F) + 1;
-                            v.env_time = v.env_reset;
-                            v.env_end_vol = b3.min(0x40);
-                        } else if b0 == 0xF8 {
-                            self.tracks[t].saved_pat = self.tracks[t].pat_num;
-                            self.tracks[t].saved_step = self.tracks[t].step;
-                            self.tracks[t].pat_num = b1;
-                            self.tracks[t].step = ((b2 as usize) << 8) | (b3 as usize);
-                        } else if b0 == 0xF9 {
-                            self.tracks[t].pat_num = self.tracks[t].saved_pat;
-                            self.tracks[t].step = self.tracks[t].saved_step;
-                        } else if b0 == 0xFA {
-                            let slope = b1;
-                            let targ = b3.min(0x40);
-                            self.fade_target = targ;
-                            if slope == 0 {
-                                self.master_vol = targ;
-                                self.fade_dir = 0;
-                            } else {
-                                self.fade_slope = slope;
-                                self.fade_timer = slope;
-                                self.fade_dir = if targ > self.master_vol {
-                                    1
-                                } else if targ < self.master_vol {
-                                    -1
-                                } else {
-                                    0
-                                };
+                            0xF4 => {
+                                self.tracks[t].enabled = false;
+                                break;
                             }
-                        } else if b0 == 0xFB {
-                            let target_t = (b2 & 0x07) as usize;
-                            self.tracks[target_t].enabled = true;
-                            self.tracks[target_t].pat_num = b1;
-                            self.tracks[target_t].transpose = s8(b3);
-                            self.tracks[target_t].step = 0;
-                            self.tracks[target_t].wait = 0;
-                            self.tracks[target_t].loop_cnt = 0xFFFF;
+                            0xF5 => {
+                                let v_idx = (b2 & 0x07) as usize;
+                                self.voices[v_idx].key_up = true;
+                            }
+                            0xF6 => {
+                                let v_idx = (b2 & 0x07) as usize;
+                                let v = &mut self.voices[v_idx];
+                                v.vib_reset = b1 & 0xFE;
+                                v.vib_time = v.vib_reset >> 1;
+                                v.vib_width = s8(b3);
+                                v.vib_offset = 0;
+                            }
+                            0xF7 => {
+                                let v_idx = (b2 & 0x07) as usize;
+                                let v = &mut self.voices[v_idx];
+                                v.env_rate = b1;
+                                v.env_reset = ((b2 >> 4) & 0x0F) + 1;
+                                v.env_time = v.env_reset;
+                                v.env_end_vol = b3.min(0x40);
+                            }
+                            0xF8 => {
+                                self.tracks[t].saved_pat = self.tracks[t].pat_num;
+                                self.tracks[t].saved_step = self.tracks[t].step;
+                                self.tracks[t].pat_num = b1;
+                                self.tracks[t].step = ((b2 as usize) << 8) | (b3 as usize);
+                            }
+                            0xF9 => {
+                                self.tracks[t].pat_num = self.tracks[t].saved_pat;
+                                self.tracks[t].step = self.tracks[t].saved_step;
+                            }
+                            0xFA => {
+                                self.init_fade(b1, b3);
+                            }
+                            0xFB => {
+                                let target_t = (b2 & 0x07) as usize;
+                                self.tracks[target_t].enabled = true;
+                                self.tracks[target_t].pat_num = b1;
+                                self.tracks[target_t].transpose = s8(b3);
+                                self.tracks[target_t].step = 0;
+                                self.tracks[target_t].wait = 0;
+                                self.tracks[target_t].loop_cnt = None;
+                            }
+                            _ => {}
                         }
                     }
                     if advanced_ts || self.song_ended {
@@ -714,13 +709,13 @@ impl<'a> TfmxSimulator<'a> {
                                 // Wait
                                 let v = &mut self.voices[v_idx];
                                 if (b1 & 0x01) != 0 {
-                                    if v.macro_loop == 0xFFFF {
-                                        v.macro_loop = (b3 as u16).saturating_sub(1);
-                                    } else if v.macro_loop > 0 {
-                                        v.macro_loop -= 1;
-                                    } else {
-                                        v.macro_loop = 0xFFFF;
-                                        continue;
+                                    match v.macro_loop {
+                                        None => v.macro_loop = Some((b3 as u16).saturating_sub(1)),
+                                        Some(n) if n > 0 => v.macro_loop = Some(n - 1),
+                                        Some(_) => {
+                                            v.macro_loop = None;
+                                            continue;
+                                        }
                                     }
                                 }
                                 v.macro_wait = ((b2 as usize) << 8) | (b3 as usize);
@@ -730,16 +725,8 @@ impl<'a> TfmxSimulator<'a> {
                                 // Loop
                                 let v = &mut self.voices[v_idx];
                                 let dest = ((b2 as usize) << 8) | (b3 as usize);
-                                if b1 == 0 {
+                                if step_loop(&mut v.macro_loop, b1 as u16) {
                                     v.macro_step = dest;
-                                } else if v.macro_loop == 0xFFFF {
-                                    v.macro_loop = (b1 - 1) as u16;
-                                    v.macro_step = dest;
-                                } else if v.macro_loop > 0 {
-                                    v.macro_loop -= 1;
-                                    v.macro_step = dest;
-                                } else {
-                                    v.macro_loop = 0xFFFF;
                                 }
                             }
                             0x06 => {
@@ -747,7 +734,7 @@ impl<'a> TfmxSimulator<'a> {
                                 let v = &mut self.voices[v_idx];
                                 v.macro_num = b1;
                                 v.macro_step = ((b2 as usize) << 8) | (b3 as usize);
-                                v.macro_loop = 0xFFFF;
+                                v.macro_loop = None;
                             }
                             0x07 => {
                                 // Stop
@@ -863,16 +850,8 @@ impl<'a> TfmxSimulator<'a> {
                                 let v = &mut self.voices[v_idx];
                                 if !v.key_up {
                                     let dest = ((b2 as usize) << 8) | (b3 as usize);
-                                    if b1 == 0 {
+                                    if step_loop(&mut v.macro_loop, b1 as u16) {
                                         v.macro_step = dest;
-                                    } else if v.macro_loop == 0xFFFF {
-                                        v.macro_loop = (b1 - 1) as u16;
-                                        v.macro_step = dest;
-                                    } else if v.macro_loop > 0 {
-                                        v.macro_loop -= 1;
-                                        v.macro_step = dest;
-                                    } else {
-                                        v.macro_loop = 0xFFFF;
                                     }
                                 }
                             }
@@ -907,19 +886,9 @@ impl<'a> TfmxSimulator<'a> {
                                 let v = &mut self.voices[v_idx];
                                 if !v.key_up {
                                     let w = ((b2 as u16) << 8) | (b3 as u16);
-                                    if w == 0 {
+                                    if step_loop(&mut v.macro_loop, w) {
                                         v.macro_step -= 1;
                                         break;
-                                    } else if v.macro_loop == 0xFFFF {
-                                        v.macro_loop = w - 1;
-                                        v.macro_step -= 1;
-                                        break;
-                                    } else if v.macro_loop > 0 {
-                                        v.macro_loop -= 1;
-                                        v.macro_step -= 1;
-                                        break;
-                                    } else {
-                                        v.macro_loop = 0xFFFF;
                                     }
                                 }
                             }
@@ -991,11 +960,10 @@ impl<'a> TfmxSimulator<'a> {
                                 } else {
                                     (v.cur_len_words as f64 * 2.0 * cycles as f64).max(4.0)
                                 };
-                                let ticks = ((wait_bytes * v.curr_period as f64)
+                                let ticks = (((wait_bytes * v.curr_period as f64)
                                     / paula_clocks_per_tick)
-                                    .round()
-                                    .max(1.0) as usize;
-                                v.macro_wait = ticks.saturating_sub(1);
+                                    + 0.5) as usize;
+                                v.macro_wait = ticks.max(1).saturating_sub(1);
                                 break;
                             }
                             0x1C => {
@@ -1054,10 +1022,10 @@ impl<'a> TfmxSimulator<'a> {
             if v.env_reset > 0 && !v.triggered_this_tick {
                 if v.env_time <= 1 {
                     v.env_time = v.env_reset;
-                    if v.cur_vol < v.env_end_vol {
-                        v.cur_vol = (v.cur_vol + v.env_rate).min(v.env_end_vol);
-                    } else if v.cur_vol > v.env_end_vol {
-                        v.cur_vol = v.cur_vol.saturating_sub(v.env_rate).max(v.env_end_vol);
+                    match v.cur_vol.cmp(&v.env_end_vol) {
+                        Ordering::Less => v.cur_vol = (v.cur_vol + v.env_rate).min(v.env_end_vol),
+                        Ordering::Greater => v.cur_vol = v.cur_vol.saturating_sub(v.env_rate).max(v.env_end_vol),
+                        Ordering::Equal => {}
                     }
                     if v.cur_vol == v.env_end_vol {
                         v.env_reset = 0;
@@ -1072,14 +1040,11 @@ impl<'a> TfmxSimulator<'a> {
                 v.porta_time = v.porta_time.saturating_sub(1);
                 if v.porta_time == 0 {
                     v.porta_time = v.porta_reset.max(1);
-                    if v.porta_period > v.dest_period {
-                        let delta = ((v.porta_period as u32 * v.porta_rate as u32) >> 8)
-                            .max(1) as u16;
-                        v.porta_period = v.porta_period.saturating_sub(delta).max(v.dest_period);
-                    } else if v.porta_period < v.dest_period {
-                        let delta = ((v.porta_period as u32 * v.porta_rate as u32) >> 8)
-                            .max(1) as u16;
-                        v.porta_period = (v.porta_period + delta).min(v.dest_period);
+                    let delta = ((v.porta_period as u32 * v.porta_rate as u32) >> 8).max(1) as u16;
+                    match v.porta_period.cmp(&v.dest_period) {
+                        Ordering::Greater => v.porta_period = v.porta_period.saturating_sub(delta).max(v.dest_period),
+                        Ordering::Less => v.porta_period = (v.porta_period + delta).min(v.dest_period),
+                        Ordering::Equal => {}
                     }
                     if v.porta_period == v.dest_period {
                         v.porta_rate = 0;
@@ -1144,18 +1109,7 @@ impl<'a> TfmxSimulator<'a> {
 
         // Emit frame snapshot
         let mut any_sound = false;
-        let mut snapshots = [VoiceTickSnapshot {
-            triggered: false,
-            event_id: None,
-            macro_num: 0,
-            period: 428,
-            volume: 0,
-            dma_on: false,
-            beg_addr: 0,
-            len_bytes: 0,
-        }; 8];
-
-        for i in 0..8 {
+        let snapshots = core::array::from_fn(|i| {
             let v = &self.voices[i];
             let eff_vol = if v.dma_on {
                 ((v.cur_vol as u16 * self.master_vol as u16) >> 6) as u8
@@ -1165,7 +1119,7 @@ impl<'a> TfmxSimulator<'a> {
             if eff_vol > 0 {
                 any_sound = true;
             }
-            snapshots[i] = VoiceTickSnapshot {
+            VoiceTickSnapshot {
                 triggered: v.triggered_this_tick,
                 event_id: v.active_event_id,
                 macro_num: v.macro_num,
@@ -1174,8 +1128,8 @@ impl<'a> TfmxSimulator<'a> {
                 dma_on: v.dma_on,
                 beg_addr: v.beg_addr,
                 len_bytes: (v.cur_len_words as u32) * 2,
-            };
-        }
+            }
+        });
 
         let is_any_track_enabled = self.tracks.iter().any(|t| t.enabled);
         if !is_any_track_enabled {

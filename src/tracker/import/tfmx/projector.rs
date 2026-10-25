@@ -10,7 +10,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::cmp::{max, min};
+use core::cmp::{max, min, Ordering};
 
 use super::header::TfmxModule;
 use super::runtime::{ActiveSampleEvent, TfmxSimulation, TfmxSimulator};
@@ -20,6 +20,34 @@ use crate::core::module::Module;
 use crate::tracker::import::bin_reader::ImportError;
 
 pub const DEFAULT_FINETUNE: i8 = 0;
+
+#[inline]
+fn round_usize(v: f64) -> usize {
+    (v + 0.5) as usize
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum InstrumentKey {
+    Sid {
+        macro_num: u8,
+        init_beg: u32,
+        init_len: u32,
+        pan: u8,
+    },
+    Wavetable {
+        macro_num: u8,
+        init_beg: u32,
+        init_len: u32,
+        pan: u8,
+    },
+    Pcm {
+        init_beg: u32,
+        init_len: u32,
+        pan: u8,
+        loop_off: u32,
+        one_shot: bool,
+    },
+}
 
 /// Authentic Amiga stereo placement (0=full left, 128=center, 255=full right).
 pub fn voice_panning(v_idx: usize, is_7v: bool) -> u8 {
@@ -60,13 +88,14 @@ pub fn extract_safe_slice(smpl: &[u8], start: usize, len: usize) -> Vec<u8> {
 }
 
 pub fn encode_delta8(pcm: &[u8]) -> Vec<u8> {
-    let mut out = vec![0u8; pcm.len()];
     let mut prev = 0u8;
-    for (i, &b) in pcm.iter().enumerate() {
-        out[i] = b.wrapping_sub(prev);
-        prev = b;
-    }
-    out
+    pcm.iter()
+        .map(|&b| {
+            let d = b.wrapping_sub(prev);
+            prev = b;
+            d
+        })
+        .collect()
 }
 
 pub fn pack_xm_slot(note: u8, instr: u8, vol: u8, eff_type: u8, eff_param: u8) -> Vec<u8> {
@@ -99,20 +128,14 @@ pub fn pack_xm_slot(note: u8, instr: u8, vol: u8, eff_type: u8, eff_param: u8) -
 }
 
 pub fn nearest_xm_note(target_period: u16) -> (u8, u16) {
-    let mut best_note = 49u8;
-    let mut best_diff = i32::MAX;
-    let mut best_per = 428u16;
-    for note in 1..=96 {
-        let pitch = Pitch::from_semitone((note - 1) as i16);
-        let p = amiga_period_from_pitch_base(pitch, AMIGA_C0_PERIOD_LEGACY).raw() as u16;
-        let diff = (p as i32 - target_period as i32).abs();
-        if diff < best_diff {
-            best_diff = diff;
-            best_note = note;
-            best_per = p;
-        }
-    }
-    (best_note, best_per)
+    (1u8..=96)
+        .map(|note| {
+            let pitch = Pitch::from_semitone((note - 1) as i16);
+            let p = amiga_period_from_pitch_base(pitch, AMIGA_C0_PERIOD_LEGACY).raw();
+            (note, p)
+        })
+        .min_by_key(|&(_, p)| (p as i32 - target_period as i32).abs())
+        .unwrap_or((49, 428))
 }
 
 #[derive(Debug, Clone)]
@@ -146,16 +169,17 @@ pub fn build_instruments(
 
     // Identify longest dynamic event for SID or sweep macros
     let mut longest_dyn: BTreeMap<(u8, u32, u32), &ActiveSampleEvent> = BTreeMap::new();
-    for (_v_idx, ev) in &events {
+    for &(_v_idx, ev) in &events {
         if ev.has_sid || ev.has_add_begin_or_len {
             let key = (ev.macro_num, ev.init_beg, ev.init_len);
-            if let Some(existing) = longest_dyn.get(&key) {
-                if ev.tick_slices.len() > existing.tick_slices.len() {
-                    longest_dyn.insert(key, ev);
-                }
-            } else {
-                longest_dyn.insert(key, ev);
-            }
+            longest_dyn
+                .entry(key)
+                .and_modify(|existing| {
+                    if ev.tick_slices.len() > existing.tick_slices.len() {
+                        *existing = ev;
+                    }
+                })
+                .or_insert(ev);
         }
     }
 
@@ -168,16 +192,21 @@ pub fn build_instruments(
 
         if ev.has_sid {
             let base_key = (ev.macro_num, ev.init_beg, ev.init_len);
-            let full_key = (0u8, base_key.0, base_key.1, base_key.2, pan, 0u32, false);
-            if !key_to_instr_idx.contains_key(&full_key) {
+            let full_key = InstrumentKey::Sid {
+                macro_num: base_key.0,
+                init_beg: base_key.1,
+                init_len: base_key.2,
+                pan,
+            };
+            let idx = *key_to_instr_idx.entry(full_key).or_insert_with(|| {
                 let rep_ev = longest_dyn.get(&base_key).copied().unwrap_or(ev);
                 let ref_per = rep_ev.init_period.clamp(113, 856) as f64;
-                let bytes_per_tick = (paula_clocks_per_tick / ref_per).round().max(32.0) as usize;
+                let bytes_per_tick = round_usize(paula_clocks_per_tick / ref_per).max(32);
 
                 let mut pcm = Vec::new();
                 for sframe in rep_ev.sid_frames.iter().take(120) {
                     let slen = sframe.len().max(4);
-                    let reps = ((bytes_per_tick as f64) / (slen as f64)).round().max(1.0) as usize;
+                    let reps = round_usize((bytes_per_tick as f64) / (slen as f64)).max(1);
                     for _ in 0..reps {
                         pcm.extend_from_slice(sframe);
                     }
@@ -202,17 +231,21 @@ pub fn build_instruments(
                     loop_type: l_type,
                     panning: pan,
                 });
-                key_to_instr_idx.insert(full_key, instruments.len());
-            }
-            let idx = key_to_instr_idx[&full_key];
+                instruments.len()
+            });
             ev_to_instr_idx.insert((v_idx, ev.id), idx);
         } else if ev.has_add_begin_or_len {
             let base_key = (ev.macro_num, ev.init_beg, ev.init_len);
-            let full_key = (1u8, base_key.0, base_key.1, base_key.2, pan, 0u32, false);
-            if !key_to_instr_idx.contains_key(&full_key) {
+            let full_key = InstrumentKey::Wavetable {
+                macro_num: base_key.0,
+                init_beg: base_key.1,
+                init_len: base_key.2,
+                pan,
+            };
+            let idx = *key_to_instr_idx.entry(full_key).or_insert_with(|| {
                 let rep_ev = longest_dyn.get(&base_key).copied().unwrap_or(ev);
                 let ref_per = rep_ev.init_period.clamp(113, 856) as f64;
-                let bytes_per_tick = (paula_clocks_per_tick / ref_per).round().max(32.0) as usize;
+                let bytes_per_tick = round_usize(paula_clocks_per_tick / ref_per).max(32);
 
                 let mut pcm = Vec::new();
                 let mut attack_len = 0;
@@ -223,9 +256,7 @@ pub fn build_instruments(
                     let att = extract_safe_slice(smpl_bytes, rep_ev.init_beg as usize, rep_ev.init_len as usize);
                     attack_len = att.len();
                     pcm.extend_from_slice(&att);
-                    let wait_ticks = ((rep_ev.init_len as f64 * ref_per) / paula_clocks_per_tick)
-                        .round()
-                        .max(1.0) as usize;
+                    let wait_ticks = round_usize((rep_ev.init_len as f64 * ref_per) / paula_clocks_per_tick).max(1);
                     start_tick = min(slices.len().saturating_sub(1), wait_ticks);
                 }
 
@@ -253,7 +284,7 @@ pub fn build_instruments(
                             pcm.extend_from_slice(chunk);
                             cur_bytes += chunk.len();
                         } else {
-                            let reps = ((bytes_per_tick as f64) / (wlen as f64)).round().max(1.0) as usize;
+                            let reps = round_usize((bytes_per_tick as f64) / (wlen as f64)).max(1);
                             for _ in 0..reps {
                                 pcm.extend_from_slice(&wave);
                             }
@@ -279,14 +310,19 @@ pub fn build_instruments(
                     loop_type: l_type,
                     panning: pan,
                 });
-                key_to_instr_idx.insert(full_key, instruments.len());
-            }
-            let idx = key_to_instr_idx[&full_key];
+                instruments.len()
+            });
             ev_to_instr_idx.insert((v_idx, ev.id), idx);
         } else {
             let loop_off = ev.loop_offset.unwrap_or(0);
-            let full_key = (2u8, 0u8, ev.init_beg, ev.init_len, pan, loop_off, ev.one_shot);
-            if !key_to_instr_idx.contains_key(&full_key) {
+            let full_key = InstrumentKey::Pcm {
+                init_beg: ev.init_beg,
+                init_len: ev.init_len,
+                pan,
+                loop_off,
+                one_shot: ev.one_shot,
+            };
+            let idx = *key_to_instr_idx.entry(full_key).or_insert_with(|| {
                 let pcm = extract_safe_slice(smpl_bytes, ev.init_beg as usize, ev.init_len as usize);
                 let (l_start, l_len, l_type) = if ev.one_shot {
                     (0, 0, 0)
@@ -306,9 +342,8 @@ pub fn build_instruments(
                     loop_type: l_type,
                     panning: pan,
                 });
-                key_to_instr_idx.insert(full_key, instruments.len());
-            }
-            let idx = key_to_instr_idx[&full_key];
+                instruments.len()
+            });
             ev_to_instr_idx.insert((v_idx, ev.id), idx);
         }
     }
@@ -331,11 +366,11 @@ pub fn compile_xm_bytes(
     let num_frames = simulation.frames.len();
 
     let mut rows_per_pat = 128;
-    while (num_frames + rows_per_pat - 1) / rows_per_pat > 255 {
+    while num_frames.div_ceil(rows_per_pat) > 255 {
         rows_per_pat *= 2;
     }
 
-    let num_patterns = (num_frames + rows_per_pat - 1) / rows_per_pat;
+    let num_patterns = num_frames.div_ceil(rows_per_pat);
     let restart_pos = min(num_patterns.saturating_sub(1), simulation.loop_tick / rows_per_pat) as u16;
 
     // Precalculate future audibility lookahead
@@ -359,7 +394,7 @@ pub fn compile_xm_bytes(
     }
 
     let mut cur_xm_per = vec![428u16; num_channels];
-    let mut cur_xm_vol = vec![-1i16; num_channels];
+    let mut cur_xm_vol: Vec<Option<u8>> = vec![None; num_channels];
     let mut cur_ev_id = vec![None; num_channels];
     let mut has_live_voice = vec![false; num_channels];
     let mut prev_target_per = vec![428u16; num_channels];
@@ -392,19 +427,14 @@ pub fn compile_xm_bytes(
                 let mut eff_param = 0u8;
 
                 if let Some(s) = snap {
-                    if !s.dma_on || s.event_id.is_none() {
-                        if cur_xm_vol[ch] != 0 {
-                            vol_byte = 0x10;
-                            cur_xm_vol[ch] = 0;
-                        }
-                    } else {
-                        let ev_id = s.event_id.unwrap();
+                    if let (true, Some(ev_id)) = (s.dma_on, s.event_id) {
                         let instr_idx = ev_to_instr_idx.get(&(v_idx, ev_id)).copied().unwrap_or(1) as u8;
                         let mut need_trigger = s.triggered || (Some(ev_id) != cur_ev_id[ch]) || !has_live_voice[ch];
 
+                        let ch_audible = is_audible || cur_xm_vol[ch].is_some_and(|v| v > 0) || s.volume > 0;
                         if !need_trigger
                             && (s.period as i32 - prev_target_per[ch] as i32).abs() >= 50
-                            && (is_audible || cur_xm_vol[ch] > 0 || s.volume > 0)
+                            && ch_audible
                         {
                             need_trigger = true;
                         }
@@ -418,26 +448,33 @@ pub fn compile_xm_bytes(
                             cur_ev_id[ch] = Some(ev_id);
                             has_live_voice[ch] = true;
                             vol_byte = 0x10 + min(64, s.volume);
-                            cur_xm_vol[ch] = s.volume as i16;
-                        } else if (s.volume as i16) != cur_xm_vol[ch] {
+                            cur_xm_vol[ch] = Some(s.volume);
+                        } else if Some(s.volume) != cur_xm_vol[ch] {
                             vol_byte = 0x10 + min(64, s.volume);
-                            cur_xm_vol[ch] = s.volume as i16;
+                            cur_xm_vol[ch] = Some(s.volume);
                         }
 
-                        if is_audible || cur_xm_vol[ch] > 0 || s.volume > 0 {
+                        if is_audible || cur_xm_vol[ch].is_some_and(|v| v > 0) || s.volume > 0 {
                             let diff = s.period as i32 - cur_xm_per[ch] as i32;
-                            if diff < 0 {
-                                let step_up = min(15, -diff) as u8;
-                                eff_type = 0x0E;
-                                eff_param = 0x10 | step_up;
-                                cur_xm_per[ch] -= step_up as u16;
-                            } else if diff > 0 {
-                                let step_dn = min(15, diff) as u8;
-                                eff_type = 0x0E;
-                                eff_param = 0x20 | step_dn;
-                                cur_xm_per[ch] += step_dn as u16;
+                            match diff.cmp(&0) {
+                                Ordering::Less => {
+                                    let step_up = min(15, -diff) as u8;
+                                    eff_type = 0x0E;
+                                    eff_param = 0x10 | step_up;
+                                    cur_xm_per[ch] -= step_up as u16;
+                                }
+                                Ordering::Greater => {
+                                    let step_dn = min(15, diff) as u8;
+                                    eff_type = 0x0E;
+                                    eff_param = 0x20 | step_dn;
+                                    cur_xm_per[ch] += step_dn as u16;
+                                }
+                                Ordering::Equal => {}
                             }
                         }
+                    } else if cur_xm_vol[ch] != Some(0) {
+                        vol_byte = 0x10;
+                        cur_xm_vol[ch] = Some(0);
                     }
                 }
 
@@ -460,13 +497,14 @@ pub fn compile_xm_bytes(
     let mut order_list = Vec::new();
 
     for blob in pattern_blobs {
-        let idx = if let Some(&i) = pattern_map.get(&blob) {
-            i
-        } else {
-            let i = unique_patterns.len();
-            pattern_map.insert(blob.clone(), i);
-            unique_patterns.push(blob);
-            i
+        let idx = match pattern_map.get(&blob) {
+            Some(&i) => i,
+            None => {
+                let i = unique_patterns.len();
+                pattern_map.insert(blob.clone(), i);
+                unique_patterns.push(blob);
+                i
+            }
         };
         order_list.push(idx as u8);
     }
@@ -497,7 +535,7 @@ pub fn compile_xm_bytes(
     out.extend_from_slice(&(instruments.len() as u16).to_le_bytes());
     out.extend_from_slice(&0u16.to_le_bytes());      // flags: 0 = Amiga frequencies
     out.extend_from_slice(&1u16.to_le_bytes());      // default_tempo: 1 tick/row
-    let bpm = ((simulation.tick_rate_hz * 2.5).round().clamp(32.0, 255.0)) as u16;
+    let bpm = round_usize(simulation.tick_rate_hz * 2.5).clamp(32, 255) as u16;
     out.extend_from_slice(&bpm.to_le_bytes());
     out.extend_from_slice(&order_table);
 
@@ -551,6 +589,7 @@ impl TfmxModule {
     pub fn to_module(&self, subsong_idx: usize) -> Result<Module, ImportError> {
         let xm_bytes = self.to_xm_bytes(subsong_idx)?;
         let mut module = Module::load_xm(&xm_bytes)?;
+        module.origin = Some(crate::tracker::format::ModuleFormat::Tfmx);
         module.quirks.legacy_amiga_period_base = true;
         module.quirks.pitch_slide_ticks_at_row_zero = true;
         Ok(module)
