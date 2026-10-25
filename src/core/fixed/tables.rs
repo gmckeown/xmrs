@@ -561,6 +561,14 @@ pub fn amiga_period(note_semitone: i16, finetune_idx: u8) -> Period {
 /// `Pitch::C4` → period = `AMIGA_C0_PERIOD / 16`. Higher pitch
 /// → smaller period.
 pub fn amiga_period_from_pitch(pitch: crate::core::fixed::units::Pitch) -> Period {
+    amiga_period_from_pitch_base(pitch, AMIGA_C0_PERIOD)
+}
+
+/// Amiga period for a continuous Q8.8 pitch with configurable base period.
+///
+/// Use `AMIGA_C0_PERIOD` (6779) for concert-pitch A4=440Hz, or
+/// `AMIGA_C0_PERIOD_LEGACY` (6848) for historical tracker tuning.
+pub fn amiga_period_from_pitch_base(pitch: crate::core::fixed::units::Pitch, base_period: u32) -> Period {
     // `Pitch` raw is `note × 256` (Q8.8). The LUTs together
     // express `2^(p / 768)` with `p` on a 1/64-semitone grid,
     // i.e. `p = note × 64`. So `p = pitch_raw / 4`
@@ -583,10 +591,10 @@ pub fn amiga_period_from_pitch(pitch: crate::core::fixed::units::Pitch) -> Perio
     // Multiplier 2^(in_oct/768) in Q16.16, in [1, 2).
     let mul = SEMITONE_FROM_C_Q16_16[semi].mul_q16_16(SUBSEMITONE_Q16_16[sub]);
 
-    // period_q16_16 = AMIGA_C0_PERIOD × 2^16 / mul, kept in
+    // period_q16_16 = base_period × 2^16 / mul, kept in
     // u64 so the divide doesn't lose precision before the
     // octave shift.
-    let numerator = (AMIGA_C0_PERIOD as u64) << 32;
+    let numerator = (base_period as u64) << 32;
     let period_q16_16 = numerator / (mul.raw() as u64);
 
     // Apply the integer octave shift on the Q16.16 value.
@@ -693,6 +701,11 @@ pub fn linear_frequency_to_period(f: Frequency) -> Period {
 /// `relative_pitch / finetune` decomposition) and per-tick in
 /// `adjust_period`, so accuracy beats nibble-grain quantization.
 pub fn amiga_period_to_pitch(p: Period) -> crate::core::fixed::units::Pitch {
+    amiga_period_to_pitch_base(p, AMIGA_C0_PERIOD)
+}
+
+/// Inverse of [`amiga_period_from_pitch_base`].
+pub fn amiga_period_to_pitch_base(p: Period, base_period: u32) -> crate::core::fixed::units::Pitch {
     use crate::core::fixed::units::Pitch;
     let target = p.raw();
     if target == 0 {
@@ -711,7 +724,7 @@ pub fn amiga_period_to_pitch(p: Period) -> crate::core::fixed::units::Pitch {
         let mid = (lo + hi).div_ceil(2);
         // Pitch at `mid` units of 1/64 semitone, in Q8.8.
         let mid_pitch = Pitch::from_q8_8_i16((mid * 4) as i16);
-        let p_mid = amiga_period_from_pitch(mid_pitch).raw();
+        let p_mid = amiga_period_from_pitch_base(mid_pitch, base_period).raw();
         if p_mid >= target {
             lo = mid;
         } else {

@@ -42,9 +42,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::core::fixed::tables::{
-    amiga_frequency_to_period, amiga_period_from_pitch, amiga_period_to_frequency,
-    amiga_period_to_pitch, linear_frequency_to_period, linear_period_to_frequency,
-    linear_period_to_pitch, linear_pitch_to_period,
+    amiga_frequency_to_period, amiga_period_from_pitch_base, amiga_period_to_frequency,
+    amiga_period_to_pitch_base, linear_frequency_to_period, linear_period_to_frequency,
+    linear_period_to_pitch, linear_pitch_to_period, AMIGA_C0_PERIOD, AMIGA_C0_PERIOD_LEGACY,
 };
 use crate::core::fixed::units::{Frequency, Period, Pitch, PitchDelta};
 
@@ -88,6 +88,10 @@ pub struct PeriodHelper {
     /// from a module-level quirk flag at construction.
     legacy_arpeggio_clamp: bool,
 
+    /// When `true`, use `AMIGA_C0_PERIOD_LEGACY` (6848) for Amiga
+    /// periods rather than `AMIGA_C0_PERIOD` (6779).
+    legacy_amiga_period_base: bool,
+
     /// Single-entry memoization for [`Self::all_to_frequency_cached`].
     /// The dominant access pattern is a held note evaluating the
     /// same key on every tick of a row, so one slot captures
@@ -105,9 +109,18 @@ impl Default for PeriodHelper {
 
 impl PeriodHelper {
     pub fn new(freq_type: FrequencyType, legacy_arpeggio_clamp: bool) -> Self {
+        Self::with_quirks(freq_type, legacy_arpeggio_clamp, false)
+    }
+
+    pub fn with_quirks(
+        freq_type: FrequencyType,
+        legacy_arpeggio_clamp: bool,
+        legacy_amiga_period_base: bool,
+    ) -> Self {
         Self {
             freq_type,
             legacy_arpeggio_clamp,
+            legacy_amiga_period_base,
             cache_key: None,
             cache_value: Frequency::ZERO,
         }
@@ -119,6 +132,16 @@ impl PeriodHelper {
     #[inline]
     pub fn legacy_arpeggio_clamp_enabled(&self) -> bool {
         self.legacy_arpeggio_clamp
+    }
+
+    /// Base period used for Amiga period calculations (6848 vs 6779).
+    #[inline]
+    pub fn amiga_base_period(&self) -> u32 {
+        if self.legacy_amiga_period_base {
+            AMIGA_C0_PERIOD_LEGACY
+        } else {
+            AMIGA_C0_PERIOD
+        }
     }
 }
 
@@ -137,7 +160,9 @@ impl PeriodHelper {
     pub fn note_to_period(&self, pitch: Pitch) -> Period {
         match self.freq_type {
             FrequencyType::LinearFrequencies => linear_pitch_to_period(pitch),
-            FrequencyType::AmigaFrequencies => amiga_period_from_pitch(pitch),
+            FrequencyType::AmigaFrequencies => {
+                amiga_period_from_pitch_base(pitch, self.amiga_base_period())
+            }
         }
     }
 
@@ -146,7 +171,9 @@ impl PeriodHelper {
     pub fn period_to_pitch(&self, period: Period) -> Pitch {
         match self.freq_type {
             FrequencyType::LinearFrequencies => linear_period_to_pitch(period),
-            FrequencyType::AmigaFrequencies => amiga_period_to_pitch(period),
+            FrequencyType::AmigaFrequencies => {
+                amiga_period_to_pitch_base(period, self.amiga_base_period())
+            }
         }
     }
 

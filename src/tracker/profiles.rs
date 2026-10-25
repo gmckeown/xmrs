@@ -16,6 +16,7 @@ use crate::core::compatibility::{PanResetPolicy, PlaybackQuirks};
 pub fn ft2() -> PlaybackQuirks {
     PlaybackQuirks {
         ft2_pitch_slide_overflow: true,
+        legacy_amiga_period_base: true,
         ft2_arpeggio_lut: true,
         ft2_arpeggio_note_clamp: true,
         keyoff_cuts_without_vol_env: true,

@@ -29,6 +29,12 @@ pub struct PlaybackQuirks {
     /// (explicit "FT2 bug" marker).
     pub ft2_pitch_slide_overflow: bool,
 
+    /// Use the legacy tracker Amiga C-0 base period (6848) instead of
+    /// the concert pitch A4=440Hz base period (6779).
+    /// Historical trackers (ProTracker, FastTracker II, SoundTracker)
+    /// and formats like TFMX were authored against 6848.
+    pub legacy_amiga_period_base: bool,
+
     /// If `Some((min, max))`, pitch slides clamp the period to this
     /// inclusive range. Models ST3's `amigalimits` masterflag
     /// (`[113.25, 856]` in xmrs Amiga-period units, = ST3's
