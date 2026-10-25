@@ -761,6 +761,7 @@ mod tests {
         feature = "import_it",
         feature = "import_sid",
         feature = "import_dw",
+        feature = "import_tfmx",
     )))]
     #[test]
     fn orgn_is_carried_when_this_build_cannot_store_it() {
@@ -806,6 +807,7 @@ mod tests {
         feature = "import_it",
         feature = "import_sid",
         feature = "import_dw",
+        feature = "import_tfmx",
     ))]
     #[test]
     fn orgn_is_applied_not_carried_when_the_field_exists() {

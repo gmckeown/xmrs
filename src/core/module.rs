@@ -131,6 +131,7 @@ pub struct Module {
         feature = "import_it",
         feature = "import_sid",
         feature = "import_dw",
+        feature = "import_tfmx",
     ))]
     pub origin: Option<crate::tracker::format::ModuleFormat>,
     pub frequency_type: FrequencyType,
@@ -359,6 +360,7 @@ impl Default for Module {
                 feature = "import_it",
                 feature = "import_sid",
                 feature = "import_dw",
+                feature = "import_tfmx",
             ))]
             origin: None,
             frequency_type: FrequencyType::LinearFrequencies,

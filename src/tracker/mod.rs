@@ -20,6 +20,7 @@ pub mod period;
     feature = "import_it",
     feature = "import_sid",
     feature = "import_dw",
+    feature = "import_tfmx",
 ))]
 pub mod format;
 
@@ -30,6 +31,7 @@ pub mod format;
     feature = "import_it",
     feature = "import_sid",
     feature = "import_dw",
+    feature = "import_tfmx",
 ))]
 pub mod profiles;
 

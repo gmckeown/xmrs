@@ -127,6 +127,7 @@ import = [
     "import_it",
     "import_sid",
     "import_dw",
+    "import_tfmx",
 ]
 # ProTracker-style Amiga MOD. Shares effect-parsing code with XM
 # (via `import::xm::mod_xm_effect`), which is pulled in as needed.
@@ -179,6 +180,9 @@ synth_sid = ["dep:sidera"]
 # tables they point to. Has no magic header, so `Module::load` tries
 # it last (after MOD) to avoid stealing a valid MOD parse.
 import_dw  = []
+# Chris Hülsbeck / Jochen Hippel TFMX format (`mdat.*` / `smpl.*`, `.tfx` / `.sam`, `TFHD`).
+# Projects simulated Paula traces through the XM importer pipeline.
+import_tfmx = ["import_xm"]
 
 # ---- xorshift RNG widths (rand32 is always enabled) ----
 rand8 = []

@@ -106,33 +106,53 @@ pub struct TfmxModule {
 }
 
 impl TfmxModule {
+    /// Returns `true` if `data` starts with a single-file TFMX container magic (`TFHD` or `TFMX-MOD`).
+    #[inline]
+    pub fn is_single_file_container(data: &[u8]) -> bool {
+        data.starts_with(MAGIC_TFHD) || data.starts_with(MAGIC_TFMX_MOD)
+    }
+
+    /// Returns `true` if `data` begins with any recognized TFMX header or container signature.
+    #[inline]
+    pub fn is_tfmx_magic(data: &[u8]) -> bool {
+        Self::is_single_file_container(data)
+            || data.starts_with(MAGIC_TFMX_SONG)
+            || data.starts_with(MAGIC_TFMX_SONG_CR)
+            || data.starts_with(MAGIC_TFMXSONG)
+            || data.starts_with(b"TFMX_SONG")
+            || data.starts_with(b"TFMX_1.5")
+    }
+
+    /// Returns `true` if `filename` follows a standard TFMX naming convention (`.tfx`, `.tfm`, `mdat.*`).
+    #[inline]
+    pub fn is_tfmx_filename(filename: &str) -> bool {
+        let trimmed = filename.trim();
+        let name = trimmed.rsplit(['/', '\\']).next().unwrap_or(trimmed);
+        name.ends_with(".tfx")
+            || name.ends_with(".TFX")
+            || name.ends_with(".tfm")
+            || name.ends_with(".TFM")
+            || name.starts_with("mdat.")
+            || name.starts_with("MDAT.")
+    }
+
+    /// Returns `true` if either `data` has a TFMX magic signature or `filename` has a TFMX naming pattern.
+    #[inline]
+    pub fn is_tfmx(data: &[u8], filename: Option<&str>) -> bool {
+        Self::is_tfmx_magic(data) || filename.is_some_and(Self::is_tfmx_filename)
+    }
+
     #[inline]
     pub fn read_pattern_step(&self, pat_num: usize, step_num: usize) -> Option<[u8; 4]> {
         let &off = self.pat_offsets.get(pat_num)?;
-        let start = off as usize + step_num * 4;
-        if start + 4 > self.mdat_bytes.len() {
-            return None;
-        }
-        Some([
-            self.mdat_bytes[start],
-            self.mdat_bytes[start + 1],
-            self.mdat_bytes[start + 2],
-            self.mdat_bytes[start + 3],
-        ])
+        let start = (off as usize).checked_add(step_num.checked_mul(4)?)?;
+        self.mdat_bytes.get(start..start + 4)?.try_into().ok()
     }
 
     #[inline]
     pub fn read_macro_step(&self, mac_num: usize, step_num: usize) -> Option<[u8; 4]> {
         let &off = self.mac_offsets.get(mac_num)?;
-        let start = off as usize + step_num * 4;
-        if start + 4 > self.mdat_bytes.len() {
-            return None;
-        }
-        Some([
-            self.mdat_bytes[start],
-            self.mdat_bytes[start + 1],
-            self.mdat_bytes[start + 2],
-            self.mdat_bytes[start + 3],
-        ])
+        let start = (off as usize).checked_add(step_num.checked_mul(4)?)?;
+        self.mdat_bytes.get(start..start + 4)?.try_into().ok()
     }
 }

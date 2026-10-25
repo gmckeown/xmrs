@@ -31,6 +31,8 @@ pub enum ModuleFormat {
     Sid,
     /// David Whittaker custom Amiga format (`.dw`).
     Dw,
+    /// Chris Hülsbeck / Jochen Hippel TFMX format (`mdat.*` / `smpl.*` or `.tfx` / `.sam`).
+    Tfmx,
 }
 
 impl ModuleFormat {
@@ -62,5 +64,11 @@ impl ModuleFormat {
     #[inline]
     pub fn is_dw(&self) -> bool {
         matches!(self, ModuleFormat::Dw)
+    }
+
+    /// `true` when this tag is `Tfmx`.
+    #[inline]
+    pub fn is_tfmx(&self) -> bool {
+        matches!(self, ModuleFormat::Tfmx)
     }
 }

@@ -763,6 +763,7 @@ mod walker_wrap_tests {
         feature = "import_it",
         feature = "import_sid",
         feature = "import_dw",
+        feature = "import_tfmx",
     ))]
     #[test]
     fn walker_matches_reference_replayer_oracle() {

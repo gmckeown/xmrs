@@ -26,6 +26,7 @@
     feature = "import_it",
     feature = "import_sid",
     feature = "import_dw",
+    feature = "import_tfmx",
 ))]
 pub mod bin_reader;
 
@@ -109,6 +110,7 @@ pub mod extract;
     feature = "import_it",
     feature = "import_dw",
     feature = "import_sid",
+    feature = "import_tfmx",
 ))]
 mod loader;
 
@@ -150,4 +152,5 @@ pub mod sid;
 pub mod dw;
 
 /// Load Chris Hülsbeck / Jochen Hippel TFMX modules (`mdat.*` / `smpl.*` or `.tfx` / `.sam`).
+#[cfg(feature = "import_tfmx")]
 pub mod tfmx;

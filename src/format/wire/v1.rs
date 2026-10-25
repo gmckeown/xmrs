@@ -184,6 +184,7 @@ pub enum Origin {
     It,
     Sid,
     Dw,
+    Tfmx,
 }
 
 /// The `orgn` payload for a module, or `None` when there is nothing to record
@@ -215,6 +216,7 @@ pub fn apply_origin(origin: Origin, m: &mut Module) -> bool {
     feature = "import_it",
     feature = "import_sid",
     feature = "import_dw",
+    feature = "import_tfmx",
 ))]
 mod origin_bridge {
     use super::{Module, Origin};
@@ -229,6 +231,7 @@ mod origin_bridge {
             Some(ModuleFormat::It) => Some(Origin::It),
             Some(ModuleFormat::Sid) => Some(Origin::Sid),
             Some(ModuleFormat::Dw) => Some(Origin::Dw),
+            Some(ModuleFormat::Tfmx) => Some(Origin::Tfmx),
         }
     }
 
@@ -240,6 +243,7 @@ mod origin_bridge {
             Origin::It => ModuleFormat::It,
             Origin::Sid => ModuleFormat::Sid,
             Origin::Dw => ModuleFormat::Dw,
+            Origin::Tfmx => ModuleFormat::Tfmx,
         });
         true
     }
@@ -252,6 +256,7 @@ mod origin_bridge {
     feature = "import_it",
     feature = "import_sid",
     feature = "import_dw",
+    feature = "import_tfmx",
 )))]
 mod origin_bridge {
     use super::{Module, Origin};
@@ -355,6 +360,7 @@ mod tests {
         feature = "import_it",
         feature = "import_sid",
         feature = "import_dw",
+        feature = "import_tfmx",
     ))]
     #[test]
     fn origin_bridge_round_trips_with_importers() {
