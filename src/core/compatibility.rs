@@ -16,6 +16,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::fixed::units::Period;
 
+#[inline]
+fn is_false(&b: &bool) -> bool {
+    !b
+}
+
 /// Per-module playback behaviour switches. See module docs.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Default)]
 pub struct PlaybackQuirks {
@@ -33,6 +38,7 @@ pub struct PlaybackQuirks {
     /// the concert pitch A4=440Hz base period (6779).
     /// Historical trackers (ProTracker, FastTracker II, SoundTracker)
     /// and formats like TFMX were authored against 6848.
+    #[serde(default, skip_serializing_if = "is_false")]
     pub legacy_amiga_period_base: bool,
 
     /// If `Some((min, max))`, pitch slides clamp the period to this
