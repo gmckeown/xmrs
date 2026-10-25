@@ -30,6 +30,81 @@ impl Module {
         Ok(XmModule::load(source)?.to_module())
     }
 
+    /// Try to import a TFMX module from paired `mdat` and `smpl` data.
+    pub fn load_tfmx(mdat: &[u8], smpl: &[u8], subsong_idx: usize) -> Result<Self, ImportError> {
+        let tfmx = super::tfmx::header::TfmxModule::parse(mdat, smpl)?;
+        tfmx.to_module(subsong_idx)
+    }
+
+    /// Try to import a TFMX module from a file path (locating its paired sample file).
+    #[cfg(feature = "std")]
+    pub fn load_tfmx_path<P: AsRef<std::path::Path>>(path: P, subsong_idx: usize) -> Result<Self, ImportError> {
+        let path = path.as_ref();
+        let mdat = std::fs::read(path).map_err(|_| ImportError::Other("tfmx: cannot read mdat/tfx file"))?;
+
+        // If file is a self-contained packed format (TFHD or TFMX-MOD), load directly
+        if mdat.starts_with(b"TFHD") || mdat.starts_with(b"TFMX-MOD") {
+            let mut module = Self::load_tfmx(&mdat, &[], subsong_idx)?;
+            if module.name.is_empty() || module.name.starts_with("Date :") {
+                let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                if !stem.is_empty() {
+                    module.name = stem.into();
+                }
+            }
+            return Ok(module);
+        }
+
+        let parent = path.parent().unwrap_or_else(|| std::path::Path::new(""));
+        let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+
+        let companion_candidates = if file_name.ends_with(".tfx") {
+            alloc::vec![
+                alloc::format!("{}.sam", &file_name[..file_name.len() - 4]),
+                alloc::format!("{}.SAM", &file_name[..file_name.len() - 4]),
+            ]
+        } else if file_name.ends_with(".TFX") {
+            alloc::vec![
+                alloc::format!("{}.SAM", &file_name[..file_name.len() - 4]),
+                alloc::format!("{}.sam", &file_name[..file_name.len() - 4]),
+            ]
+        } else if file_name.starts_with("mdat.") {
+            alloc::vec![
+                alloc::format!("smpl.{}", &file_name[5..]),
+                alloc::format!("SMPL.{}", &file_name[5..]),
+            ]
+        } else if file_name.starts_with("MDAT.") {
+            alloc::vec![
+                alloc::format!("SMPL.{}", &file_name[5..]),
+                alloc::format!("smpl.{}", &file_name[5..]),
+            ]
+        } else {
+            alloc::vec![
+                alloc::format!("{}.sam", file_name),
+                alloc::format!("{}.SAM", file_name),
+                alloc::format!("smpl.{}", file_name),
+            ]
+        };
+
+        let mut smpl = None;
+        for cand in companion_candidates {
+            let p = parent.join(&cand);
+            if let Ok(data) = std::fs::read(&p) {
+                smpl = Some(data);
+                break;
+            }
+        }
+
+        let smpl = smpl.ok_or(ImportError::Other("tfmx: companion sample file (.sam / smpl.*) not found"))?;
+        let mut module = Self::load_tfmx(&mdat, &smpl, subsong_idx)?;
+        if module.name.is_empty() || module.name.starts_with("Date :") {
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            if !stem.is_empty() {
+                module.name = stem.into();
+            }
+        }
+        Ok(module)
+    }
+
     /// Try to import a ScreamTracker 3 S3M module file.
     #[cfg(feature = "import_s3m")]
     pub fn load_s3m(source: &[u8]) -> Result<Self, ImportError> {
