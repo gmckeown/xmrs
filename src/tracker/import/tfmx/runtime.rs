@@ -724,7 +724,19 @@ impl<'a> TfmxSimulator<'a> {
                                 v.add_begin_reset = 0;
                                 v.beg_addr = ((b1 as u32) << 16) | ((b2 as u32) << 8) | (b3 as u32);
                                 if v.dma_on && !v.triggered_this_tick {
-                                    if v.active_event_id.is_none() || !has_add {
+                                    if let Some(id) = v.active_event_id {
+                                        if !has_add {
+                                            if v.beg_addr == 0 {
+                                                self.events[id].one_shot = true;
+                                            } else if v.beg_addr >= self.events[id].init_beg
+                                                && v.beg_addr < self.events[id].init_beg + self.events[id].init_len
+                                            {
+                                                self.events[id].loop_offset = Some(v.beg_addr - self.events[id].init_beg);
+                                            } else {
+                                                self.start_dma_event(v_idx);
+                                            }
+                                        }
+                                    } else {
                                         self.start_dma_event(v_idx);
                                     }
                                 } else if v.triggered_this_tick {
@@ -737,9 +749,14 @@ impl<'a> TfmxSimulator<'a> {
                                 // SetLen
                                 let v = &mut self.voices[v_idx];
                                 v.cur_len_words = ((b2 as u16) << 8) | (b3 as u16);
-                                if v.dma_on && v.triggered_this_tick {
+                                if v.dma_on {
                                     if let Some(id) = v.active_event_id {
-                                        self.events[id].init_len = ((v.cur_len_words as u32) * 2).max(4);
+                                        if v.triggered_this_tick {
+                                            self.events[id].init_len = ((v.cur_len_words as u32) * 2).max(4);
+                                        } else if let Some(loop_off) = self.events[id].loop_offset {
+                                            let loop_len = ((v.cur_len_words as u32) * 2).max(4);
+                                            self.events[id].init_len = self.events[id].init_len.max(loop_off + loop_len);
+                                        }
                                     }
                                 }
                             }
