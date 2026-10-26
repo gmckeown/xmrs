@@ -329,6 +329,15 @@ impl<'a> TfmxSimulator<'a> {
         ((rate * 2.5 + 0.5) as u16).clamp(32, 255)
     }
 
+    #[inline]
+    fn voice_index(&self, ch: u8) -> usize {
+        if self.is_7v {
+            (ch & 0x07) as usize
+        } else {
+            (ch & 0x03) as usize
+        }
+    }
+
     fn start_dma_event(&mut self, v_idx: usize) {
         let v = &mut self.voices[v_idx];
         let ev_id = self.events.len();
@@ -486,7 +495,7 @@ impl<'a> TfmxSimulator<'a> {
                         }
                         0xFE => {
                             self.tracks[t].enabled = false;
-                            let v = (lo & 0x07) as usize;
+                            let v = self.voice_index(lo);
                             self.voices[v].macro_running = false;
                             self.voices[v].dma_on = false;
                             self.voices[v].cur_vol = 0;
@@ -544,7 +553,7 @@ impl<'a> TfmxSimulator<'a> {
                                 let note = ((b0 as i16 + self.tracks[t].transpose as i16) & 0x3F) as u8;
                                 let mac = b1;
                                 let vol = (b2 >> 4) & 0x0F;
-                                let v_idx = (b2 & 0x07) as usize;
+                                let v_idx = self.voice_index(b2);
                                 let v = &mut self.voices[v_idx];
                                 v.prev_note = v.curr_note;
                                 v.curr_note = note;
@@ -564,7 +573,7 @@ impl<'a> TfmxSimulator<'a> {
                             }
                             0xC0..=0xEF => {
                                 let note = ((b0 as i16 + self.tracks[t].transpose as i16) & 0x3F) as u8;
-                                let v_idx = (b2 & 0x07) as usize;
+                                let v_idx = self.voice_index(b2);
                                 let v = &mut self.voices[v_idx];
                                 v.porta_reset = b1;
                                 v.porta_time = 1;
@@ -603,11 +612,11 @@ impl<'a> TfmxSimulator<'a> {
                                 break;
                             }
                             0xF5 => {
-                                let v_idx = (b2 & 0x07) as usize;
+                                let v_idx = self.voice_index(b2);
                                 self.voices[v_idx].key_up = true;
                             }
                             0xF6 => {
-                                let v_idx = (b2 & 0x07) as usize;
+                                let v_idx = self.voice_index(b2);
                                 let v = &mut self.voices[v_idx];
                                 v.vib_reset = b1 & 0xFE;
                                 v.vib_time = v.vib_reset >> 1;
@@ -615,7 +624,7 @@ impl<'a> TfmxSimulator<'a> {
                                 v.vib_offset = 0;
                             }
                             0xF7 => {
-                                let v_idx = (b2 & 0x07) as usize;
+                                let v_idx = self.voice_index(b2);
                                 let v = &mut self.voices[v_idx];
                                 v.env_rate = b1;
                                 v.env_reset = ((b2 >> 4) & 0x0F) + 1;
