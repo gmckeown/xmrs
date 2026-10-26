@@ -56,6 +56,7 @@ pub fn voice_panning(v_idx: usize, is_7v: bool) -> u8 {
             0 => 0x30, // Paula 0 (Left)
             1 => 0xD0, // Paula 1 (Right)
             2 => 0xC0, // Paula 2 (Right)
+            3 => 0x38, // Paula 3 (Left)
             4 => 0x40, // Paula 3A (Left)
             5 => 0x54, // Paula 3B (Left-Center)
             6 => 0x38, // Paula 3C (Left)
@@ -406,8 +407,16 @@ pub fn compile_xm_bytes(
     instruments: &[XmInstrumentSpec],
     ev_to_instr_idx: &BTreeMap<(usize, usize), usize>,
 ) -> Vec<u8> {
+    let has_voice_3 = simulation
+        .frames
+        .iter()
+        .any(|f| f.voices[3].dma_on && f.voices[3].event_id.is_some());
     let voice_order: &[usize] = if simulation.is_7voice {
-        &[0, 1, 2, 4, 5, 6, 7]
+        if has_voice_3 {
+            &[0, 1, 2, 3, 4, 5, 6, 7]
+        } else {
+            &[0, 1, 2, 4, 5, 6, 7]
+        }
     } else {
         &[0, 1, 2, 3]
     };
