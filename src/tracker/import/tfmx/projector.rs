@@ -300,6 +300,10 @@ pub fn build_instruments(
                     .max(4);
                 let (l_start, l_len, l_type) = if rep_ev.one_shot || pcm.len() < last_wlen {
                     (0, 0, 0)
+                } else if attack_len > 0 && pcm.len() > attack_len {
+                    let start = attack_len as u32;
+                    let len = (pcm.len() - attack_len) as u32;
+                    (start, len, 2)
                 } else {
                     let start = (pcm.len() - last_wlen) as u32;
                     (start, last_wlen as u32, 1)
