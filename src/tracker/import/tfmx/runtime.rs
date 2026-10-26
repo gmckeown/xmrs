@@ -212,6 +212,7 @@ pub struct TfmxTickFrame {
 pub struct TfmxSimulation {
     pub subsong_index: usize,
     pub is_7voice: bool,
+    pub prescale: u16,
     pub tick_rate_hz: f64,
     pub loop_tick: usize,
     pub frames: Vec<TfmxTickFrame>,
@@ -455,7 +456,7 @@ impl<'a> TfmxSimulator<'a> {
                             self.tracks[t].loop_cnt = None;
                         }
                         0x80 => {
-                            // Keep current track pattern playing
+                            self.tracks[t].transpose = s8(lo);
                         }
                         0xFE => {
                             self.tracks[t].enabled = false;
@@ -1179,6 +1180,7 @@ impl<'a> TfmxSimulator<'a> {
         TfmxSimulation {
             subsong_index: self.subsong_idx,
             is_7voice: self.is_7v,
+            prescale: self.prescale,
             tick_rate_hz,
             loop_tick,
             frames,
