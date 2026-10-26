@@ -293,13 +293,16 @@ pub fn build_instruments(
                     }
                 }
 
-                let (l_start, l_len, l_type) = if rep_ev.one_shot || tick_byte_offsets.is_empty() {
+                let last_wlen = sweep_slices
+                    .last()
+                    .map(|s| s.1 as usize)
+                    .unwrap_or(rep_ev.init_len as usize)
+                    .max(4);
+                let (l_start, l_len, l_type) = if rep_ev.one_shot || pcm.len() < last_wlen {
                     (0, 0, 0)
                 } else {
-                    let split_idx = min(tick_byte_offsets.len() - 1, max(1, tick_byte_offsets.len() / 3));
-                    let start = tick_byte_offsets[split_idx] as u32;
-                    let len = (pcm.len() as u32).saturating_sub(start);
-                    (start, len, 1)
+                    let start = (pcm.len() - last_wlen) as u32;
+                    (start, last_wlen as u32, 1)
                 };
 
                 instruments.push(XmInstrumentSpec {
@@ -365,7 +368,11 @@ pub fn compile_xm_bytes(
     let num_channels = voice_order.len();
     let num_frames = simulation.frames.len();
 
-    let mut rows_per_pat = 128;
+    let base_step_ticks = 32 * (simulation.prescale as usize + 1);
+    let mut rows_per_pat = base_step_ticks;
+    while rows_per_pat < 96 {
+        rows_per_pat *= 2;
+    }
     while num_frames.div_ceil(rows_per_pat) > 255 {
         rows_per_pat *= 2;
     }
