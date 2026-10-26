@@ -1144,13 +1144,9 @@ impl<'a> TfmxSimulator<'a> {
 
         let is_any_track_enabled = self.tracks.iter().any(|t| t.enabled);
         if !is_any_track_enabled {
-            if !any_sound {
-                self.silent_ticks += 1;
-                if self.silent_ticks > 25 {
-                    self.song_ended = true;
-                }
-            } else {
-                self.silent_ticks = 0;
+            self.silent_ticks += 1;
+            if self.silent_ticks > 25 {
+                self.song_ended = true;
             }
         }
 
