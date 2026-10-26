@@ -926,7 +926,7 @@ impl<'a> TfmxSimulator<'a> {
                                 v.add_begin_time = b1;
                                 let delta = s16(((b2 as u16) << 8) | (b3 as u16));
                                 v.add_begin_delta = delta;
-                                v.beg_addr = ((v.beg_addr as i32 + delta as i32) & 0xFFFFFF) as u32;
+                                v.beg_addr = (v.beg_addr as i32 + delta as i32).max(0) as u32;
                                 if let Some(id) = v.active_event_id {
                                     self.events[id].has_add_begin_or_len = true;
                                 }
@@ -1013,6 +1013,9 @@ impl<'a> TfmxSimulator<'a> {
                                 }
                                 v.beg_addr = 0;
                                 v.cur_len_words = 1;
+                                v.add_begin_reset = 0;
+                                v.add_begin_time = 0;
+                                v.add_begin_delta = 0;
                             }
                             0x1A => {
                                 // WaitOnDMA
@@ -1133,7 +1136,7 @@ impl<'a> TfmxSimulator<'a> {
 
             // Per-tick add-begin update
             if v.add_begin_reset > 0 && !v.triggered_this_tick {
-                v.beg_addr = ((v.beg_addr as i32 + v.add_begin_delta as i32) & 0xFFFFFF) as u32;
+                v.beg_addr = (v.beg_addr as i32 + v.add_begin_delta as i32).max(0) as u32;
                 v.add_begin_time = v.add_begin_time.saturating_sub(1);
                 if v.add_begin_time == 0 {
                     v.add_begin_time = v.add_begin_reset;
@@ -1149,12 +1152,14 @@ impl<'a> TfmxSimulator<'a> {
                         None
                     };
                     let v = &self.voices[v_idx];
-                    let slice = (v.beg_addr, ((v.cur_len_words as u32) * 2).max(4), v.curr_period);
-                    let ev = &mut self.events[ev_id];
-                    if let Some(f) = sid_frame {
-                        ev.sid_frames.push(f);
+                    if !(self.events[ev_id].one_shot && v.beg_addr == 0) {
+                        let slice = (v.beg_addr, ((v.cur_len_words as u32) * 2).max(4), v.curr_period);
+                        let ev = &mut self.events[ev_id];
+                        if let Some(f) = sid_frame {
+                            ev.sid_frames.push(f);
+                        }
+                        ev.tick_slices.push(slice);
                     }
-                    ev.tick_slices.push(slice);
                 }
             }
         }

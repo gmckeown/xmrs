@@ -200,6 +200,7 @@ pub fn build_instruments(
             };
             let idx = *key_to_instr_idx.entry(full_key).or_insert_with(|| {
                 let rep_ev = longest_dyn.get(&base_key).copied().unwrap_or(ev);
+
                 let ref_per = rep_ev.init_period.clamp(113, 856) as f64;
                 let bytes_per_tick = round_usize(paula_clocks_per_tick / ref_per).max(32);
 
@@ -244,6 +245,27 @@ pub fn build_instruments(
             };
             let idx = *key_to_instr_idx.entry(full_key).or_insert_with(|| {
                 let rep_ev = longest_dyn.get(&base_key).copied().unwrap_or(ev);
+
+                // Check if this is a one-shot streaming sample (e.g. speech)
+                // where AddBegin sweeps through a long contiguous buffer rather than looping a short wavetable.
+                let valid_slices: Vec<_> = rep_ev.tick_slices.iter().filter(|s| s.0 > 0).copied().collect();
+                let min_addr = valid_slices.iter().map(|s| s.0).min().unwrap_or(rep_ev.init_beg).min(rep_ev.init_beg);
+                let max_end = valid_slices.iter().map(|s| s.0 + s.1).max().unwrap_or(rep_ev.init_beg + rep_ev.init_len);
+                let total_span = max_end.saturating_sub(min_addr);
+
+                if rep_ev.one_shot && total_span > rep_ev.init_len {
+                    let pcm = extract_safe_slice(smpl_bytes, min_addr as usize, total_span as usize);
+                    instruments.push(XmInstrumentSpec {
+                        name: format!("PCM_M{:02}_{:05x}", ev.macro_num, min_addr),
+                        pcm,
+                        loop_start: 0,
+                        loop_len: 0,
+                        loop_type: 0,
+                        panning: pan,
+                    });
+                    return instruments.len();
+                }
+
                 let ref_per = rep_ev.init_period.clamp(113, 856) as f64;
                 let bytes_per_tick = round_usize(paula_clocks_per_tick / ref_per).max(32);
 
