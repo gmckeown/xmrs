@@ -406,6 +406,9 @@ pub fn compile_xm_bytes(
     let mut has_live_voice = vec![false; num_channels];
     let mut prev_target_per = vec![428u16; num_channels];
 
+    let default_bpm = round_usize(simulation.tick_rate_hz * 2.5).clamp(32, 255) as u16;
+    let mut cur_bpm = default_bpm;
+
     let mut pattern_blobs = Vec::new();
     let mut frame_idx = 0;
 
@@ -421,6 +424,11 @@ pub fn compile_xm_bytes(
             } else {
                 (None, 0)
             };
+
+            let target_bpm = fr.map(|f| f.bpm).unwrap_or(cur_bpm);
+            let need_bpm = target_bpm != cur_bpm || t_idx == 0 || t_idx == simulation.loop_tick;
+
+            let mut row_cells: Vec<(u8, u8, u8, u8, u8)> = Vec::with_capacity(num_channels);
 
             for ch in 0..num_channels {
                 let v_idx = voice_order[ch];
@@ -485,6 +493,28 @@ pub fn compile_xm_bytes(
                     }
                 }
 
+                row_cells.push((note_byte, instr_byte, vol_byte, eff_type, eff_param));
+            }
+
+            if need_bpm {
+                let mut placed = false;
+                for cell in &mut row_cells {
+                    if cell.3 == 0 {
+                        cell.3 = 0x0F;
+                        cell.4 = target_bpm as u8;
+                        cur_bpm = target_bpm;
+                        placed = true;
+                        break;
+                    }
+                }
+                if !placed && !row_cells.is_empty() {
+                    row_cells[0].3 = 0x0F;
+                    row_cells[0].4 = target_bpm as u8;
+                    cur_bpm = target_bpm;
+                }
+            }
+
+            for (note_byte, instr_byte, vol_byte, eff_type, eff_param) in row_cells {
                 packed_cells.extend_from_slice(&pack_xm_slot(note_byte, instr_byte, vol_byte, eff_type, eff_param));
             }
         }

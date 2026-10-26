@@ -205,6 +205,7 @@ impl VoiceState {
 pub struct TfmxTickFrame {
     pub tick: usize,
     pub voices: [VoiceTickSnapshot; 8],
+    pub bpm: u16,
 }
 
 /// Complete simulation result for a subsong.
@@ -309,6 +310,12 @@ impl<'a> TfmxSimulator<'a> {
             let e_clocks = (14318 + ((self.speed_finetune as i32) << 7)).max(4096);
             50.0 * 14318.0 / (e_clocks as f64)
         }
+    }
+
+    #[inline]
+    pub fn current_bpm(&self) -> u16 {
+        let rate = self.tick_rate_hz();
+        ((rate * 2.5 + 0.5) as u16).clamp(32, 255)
     }
 
     fn start_dma_event(&mut self, v_idx: usize) {
@@ -1157,6 +1164,7 @@ impl<'a> TfmxSimulator<'a> {
         Some(TfmxTickFrame {
             tick: tick_idx,
             voices: snapshots,
+            bpm: self.current_bpm(),
         })
     }
 
