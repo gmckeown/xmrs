@@ -1106,14 +1106,17 @@ impl<'a> TfmxSimulator<'a> {
             }
         }
 
-        // Master fade update
-        if self.fade_dir != 0 {
-            self.fade_timer = self.fade_timer.saturating_sub(1);
-            if self.fade_timer == 0 {
-                self.fade_timer = self.fade_slope;
-                self.master_vol = (self.master_vol as i16 + self.fade_dir as i16).clamp(0, 0x40) as u8;
-                if self.master_vol == self.fade_target {
-                    self.fade_dir = 0;
+        // Master fade update (TFMX executes fade modulation once per voice)
+        let num_fade_steps = if self.is_7v { 7 } else { 4 };
+        for _ in 0..num_fade_steps {
+            if self.fade_dir != 0 {
+                self.fade_timer = self.fade_timer.saturating_sub(1);
+                if self.fade_timer == 0 {
+                    self.fade_timer = self.fade_slope;
+                    self.master_vol = (self.master_vol as i16 + self.fade_dir as i16).clamp(0, 0x40) as u8;
+                    if self.master_vol == self.fade_target {
+                        self.fade_dir = 0;
+                    }
                 }
             }
         }
