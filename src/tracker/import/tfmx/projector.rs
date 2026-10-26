@@ -234,7 +234,7 @@ pub fn build_instruments(
                 instruments.len()
             });
             ev_to_instr_idx.insert((v_idx, ev.id), idx);
-        } else if ev.has_add_begin_or_len {
+        } else if ev.has_add_begin_or_len || longest_dyn.contains_key(&(ev.macro_num, ev.init_beg, ev.init_len)) {
             let base_key = (ev.macro_num, ev.init_beg, ev.init_len);
             let full_key = InstrumentKey::Wavetable {
                 macro_num: base_key.0,
@@ -252,7 +252,8 @@ pub fn build_instruments(
                 let slices = &rep_ev.tick_slices;
                 let mut start_tick = 0;
 
-                if rep_ev.has_wait_dma {
+                let has_attack = rep_ev.has_wait_dma || rep_ev.init_len > 256;
+                if has_attack {
                     let att = extract_safe_slice(smpl_bytes, rep_ev.init_beg as usize, rep_ev.init_len as usize);
                     attack_len = att.len();
                     pcm.extend_from_slice(&att);
