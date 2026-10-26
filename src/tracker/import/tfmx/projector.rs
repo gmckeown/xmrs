@@ -257,8 +257,27 @@ pub fn build_instruments(
                     let att = extract_safe_slice(smpl_bytes, rep_ev.init_beg as usize, rep_ev.init_len as usize);
                     attack_len = att.len();
                     pcm.extend_from_slice(&att);
-                    let wait_ticks = round_usize((rep_ev.init_len as f64 * ref_per) / paula_clocks_per_tick).max(1);
-                    start_tick = min(slices.len().saturating_sub(1), wait_ticks);
+                    let mut loop_idx = 0;
+                    while loop_idx < slices.len()
+                        && (slices[loop_idx].0 == rep_ev.init_beg || slices[loop_idx].1 == rep_ev.init_len)
+                    {
+                        loop_idx += 1;
+                    }
+                    if loop_idx < slices.len() {
+                        let (loop_addr, loop_len, _) = slices[loop_idx];
+                        let mut sweep_idx = loop_idx;
+                        while sweep_idx < slices.len()
+                            && slices[sweep_idx].0 == loop_addr
+                            && slices[sweep_idx].1 == loop_len
+                        {
+                            sweep_idx += 1;
+                        }
+                        start_tick = if sweep_idx < slices.len() {
+                            sweep_idx
+                        } else {
+                            loop_idx
+                        };
+                    }
                 }
 
                 let end_tick = min(slices.len(), start_tick + 80);
