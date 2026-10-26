@@ -132,26 +132,37 @@ impl TfmxModule {
         }
 
         // Pointers at 0x1D0..0x1DC
-        let mut ts_ptr = reader.u32_be(0x1D0)? as usize;
-        let mut pat_ptr = reader.u32_be(0x1D4)? as usize;
-        let mut mac_ptr = reader.u32_be(0x1D8)? as usize;
+        let o1 = reader.u32_be(0x1D0)? as usize;
+        let o2 = reader.u32_be(0x1D4)? as usize;
+        let o3 = reader.u32_be(0x1D8)? as usize;
 
-        if ts_ptr == 0 {
-            ts_ptr = 0x200;
-        }
-        if pat_ptr == 0 {
-            pat_ptr = 0x400;
-        }
-        if mac_ptr == 0 {
-            mac_ptr = 0x600;
-        }
+        let (ts_ptr, pat_ptr, mac_ptr, is_uncompressed) = if (o1 | o2 | o3) == 0 {
+            (0x800, 0x400, 0x600, true)
+        } else {
+            (o1, o2, o3, false)
+        };
 
         if ts_ptr > mdat.len() || pat_ptr > mdat.len() || mac_ptr > mdat.len() {
             return Err(ImportError::UnexpectedEof);
         }
 
-        // Parse tracksteps (from ts_ptr up to pat_ptr, 16 bytes per step)
-        let ts_bytes = pat_ptr.saturating_sub(ts_ptr);
+        let (num_pats, num_macs, ts_end) = if is_uncompressed {
+            let num_pats = 128.min(mdat.len().saturating_sub(pat_ptr) / 4);
+            let num_macs = 128.min(mdat.len().saturating_sub(mac_ptr) / 4);
+            let p0 = if mdat.len() >= pat_ptr + 4 {
+                reader.u32_be(pat_ptr)? as usize
+            } else {
+                ts_ptr
+            };
+            (num_pats, num_macs, p0.min(mdat.len()))
+        } else {
+            let num_pats = mac_ptr.saturating_sub(pat_ptr) / 4;
+            let num_macs = mdat.len().saturating_sub(mac_ptr) / 4;
+            (num_pats, num_macs, pat_ptr)
+        };
+
+        // Parse tracksteps (from ts_ptr up to ts_end, 16 bytes per step)
+        let ts_bytes = ts_end.saturating_sub(ts_ptr);
         let num_steps = ts_bytes / 16;
         let mut tracksteps = Vec::with_capacity(num_steps);
         let mut is_7voice = false;
@@ -172,9 +183,7 @@ impl TfmxModule {
             tracksteps.push(step);
         }
 
-        // Parse pattern offsets (from pat_ptr up to mac_ptr, 4 bytes per pointer)
-        let pat_table_len = mac_ptr.saturating_sub(pat_ptr);
-        let num_pats = pat_table_len / 4;
+        // Parse pattern offsets
         let mut pat_offsets = Vec::with_capacity(num_pats);
         for p in 0..num_pats {
             pat_offsets.push(reader.u32_be(pat_ptr + p * 4)?);
@@ -209,9 +218,7 @@ impl TfmxModule {
             });
         }
 
-        // Parse sound macro offsets (from mac_ptr to end of mdat, 4 bytes per pointer)
-        let mac_table_len = mdat.len().saturating_sub(mac_ptr);
-        let num_macs = mac_table_len / 4;
+        // Parse sound macro offsets
         let mut mac_offsets = Vec::with_capacity(num_macs);
         for m in 0..num_macs {
             let off = reader.u32_be(mac_ptr + m * 4)?;
