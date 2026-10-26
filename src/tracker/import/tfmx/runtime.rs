@@ -231,6 +231,7 @@ pub struct TfmxSimulator<'a> {
     curr_pos: u16,
     last_pos: u16,
     prescale: u16,
+    custom_bpm: Option<u16>,
     ts_loop_count: Option<u16>,
     song_ended: bool,
     loop_target_pos: Option<u16>,
@@ -250,6 +251,12 @@ impl<'a> TfmxSimulator<'a> {
         let subsong = module.subsongs.iter().find(|s| s.index == subsong_idx)?;
         let voices = core::array::from_fn(VoiceState::new);
 
+        let (prescale, custom_bpm) = if subsong.tempo >= 0x10 {
+            (5, Some(subsong.tempo))
+        } else {
+            (subsong.tempo, None)
+        };
+
         let mut sim = Self {
             module,
             subsong_idx,
@@ -259,7 +266,8 @@ impl<'a> TfmxSimulator<'a> {
             step_first_tick: alloc::collections::BTreeMap::new(),
             curr_pos: subsong.start_pos,
             last_pos: subsong.end_pos,
-            prescale: subsong.tempo,
+            prescale,
+            custom_bpm,
             ts_loop_count: None,
             song_ended: false,
             loop_target_pos: None,
@@ -306,6 +314,9 @@ impl<'a> TfmxSimulator<'a> {
             let x = (self.speed_finetune as i32).max(-32);
             let len_words = 200 + 2 * x;
             3546895.0 / (len_words as f64 * 358.0)
+        } else if let Some(bpm) = self.custom_bpm {
+            let cia_timer = (1790456 / (bpm as u32)).max(1);
+            (3546895.0 / 5.0) / (cia_timer as f64)
         } else {
             let e_clocks = (14318 + ((self.speed_finetune as i32) << 7)).max(4096);
             50.0 * 14318.0 / (e_clocks as f64)
@@ -431,6 +442,14 @@ impl<'a> TfmxSimulator<'a> {
                     }
                     2 => {
                         self.prescale = step.words[2] & 0xFF;
+                        let w3 = step.words[3] as i16;
+                        if w3 >= 0 {
+                            let bpm = (w3 as u16) & 0x1FF;
+                            if bpm > 0 {
+                                let bpm = if bpm < 32 { 125 } else { bpm };
+                                self.custom_bpm = Some(bpm);
+                            }
+                        }
                         self.curr_pos += 1;
                     }
                     3 => {

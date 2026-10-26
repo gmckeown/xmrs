@@ -126,7 +126,7 @@ impl TfmxModule {
                     index: i,
                     start_pos: start,
                     end_pos: end,
-                    tempo: if tempo >= 0x10 { 4 } else { tempo },
+                    tempo,
                 });
             }
         }
