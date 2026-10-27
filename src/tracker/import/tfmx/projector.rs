@@ -275,7 +275,8 @@ pub fn build_instruments(
                 let slices = &rep_ev.tick_slices;
                 let mut start_tick = 0;
 
-                let has_attack = rep_ev.has_wait_dma || rep_ev.init_len > 256;
+                let has_attack = rep_ev.has_wait_dma
+                    || (rep_ev.init_len > 256 && slices.iter().any(|s| s.1 < rep_ev.init_len));
                 if has_attack {
                     let att = extract_safe_slice(smpl_bytes, rep_ev.init_beg as usize, rep_ev.init_len as usize);
                     attack_len = att.len();
@@ -303,7 +304,8 @@ pub fn build_instruments(
                     }
                 }
 
-                let end_tick = min(slices.len(), start_tick + 80);
+                let max_sweep_ticks = if has_attack { 80 } else { 256 };
+                let end_tick = min(slices.len(), start_tick + max_sweep_ticks);
                 let sweep_slices = if start_tick < end_tick {
                     &slices[start_tick..end_tick]
                 } else {
@@ -318,20 +320,31 @@ pub fn build_instruments(
                     pcm.extend_from_slice(&wave);
                     tick_byte_offsets.push(cur_bytes);
                 } else {
-                    for &(b_addr, b_len, _per) in sweep_slices {
+                    let mut avail_bytes = 0.0f64;
+                    for &(b_addr, b_len, per) in sweep_slices {
                         tick_byte_offsets.push(cur_bytes);
-                        let wave = extract_safe_slice(smpl_bytes, b_addr as usize, b_len as usize);
-                        let wlen = wave.len().max(4);
-                        if wlen >= bytes_per_tick {
-                            let chunk = &wave[..max(bytes_per_tick, wlen).min(wave.len())];
-                            pcm.extend_from_slice(chunk);
-                            cur_bytes += chunk.len();
+                        let tick_per = per.clamp(64, 1710) as f64;
+                        let tick_need = (paula_clocks_per_tick / tick_per).max(32.0);
+                        if avail_bytes >= tick_need {
+                            avail_bytes -= tick_need;
                         } else {
-                            let reps = round_usize((bytes_per_tick as f64) / (wlen as f64)).max(1);
-                            for _ in 0..reps {
-                                pcm.extend_from_slice(&wave);
+                            let wave = extract_safe_slice(smpl_bytes, b_addr as usize, b_len as usize);
+                            let wlen = wave.len().max(4);
+                            if wlen >= bytes_per_tick {
+                                while avail_bytes < tick_need {
+                                    pcm.extend_from_slice(&wave);
+                                    cur_bytes += wave.len();
+                                    avail_bytes += wlen as f64;
+                                }
+                                avail_bytes -= tick_need;
+                            } else {
+                                let reps = round_usize(tick_need / (wlen as f64)).max(1);
+                                for _ in 0..reps {
+                                    pcm.extend_from_slice(&wave);
+                                }
+                                cur_bytes += reps * wave.len();
+                                avail_bytes = 0.0;
                             }
-                            cur_bytes += reps * wave.len();
                         }
                     }
                 }
