@@ -96,6 +96,7 @@ pub struct VoiceState {
     pub saved_step: usize,
     pub new_style_macro: bool,
     pub extra_wait: bool,
+    pub delayed_dma_off: bool,
     pub branch_if_same: bool,
     pub rnd_mask: u8,
     pub key_up: bool,
@@ -159,6 +160,7 @@ impl VoiceState {
             saved_step: 0,
             new_style_macro: false,
             extra_wait: true,
+            delayed_dma_off: false,
             branch_if_same: false,
             rnd_mask: 0,
             key_up: true,
@@ -371,7 +373,7 @@ impl<'a> TfmxSimulator<'a> {
             loop_offset: None,
             one_shot: false,
             has_sid: v.sid_mode,
-            has_add_begin_or_len: false,
+            has_add_begin_or_len: v.add_begin_reset > 0,
             has_wait_dma: false,
             sid_frames: Vec::new(),
             tick_slices: Vec::new(),
@@ -631,6 +633,9 @@ impl<'a> TfmxSimulator<'a> {
                                 v.rel_vol = vol;
                                 v.finetune = if b0 < 0x7F && !no_detune { s8(b3) } else { 0 };
                                 v.key_up = false;
+                                if mac != v.macro_num {
+                                    v.branch_if_same = false;
+                                }
                                 v.macro_num = mac;
                                 v.macro_step = 0;
                                 v.macro_wait = 0;
@@ -638,7 +643,6 @@ impl<'a> TfmxSimulator<'a> {
                                 v.macro_running = true;
                                 v.new_style_macro = false;
                                 v.extra_wait = true;
-                                v.branch_if_same = false;
                                 if b0 >= 0x7F {
                                     self.tracks[t].wait = b3;
                                     break;
@@ -682,6 +686,7 @@ impl<'a> TfmxSimulator<'a> {
                                 break;
                             }
                             0xF4 | 0xFE => {
+                                self.tracks[t].step -= 1;
                                 self.tracks[t].enabled = false;
                                 break;
                             }
@@ -721,6 +726,7 @@ impl<'a> TfmxSimulator<'a> {
                             0xFB => {
                                 let target_t = (b2 & 0x07) as usize;
                                 self.tracks[target_t].enabled = true;
+                                self.tracks[target_t].has_valid_pat = true;
                                 self.tracks[target_t].pat_num = b1;
                                 self.tracks[target_t].transpose = s8(b3);
                                 self.tracks[target_t].step = 0;
@@ -750,6 +756,10 @@ impl<'a> TfmxSimulator<'a> {
 
         // 2. Run sound macros & per-tick modulations
         for v_idx in 0..8 {
+            if self.voices[v_idx].delayed_dma_off {
+                self.voices[v_idx].delayed_dma_off = false;
+                self.voices[v_idx].dma_on = false;
+            }
             if self.voices[v_idx].macro_running {
                 if self.voices[v_idx].macro_wait > 0 {
                     self.voices[v_idx].macro_wait -= 1;
@@ -772,9 +782,14 @@ impl<'a> TfmxSimulator<'a> {
                             0x00 => {
                                 // DMAoff + Reset
                                 let v = &mut self.voices[v_idx];
-                                v.dma_on = false;
                                 v.new_style_macro = true;
-                                v.extra_wait = b1 == 0;
+                                if b1 != 0 {
+                                    v.extra_wait = false;
+                                    v.delayed_dma_off = true;
+                                } else {
+                                    v.dma_on = false;
+                                    v.extra_wait = true;
+                                }
                                 v.env_reset = 0;
                                 v.env_time = 0;
                                 v.env_rate = 0;
@@ -791,10 +806,13 @@ impl<'a> TfmxSimulator<'a> {
                                 v.sid_target_len = 0;
                                 if b2 == 0 {
                                     if b3 != 0 {
-                                        v.cur_vol = (v.rel_vol as u16 * 3 + b3 as u16).min(0x40) as u8;
+                                        v.cur_vol = (v.rel_vol as i16 * 3 + s8(b3) as i16).clamp(0, 0x40) as u8;
                                     }
                                 } else {
                                     v.cur_vol = b3.min(0x40);
+                                }
+                                if !v.extra_wait {
+                                    break;
                                 }
                             }
                             0x01 => {
@@ -865,7 +883,11 @@ impl<'a> TfmxSimulator<'a> {
                                     }
                                 }
                                 v.macro_wait = ((b2 as usize) << 8) | (b3 as usize);
-                                break;
+                                if v.extra_wait || self.module.variant.set_note_v1 {
+                                    break;
+                                } else {
+                                    v.extra_wait = true;
+                                }
                             }
                             0x05 => {
                                 // Loop
@@ -925,7 +947,7 @@ impl<'a> TfmxSimulator<'a> {
                                         self.events[id].init_period = v.curr_period;
                                     }
                                 }
-                                if self.voices[v_idx].extra_wait {
+                                if self.voices[v_idx].extra_wait || set_note_v1 {
                                     break;
                                 } else {
                                     self.voices[v_idx].extra_wait = true;
@@ -1004,7 +1026,7 @@ impl<'a> TfmxSimulator<'a> {
                                 }
                                 let v = &mut self.voices[v_idx];
                                 if op == 0x0D {
-                                    let vol = (v.rel_vol as u16 * 3 + b3 as u16).min(0x40) as u8;
+                                    let vol = (v.rel_vol as i16 * 3 + s8(b3) as i16).clamp(0, 0x40) as u8;
                                     v.cur_vol = vol;
                                 } else {
                                     v.cur_vol = b3.min(0x40);
@@ -1041,8 +1063,14 @@ impl<'a> TfmxSimulator<'a> {
                                     v.sid_src = (v.sid_src as i32 + delta as i32).max(0) as u32;
                                 } else {
                                     v.beg_addr = (v.beg_addr as i32 + delta as i32).max(0) as u32;
-                                    if let Some(id) = v.active_event_id {
-                                        self.events[id].has_add_begin_or_len = true;
+                                    if v.dma_on {
+                                        if let Some(id) = v.active_event_id {
+                                            if v.triggered_this_tick && cnt == 0 {
+                                                self.events[id].init_beg = v.beg_addr;
+                                            } else {
+                                                self.events[id].has_add_begin_or_len = true;
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -1055,22 +1083,36 @@ impl<'a> TfmxSimulator<'a> {
                                 v.cur_len_words = new_len;
                                 if v.sid_mode {
                                     v.sid_src_mask = new_len;
-                                } else if let Some(id) = v.active_event_id {
-                                    self.events[id].has_add_begin_or_len = true;
+                                } else if v.dma_on {
+                                    if let Some(id) = v.active_event_id {
+                                        if v.triggered_this_tick {
+                                            self.events[id].init_len = ((new_len as u32) * 2).max(4);
+                                        } else {
+                                            self.events[id].has_add_begin_or_len = true;
+                                        }
+                                    }
                                 }
                             }
                             0x13 => {
                                 // DMAoff without reset
                                 let v = &mut self.voices[v_idx];
-                                v.dma_on = false;
                                 v.new_style_macro = true;
-                                v.extra_wait = b1 == 0;
+                                if b1 != 0 {
+                                    v.extra_wait = false;
+                                    v.delayed_dma_off = true;
+                                } else {
+                                    v.dma_on = false;
+                                    v.extra_wait = true;
+                                }
                                 if b2 == 0 {
                                     if b3 != 0 {
-                                        v.cur_vol = (v.rel_vol as u16 * 3 + b3 as u16).min(0x40) as u8;
+                                        v.cur_vol = (v.rel_vol as i16 * 3 + s8(b3) as i16).clamp(0, 0x40) as u8;
                                     }
                                 } else {
                                     v.cur_vol = b3.min(0x40);
+                                }
+                                if !v.extra_wait {
+                                    break;
                                 }
                             }
                             0x14 => {
@@ -1079,7 +1121,9 @@ impl<'a> TfmxSimulator<'a> {
                                 if !v.key_up {
                                     match v.macro_loop {
                                         None => {
-                                            v.macro_loop = Some(b3.wrapping_sub(1) as u16);
+                                            if b3 > 0 {
+                                                v.macro_loop = Some((b3 - 1) as u16);
+                                            }
                                             v.macro_step -= 1;
                                             break;
                                         }
@@ -1202,14 +1246,17 @@ impl<'a> TfmxSimulator<'a> {
                                 tv.rel_vol = vol;
                                 tv.finetune = if no_detune { 0 } else { s8(b3) };
                                 tv.key_up = false;
-                                tv.macro_num = b1 & 0x7F;
+                                let mac = b1 & 0x7F;
+                                if mac != tv.macro_num {
+                                    tv.branch_if_same = false;
+                                }
+                                tv.macro_num = mac;
                                 tv.macro_step = 0;
                                 tv.macro_wait = 0;
                                 tv.macro_loop = None;
                                 tv.macro_running = true;
                                 tv.new_style_macro = false;
                                 tv.extra_wait = true;
-                                tv.branch_if_same = false;
                             }
                             0x22 => {
                                 let v = &mut self.voices[v_idx];
