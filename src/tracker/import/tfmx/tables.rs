@@ -33,3 +33,19 @@ pub fn note_to_period(note: i16) -> u16 {
         PERIODS[((note & 0x3F) + 13) as usize]
     }
 }
+
+/// Computes IEEE 802.3 CRC-32 over `data` (matching `CRCLight::get` in `libtfmxaudiodecoder`).
+pub fn crc32_ieee(data: &[u8]) -> u32 {
+    let mut crc = 0xFFFF_FFFFu32;
+    for &b in data {
+        crc ^= b as u32;
+        for _ in 0..8 {
+            if (crc & 1) != 0 {
+                crc = (crc >> 1) ^ 0xEDB8_8320;
+            } else {
+                crc >>= 1;
+            }
+        }
+    }
+    !crc
+}

@@ -96,6 +96,8 @@ pub struct VoiceState {
     pub saved_step: usize,
     pub new_style_macro: bool,
     pub extra_wait: bool,
+    pub branch_if_same: bool,
+    pub rnd_mask: u8,
     pub key_up: bool,
     pub curr_note: u8,
     pub prev_note: u8,
@@ -157,6 +159,8 @@ impl VoiceState {
             saved_step: 0,
             new_style_macro: false,
             extra_wait: true,
+            branch_if_same: false,
+            rnd_mask: 0,
             key_up: true,
             curr_note: 0,
             prev_note: 0,
@@ -255,11 +259,18 @@ pub struct TfmxSimulator<'a> {
 
 impl<'a> TfmxSimulator<'a> {
     pub fn new(module: &'a TfmxModule, subsong_idx: usize) -> Option<Self> {
-        let subsong = module.subsongs.iter().find(|s| s.index == subsong_idx)?;
+        let subsong = module
+            .subsongs
+            .iter()
+            .find(|s| s.index == subsong_idx)
+            .or_else(|| module.subsongs.get(subsong_idx))?;
         let voices = core::array::from_fn(VoiceState::new);
 
         let (prescale, custom_bpm) = if subsong.tempo >= 0x10 {
-            (0, Some(subsong.tempo))
+            (
+                if module.variant.bpm_speed_5 { 5 } else { 0 },
+                Some(subsong.tempo),
+            )
         } else {
             (subsong.tempo, None)
         };
@@ -610,14 +621,15 @@ impl<'a> TfmxSimulator<'a> {
                         match b0 {
                             0x00..=0xBF => {
                                 let note = ((b0 as i16 + self.tracks[t].transpose as i16) & 0x3F) as u8;
-                                let mac = b1;
+                                let mac = b1 & 0x7F;
                                 let vol = (b2 >> 4) & 0x0F;
                                 let v_idx = self.voice_index(b2);
+                                let no_detune = self.module.variant.no_note_detune;
                                 let v = &mut self.voices[v_idx];
                                 v.prev_note = v.curr_note;
                                 v.curr_note = note;
                                 v.rel_vol = vol;
-                                v.finetune = if b0 < 0x7F { s8(b3) } else { 0 };
+                                v.finetune = if b0 < 0x7F && !no_detune { s8(b3) } else { 0 };
                                 v.key_up = false;
                                 v.macro_num = mac;
                                 v.macro_step = 0;
@@ -626,6 +638,7 @@ impl<'a> TfmxSimulator<'a> {
                                 v.macro_running = true;
                                 v.new_style_macro = false;
                                 v.extra_wait = true;
+                                v.branch_if_same = false;
                                 if b0 >= 0x7F {
                                     self.tracks[t].wait = b3;
                                     break;
@@ -865,9 +878,10 @@ impl<'a> TfmxSimulator<'a> {
                             0x06 => {
                                 // Cont
                                 let v = &mut self.voices[v_idx];
-                                v.macro_num = b1;
+                                v.macro_num = b1 & 0x7F;
                                 v.macro_step = ((b2 as usize) << 8) | (b3 as usize);
                                 v.macro_loop = None;
+                                v.branch_if_same = false;
                             }
                             0x07 => {
                                 // Stop
@@ -876,6 +890,8 @@ impl<'a> TfmxSimulator<'a> {
                             }
                             0x08 | 0x09 | 0x1F => {
                                 // AddNote, SetNote, LastAddNote
+                                let set_note_v1 = self.module.variant.set_note_v1;
+                                let ft_unscaled = self.module.variant.finetune_unscaled;
                                 let v = &mut self.voices[v_idx];
                                 let n = match op {
                                     0x08 => v.curr_note as i16 + s8(b1) as i16,
@@ -883,9 +899,15 @@ impl<'a> TfmxSimulator<'a> {
                                     _ => v.prev_note as i16 + s8(b1) as i16,
                                 };
                                 let mut p = note_to_period(n);
-                                let ft = s16(((b2 as u16) << 8) | (b3 as u16))
-                                    + (v.finetune as i16);
-                                if ft != 0 {
+                                let voice_ft = if op == 0x09 && set_note_v1 {
+                                    0
+                                } else {
+                                    v.finetune as i16
+                                };
+                                let ft = s16(((b2 as u16) << 8) | (b3 as u16)) + voice_ft;
+                                if ft_unscaled {
+                                    p = ((p as i16).wrapping_add(ft).max(64)) as u16;
+                                } else if ft != 0 {
                                     let delta = ((p as i32 * ft as i32) >> 8) as i16;
                                     p = ((p as i16 + delta).max(64)) as u16;
                                 }
@@ -927,11 +949,16 @@ impl<'a> TfmxSimulator<'a> {
                             }
                             0x0B => {
                                 // Portamento
+                                let porta_override = self.module.variant.porta_override;
                                 let v = &mut self.voices[v_idx];
                                 v.porta_reset = b1;
                                 v.porta_time = 1;
-                                if v.porta_rate == 0 {
-                                    v.porta_period = v.base_period;
+                                if porta_override || v.porta_rate == 0 {
+                                    v.porta_period = if porta_override {
+                                        v.dest_period
+                                    } else {
+                                        v.base_period
+                                    };
                                 }
                                 v.porta_rate = ((b2 as u16) << 8) | (b3 as u16);
                                 if v.porta_rate == 0 {
@@ -940,8 +967,9 @@ impl<'a> TfmxSimulator<'a> {
                             }
                             0x0C => {
                                 // Vibrato
+                                let mask_time = self.module.variant.vibrato_time_mask;
                                 let v = &mut self.voices[v_idx];
-                                v.vib_reset = b1;
+                                v.vib_reset = if mask_time { b1 & 0xFE } else { b1 };
                                 v.vib_time = b1 >> 1;
                                 v.vib_width = s8(b3);
                                 if v.porta_rate == 0 {
@@ -951,11 +979,14 @@ impl<'a> TfmxSimulator<'a> {
                             }
                             0x0D | 0x0E => {
                                 // AddVolume / SetVolume
+                                let ft_unscaled = self.module.variant.finetune_unscaled;
                                 let v = &mut self.voices[v_idx];
                                 if b2 == 0xFE {
                                     let n = v.curr_note as i16 + s8(b1) as i16;
                                     let mut p = note_to_period(n);
-                                    if v.finetune != 0 {
+                                    if ft_unscaled {
+                                        p = ((p as i16).wrapping_add(v.finetune as i16).max(64)) as u16;
+                                    } else if v.finetune != 0 {
                                         let delta =
                                             ((p as i32 * v.finetune as i32) >> 8) as i16;
                                         p = ((p as i16 + delta).max(64)) as u16;
@@ -999,9 +1030,11 @@ impl<'a> TfmxSimulator<'a> {
                             }
                             0x11 => {
                                 // AddBegin
+                                let no_cnt = self.module.variant.no_add_begin_count;
                                 let v = &mut self.voices[v_idx];
-                                v.add_begin_reset = b1;
-                                v.add_begin_time = b1;
+                                let cnt = if no_cnt { 0 } else { b1 };
+                                v.add_begin_reset = cnt;
+                                v.add_begin_time = cnt;
                                 let delta = s16(((b2 as u16) << 8) | (b3 as u16));
                                 v.add_begin_delta = delta;
                                 if v.sid_mode {
@@ -1066,8 +1099,9 @@ impl<'a> TfmxSimulator<'a> {
                                 let v = &mut self.voices[v_idx];
                                 v.saved_macro = v.macro_num;
                                 v.saved_step = v.macro_step;
-                                v.macro_num = b1;
+                                v.macro_num = b1 & 0x7F;
                                 v.macro_step = ((b2 as usize) << 8) | (b3 as usize);
+                                v.macro_loop = None;
                             }
                             0x16 => {
                                 // Return
@@ -1145,6 +1179,38 @@ impl<'a> TfmxSimulator<'a> {
                                     v.macro_step = ((b2 as usize) << 8) | (b3 as usize);
                                 }
                             }
+                            0x1D => {
+                                // SplitVolume: if volume > b1, jump to macro step (b2 << 8) | b3
+                                let v = &mut self.voices[v_idx];
+                                if v.cur_vol > b1 {
+                                    v.macro_step = ((b2 as usize) << 8) | (b3 as usize);
+                                }
+                            }
+                            0x1E => {
+                                // RandomMask
+                                self.voices[v_idx].rnd_mask = b1;
+                            }
+                            0x21 => {
+                                // PlayMacro: trigger macro b1 on channel (b2 & 0x0F) with current note/vol and detune b3
+                                let note = self.voices[v_idx].curr_note;
+                                let vol = self.voices[v_idx].rel_vol;
+                                let target_v = self.voice_index(b2);
+                                let no_detune = self.module.variant.no_note_detune;
+                                let tv = &mut self.voices[target_v];
+                                tv.prev_note = tv.curr_note;
+                                tv.curr_note = note;
+                                tv.rel_vol = vol;
+                                tv.finetune = if no_detune { 0 } else { s8(b3) };
+                                tv.key_up = false;
+                                tv.macro_num = b1 & 0x7F;
+                                tv.macro_step = 0;
+                                tv.macro_wait = 0;
+                                tv.macro_loop = None;
+                                tv.macro_running = true;
+                                tv.new_style_macro = false;
+                                tv.extra_wait = true;
+                                tv.branch_if_same = false;
+                            }
                             0x22 => {
                                 let v = &mut self.voices[v_idx];
                                 v.sid_src = ((b1 as u32) << 16) | ((b2 as u32) << 8) | (b3 as u32);
@@ -1207,6 +1273,20 @@ impl<'a> TfmxSimulator<'a> {
                                     v.sid_op3_delta = 0;
                                 }
                             }
+                            0x30 => {
+                                // BranchIfSame
+                                let v = &mut self.voices[v_idx];
+                                if v.branch_if_same {
+                                    v.macro_step = ((b2 as usize) << 8) | (b3 as usize);
+                                } else {
+                                    v.branch_if_same = true;
+                                }
+                            }
+                            0x31 => {
+                                // KeyUp on channel b2
+                                let target_v = self.voice_index(b2);
+                                self.voices[target_v].key_up = true;
+                            }
                             _ => {}
                         }
                     }
@@ -1232,11 +1312,17 @@ impl<'a> TfmxSimulator<'a> {
             }
 
             // Per-tick portamento update
+            let porta_unscaled = self.module.variant.porta_unscaled;
+            let vib_unscaled = self.module.variant.vibrato_unscaled;
             if v.porta_rate != 0 {
                 v.porta_time = v.porta_time.saturating_sub(1);
                 if v.porta_time == 0 {
                     v.porta_time = v.porta_reset.max(1);
-                    let delta = ((v.porta_period as u32 * v.porta_rate as u32) >> 8).max(1) as u16;
+                    let delta = if porta_unscaled {
+                        v.porta_rate.max(1)
+                    } else {
+                        ((v.porta_period as u32 * v.porta_rate as u32) >> 8).max(1) as u16
+                    };
                     match v.porta_period.cmp(&v.dest_period) {
                         Ordering::Greater => v.porta_period = v.porta_period.saturating_sub(delta).max(v.dest_period),
                         Ordering::Less => v.porta_period = (v.porta_period + delta).min(v.dest_period),
@@ -1258,7 +1344,11 @@ impl<'a> TfmxSimulator<'a> {
                     v.vib_width = -v.vib_width;
                 }
                 if v.porta_rate == 0 {
-                    let delta = ((v.base_period as i32 * v.vib_offset as i32) >> 11) as i16;
+                    let delta = if vib_unscaled {
+                        v.vib_offset
+                    } else {
+                        ((v.base_period as i32 * v.vib_offset as i32) >> 11) as i16
+                    };
                     v.curr_period = ((v.base_period as i16 + delta).max(64)) as u16;
                 } else {
                     v.curr_period = v.base_period.max(64);

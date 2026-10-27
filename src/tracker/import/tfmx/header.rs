@@ -14,8 +14,42 @@ use alloc::vec::Vec;
 pub const MAGIC_TFMX_SONG: &[u8; 10] = b"TFMX-SONG ";
 pub const MAGIC_TFMX_SONG_CR: &[u8; 10] = b"TFMX-SONG\r";
 pub const MAGIC_TFMXSONG: &[u8; 10] = b"tfmxsong\0\0";
+pub const MAGIC_TFMX_V1: &[u8; 5] = b"TFMX ";
 pub const MAGIC_TFHD: &[u8; 4] = b"TFHD";
 pub const MAGIC_TFMX_MOD: &[u8; 8] = b"TFMX-MOD";
+pub const MAGIC_TFMXPAK: &[u8; 8] = b"TFMXPAK ";
+
+/// Player behavioural traits for TFMX v1.x, v2.2, and Pro variants.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct TfmxVariant {
+    pub finetune_unscaled: bool,
+    pub vibrato_unscaled: bool,
+    pub vibrato_time_mask: bool,
+    pub porta_unscaled: bool,
+    pub porta_override: bool,
+    pub no_note_detune: bool,
+    pub set_note_v1: bool,
+    pub bpm_speed_5: bool,
+    pub no_add_begin_count: bool,
+}
+
+impl TfmxVariant {
+    /// Returns the canonical TFMX v1.x / v2.2 trait configuration.
+    #[inline]
+    pub fn tfmx_v1() -> Self {
+        Self {
+            finetune_unscaled: true,
+            vibrato_unscaled: true,
+            vibrato_time_mask: true,
+            porta_unscaled: true,
+            porta_override: true,
+            no_note_detune: false,
+            set_note_v1: true,
+            bpm_speed_5: false,
+            no_add_begin_count: true,
+        }
+    }
+}
 
 /// A single trackstep instruction row (16 bytes = 8 big-endian 16-bit words).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,6 +129,7 @@ pub struct TfmxModule {
     pub title: String,
     pub text_lines: Vec<String>,
     pub is_7voice: bool,
+    pub variant: TfmxVariant,
     pub subsongs: Vec<TfmxSubSong>,
     pub tracksteps: Vec<TfmxTrackStep>,
     pub pat_offsets: Vec<u32>,
@@ -106,10 +141,12 @@ pub struct TfmxModule {
 }
 
 impl TfmxModule {
-    /// Returns `true` if `data` starts with a single-file TFMX container magic (`TFHD` or `TFMX-MOD`).
+    /// Returns `true` if `data` starts with a single-file TFMX container magic (`TFHD`, `TFMX-MOD`, or `TFMXPAK `).
     #[inline]
     pub fn is_single_file_container(data: &[u8]) -> bool {
-        data.starts_with(MAGIC_TFHD) || data.starts_with(MAGIC_TFMX_MOD)
+        data.starts_with(MAGIC_TFHD)
+            || data.starts_with(MAGIC_TFMX_MOD)
+            || data.starts_with(MAGIC_TFMXPAK)
     }
 
     /// Returns `true` if `data` begins with any recognized TFMX header or container signature.
@@ -119,6 +156,7 @@ impl TfmxModule {
             || data.starts_with(MAGIC_TFMX_SONG)
             || data.starts_with(MAGIC_TFMX_SONG_CR)
             || data.starts_with(MAGIC_TFMXSONG)
+            || data.starts_with(MAGIC_TFMX_V1)
             || data.starts_with(b"TFMX_SONG")
             || data.starts_with(b"TFMX_1.5")
     }
